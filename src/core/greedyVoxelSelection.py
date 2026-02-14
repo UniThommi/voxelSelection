@@ -187,6 +187,10 @@ def load_and_binarize(
         (= individual voxels) in each iteration.
     voxel_ids : np.ndarray
         Array of voxel ID strings, mapping column index -> voxel name.
+    centers : np.ndarray, shape (num_valid_voxels, 3)
+        Voxel center coordinates (x, y, z) in mm.
+    layers : np.ndarray of str, shape (num_valid_voxels,)
+        Layer label per valid voxel.
     num_primaries : int
         Total number of primary events (for efficiency calculation).
     """
@@ -198,6 +202,14 @@ def load_and_binarize(
         valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
         valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
         num_voxels = len(valid_keys)
+
+        # Read centers and layers for valid voxels (needed for spacing constraint)
+        centers = np.empty((num_voxels, 3), dtype=np.float64)
+        layers = np.empty(num_voxels, dtype=object)
+        for i, vkey in enumerate(valid_keys):
+            centers[i] = f[f"voxels/{vkey}/center"][:]
+            layer_raw = f[f"voxels/{vkey}/layer"][()]
+            layers[i] = layer_raw.decode() if isinstance(layer_raw, bytes) else str(layer_raw)
         
         # Determine number of NCs from first dataset
         num_ncs = f["target"][valid_keys[0]].shape[0]
@@ -255,13 +267,16 @@ def load_and_binarize(
         
         voxel_ids = np.array(valid_keys)
     
-    return B, voxel_ids, num_primaries
+    return B, voxel_ids, centers, layers, num_primaries
 
 
 def greedy_select(
     B: sparse.csc_matrix,
     N: int,
     M: int,
+    centers: np.ndarray | None = None,
+    layers: np.ndarray | None = None,
+    min_spacing: float = 0.0,
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray]:
     """
@@ -274,6 +289,16 @@ def greedy_select(
     
     where c[i] is the current coverage count of NC i (number of already-
     selected voxels that see NC i).
+    
+    Optional spacing constraint:
+    ----------------------------
+    If min_spacing > 0 and centers/layers are provided, voxels that are
+    within min_spacing (mm) of any already-selected voxel ON THE SAME
+    LAYER are excluded from future selection. Cross-layer pairs are never
+    excluded since PMTs on different surfaces cannot physically overlap.
+    Distance is Euclidean 3D, which is a conservative lower bound on
+    geodesic distance (relevant for wall voxels on the cylinder surface,
+    where curvature radius >> PMT radius makes the approximation tight).
     
     Why only c[i] == M-1?
     ---------------------
@@ -321,6 +346,9 @@ def greedy_select(
     if N > num_voxels:
         raise ValueError(f"N={N} exceeds number of voxels ({num_voxels})")
     
+    enforce_spacing = (min_spacing > 0) and (centers is not None) and (layers is not None)
+    min_spacing_sq = min_spacing ** 2  # precompute for fast distance checks
+    
     # c[i] = number of selected voxels that see NC i.
     # Using int16 is safe: max possible value is N, which is << 32767.
     coverage_counts = np.zeros(num_ncs, dtype=np.int16)
@@ -332,7 +360,8 @@ def greedy_select(
     efficiencies: list[float] = []
     
     if verbose:
-        print(f"\nGreedy selection: N={N}, M={M}")
+        spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
+        print(f"\nGreedy selection: N={N}, M={M}{spacing_str}")
         print(f"{'Step':>4} | {'Voxel':>8} | {'Gain':>8} | "
               f"{'Detected':>10} | {'Efficiency':>10}")
         print("-" * 60)
@@ -401,6 +430,29 @@ def greedy_select(
         available[best_voxel] = False
         selected.append(best_voxel)
         
+        # --- Spacing constraint: exclude nearby voxels on the same layer ---
+        # After selecting a voxel, all candidates on the same detector layer
+        # within min_spacing distance are removed from the candidate pool.
+        # This prevents physical overlap of PMTs (radius 131mm each →
+        # minimum center-to-center distance = 2 * 131 = 262mm).
+        # Cross-layer pairs are never excluded: PMTs on different surfaces
+        # (e.g., pit vs wall) cannot overlap regardless of proximity.
+        if enforce_spacing:
+            selected_center = centers[best_voxel]
+            selected_layer = layers[best_voxel]
+            # Check all remaining candidates on the same layer
+            same_layer_mask = (layers == selected_layer) & available
+            same_layer_indices = np.where(same_layer_mask)[0]
+            if len(same_layer_indices) > 0:
+                # Squared Euclidean distance (avoids sqrt for speed)
+                diff = centers[same_layer_indices] - selected_center
+                dist_sq = np.sum(diff ** 2, axis=1)
+                too_close = same_layer_indices[dist_sq < min_spacing_sq]
+                available[too_close] = False
+                if verbose and len(too_close) > 0:
+                    print(f"       └─ spacing: excluded {len(too_close)} "
+                          f"voxels on layer '{selected_layer}'")
+        
         # Compute cumulative detection efficiency
         num_detected = int(np.sum(coverage_counts >= M))
         efficiency = num_detected / num_ncs
@@ -429,14 +481,23 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("-m", type=int, default=1,
                         help="Hit threshold per voxel "
                              "(minimum hits for a voxel to count as firing).")
+    parser.add_argument("--no-spacing", action="store_true",
+                        help="Disable minimum spacing constraint between "
+                             "selected voxels (default: enforce 2*PMT_RADIUS).")
     parser.add_argument("--output", type=str, default=None,
                         help="Output file for results (npz format). "
-                             "If not specified, prints to stdout only.")
+                             "If not specified, auto-generates from parameters.")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress progress output.")
     
     args = parser.parse_args(argv)
     verbose = not args.quiet
+    min_spacing = 0.0 if args.no_spacing else 2 * PMT_RADIUS
+    
+    # Auto-generate output filename from parameters if not specified
+    if args.output is None:
+        spacing_tag = "nospacing" if args.no_spacing else f"spacing{int(min_spacing)}mm"
+        args.output = f"greedy_N{args.N}_M{args.M}_m{args.m}_{spacing_tag}.npz"
     
     # --- Step 1: Load and binarize ---
     if verbose:
@@ -444,13 +505,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("Greedy Voxel Selection for NC Detection")
         print("=" * 60)
     
-    B, voxel_ids, num_primaries = load_and_binarize(
+    B, voxel_ids, centers, layers, num_primaries = load_and_binarize(
         args.hdf5_file, m=args.m, verbose=verbose,
     )
     
     # --- Step 2: Run greedy selection ---
     selected_cols, efficiencies, coverage_counts = greedy_select(
-        B, N=args.N, M=args.M, verbose=verbose,
+        B, N=args.N, M=args.M,
+        centers=centers, layers=layers, min_spacing=min_spacing,
+        verbose=verbose,
     )
     
     # --- Step 3: Report results ---
@@ -470,21 +533,21 @@ def main(argv: Optional[list[str]] = None) -> None:
                   f"Δeff = {eff_delta:.4%}")
     
     # --- Step 4: Save results ---
-    if args.output:
-        np.savez(
-            args.output,
-            selected_columns=np.array(selected_cols),
-            selected_voxel_ids=selected_voxel_ids,
-            efficiencies=np.array(efficiencies),
-            coverage_counts=coverage_counts,
-            N=args.N,
-            M=args.M,
-            m=args.m,
-            num_ncs=B.shape[0],
-            num_primaries=num_primaries,
-        )
-        if verbose:
-            print(f"\nResults saved to {args.output}")
+    np.savez(
+        args.output,
+        selected_columns=np.array(selected_cols),
+        selected_voxel_ids=selected_voxel_ids,
+        efficiencies=np.array(efficiencies),
+        coverage_counts=coverage_counts,
+        N=args.N,
+        M=args.M,
+        m=args.m,
+        min_spacing=min_spacing,
+        num_ncs=B.shape[0],
+        num_primaries=num_primaries,
+    )
+    if verbose:
+        print(f"\nResults saved to {args.output}")
 
 
 if __name__ == "__main__":
