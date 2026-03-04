@@ -8,6 +8,13 @@ Given a set of neutron captures (NCs) and optical detector voxels,
 select N voxels to maximize the number of NCs detected, where detection
 requires at least M voxels exceeding a hit threshold m.
 
+Two optimization modes:
+  - "nc":         Maximize number of detected NCs (original mode).
+  - "muon-ge77":  Maximize number of Ge77 muons identified via
+                  coincidence detection of W neutron captures within
+                  a time window [1 µs, 200 µs] relative to the muon.
+                  Forces M=1 internally.
+
 Theoretical Background
 ----------------------
 For M=1 this is the classical Maximum k-Coverage Problem (NP-hard).
@@ -15,39 +22,50 @@ The greedy algorithm provides a (1 - 1/e) ≈ 0.632 approximation guarantee
 [Nemhauser, Wolsey & Fisher, "An Analysis of Approximations for Maximizing
 Submodular Set Functions", Math. Programming 14(1), 1978, Theorem 4.3].
 
-For M>1 this is the Partial Set Multi-Cover Problem. Submodularity of the
-objective breaks (marginal gains can increase), so the (1-1/e) guarantee
-does not hold directly. However, the greedy remains the best polynomial-time
-approach, as shown in the framework of concave coverage problems
+For M>1 (nc mode) or W>1 (muon-ge77 mode), this is the Partial Set
+Multi-Cover Problem. Submodularity of the objective breaks, but the greedy
+remains the best polynomial-time approach
 [Barman, Fawzi & Fermé, "Tight Approximation Guarantees for Concave
 Coverage Problems", Math. Programming 201, 2023, Theorem 1.1].
 
 Algorithm
 ---------
-Greedy iteration: In each of N rounds, select the voxel whose addition
-causes the largest increase in the number of detected NCs. A NC contributes
-to the marginal gain of voxel v if and only if:
-  (a) its current coverage count c[i] == M - 1  (one short of threshold)
-  (b) voxel v sees this NC (B[i,v] == 1)
-This is the exact marginal gain of the objective function f(S).
+NC mode:
+    Greedy iteration: select the voxel whose addition causes the largest
+    increase in the number of detected NCs. A NC contributes to the
+    marginal gain of voxel v iff c[i] == M-1 and B[i,v] == 1.
 
-Complexity: O(N * num_voxels * avg_nnz_per_col) per full evaluation.
-With sparse CSC format, each iteration is O(num_voxels * avg_nnz_per_col).
+Muon-Ge77 mode:
+    Greedy iteration: select the voxel whose addition causes the largest
+    increase in the number of detected Ge77 muons. A muon is detected
+    when >= W of its NCs (within [1µs, 200µs]) are individually detected
+    (i.e. seen by >= 1 selected voxel, since M=1).
+    Marginal gain uses SpMV (B^T @ w) as upper bound, followed by exact
+    deduplication over muon IDs for top candidates.
 
 Usage
 -----
-    python greedy_voxel_selection.py <hdf5_file> --N 50 --M 2 --m 1
+    # NC mode (original)
+    python greedyVoxelSelection.py <hdf5_file> -N 50 -M 2 -m 1
+
+    # Muon-Ge77 mode
+    python greedy_voxel_selection.py <hdf5_file> -N 50 -W 4 --optimize muon-ge77
 
 Author: Ferundo (Thesis project, University of Tübingen)
 """
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 import h5py
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 from scipy import sparse
 
@@ -63,6 +81,88 @@ Z_ORIGIN = 20
 Z_OFFSET = -5000
 H_ZYLINDER = 8900 - 1    # h - 1
 Z_BASE_GLOBAL = Z_ORIGIN + Z_OFFSET
+
+# Muon-Ge77 time window (ns)
+MUON_TIME_WINDOW_MIN_NS = 1_000.0    # 1 µs
+MUON_TIME_WINDOW_MAX_NS = 200_000.0  # 200 µs
+
+# Area-dependent hit scaling ratios.
+# When enabled, raw hits are divided by the layer ratio before
+# binarization: hits / ratio >= m. This accounts for differing
+# optical photon collection efficiencies across detector regions.
+AREA_RATIOS: dict[str, float] = {
+    "pit":  2.0731,
+    "bot":  2.3843,
+    "top":  2.2004,
+    "wall": 1.8776,
+}
+
+# ---------------------------------------------------------------------------
+# Detector surface areas (mm²), derived from geometry constants.
+# Matches GeometryConfig in zoneRatioAnalysis.py.
+# ---------------------------------------------------------------------------
+Z_CUT_BOT = Z_BASE_GLOBAL       # = Z_ORIGIN + Z_OFFSET = -4980
+Z_CUT_TOP = Z_CUT_BOT + H_ZYLINDER - 2  # 3917
+WALL_HEIGHT = Z_CUT_TOP - Z_CUT_BOT      # 8897
+
+AREA_SURFACES: dict[str, float] = {
+    "pit":  np.pi * R_PIT**2,
+    "bot":  np.pi * (R_ZYLINDER**2 - R_ZYL_BOT**2),
+    "top":  np.pi * (R_ZYLINDER**2 - R_ZYL_TOP**2),
+    "wall": 2 * np.pi * R_ZYLINDER * WALL_HEIGHT,
+}
+
+
+def compute_per_area_N(
+    N: int,
+    verbose: bool = True,
+) -> dict[str, int]:
+    """
+    Distribute N PMTs across areas proportional to surface area.
+
+    Uses the largest remainder method to ensure sum(N_area) == N exactly.
+
+    Parameters
+    ----------
+    N : int
+        Total number of PMTs to distribute.
+    verbose : bool
+        Print allocation table.
+
+    Returns
+    -------
+    allocation : dict[str, int]
+        Number of PMTs per area.
+    """
+    total_area = sum(AREA_SURFACES.values())
+    # Exact fractional allocation
+    fractions = {area: N * a / total_area for area, a in AREA_SURFACES.items()}
+    # Floor allocation
+    floors = {area: int(np.floor(f)) for area, f in fractions.items()}
+    # Remainders
+    remainders = {area: fractions[area] - floors[area] for area in fractions}
+    # Distribute leftover to areas with largest remainders
+    leftover = N - sum(floors.values())
+    sorted_areas = sorted(remainders, key=lambda a: remainders[a], reverse=True)
+    allocation = dict(floors)
+    for i in range(leftover):
+        allocation[sorted_areas[i]] += 1
+
+    if verbose:
+        print(f"\nPer-area PMT allocation (N={N}):")
+        print(f"  {'Area':<6} {'N_PMTs':>7} {'Fläche (M mm²)':>16} "
+              f"{'Dichte':>14} {'Abw. von Ziel':>14}")
+        print(f"  {'-' * 58}")
+        target_density = N / total_area
+        for area in ["pit", "bot", "top", "wall"]:
+            n_a = allocation[area]
+            a_mm2 = AREA_SURFACES[area]
+            density = n_a / a_mm2 if a_mm2 > 0 else 0.0
+            dev = (density - target_density) / target_density * 100
+            print(f"  {area:<6} {n_a:>7} {a_mm2/1e6:>16.2f} "
+                  f"{density:>14.6e} {dev:>+13.1f}%")
+
+    return allocation
 
 
 def is_valid_pmt_position(
@@ -135,7 +235,6 @@ def get_valid_voxel_mask(
     for col_idx, vkey in enumerate(voxel_keys):
         center = f[f"voxels/{vkey}/center"][:]
         layer_raw = f[f"voxels/{vkey}/layer"][()]
-        # Handle bytes vs str (h5py can return either)
         layer = layer_raw.decode() if isinstance(layer_raw, bytes) else str(layer_raw)
 
         if layer in layer_counts:
@@ -162,29 +261,33 @@ def get_valid_voxel_mask(
 def load_and_binarize(
     filepath: str,
     m: int = 1,
+    apply_area_ratio: bool = False,
     verbose: bool = True,
-) -> tuple[sparse.csc_matrix, np.ndarray, int]:
+) -> tuple[sparse.csc_matrix, np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Load HDF5 data and construct sparse binary matrix B.
-    
+
     B[i, j] = 1 iff voxel j registered >= m hits for NC i.
     Only voxels where a PMT can physically be placed are included.
-    
+
+    If apply_area_ratio is True, raw hits are divided by the layer-
+    dependent ratio before comparison: hits / ratio >= m.
+
     Parameters
     ----------
     filepath : str
         Path to the HDF5 file.
     m : int
         Minimum number of hits per voxel for a NC to count as "seen".
+    apply_area_ratio : bool
+        If True, scale hits by area-dependent ratios before binarization.
     verbose : bool
         Print progress information.
-    
+
     Returns
     -------
     B : sparse.csc_matrix
         Binary (NCs x valid_voxels) matrix in CSC format.
-        CSC is chosen because the greedy algorithm accesses columns
-        (= individual voxels) in each iteration.
     voxel_ids : np.ndarray
         Array of voxel ID strings, mapping column index -> voxel name.
     centers : np.ndarray, shape (num_valid_voxels, 3)
@@ -195,82 +298,261 @@ def load_and_binarize(
         Total number of primary events (for efficiency calculation).
     """
     with h5py.File(filepath, "r") as f:
-        # Get voxel IDs from the target group
-        voxel_keys = sorted(f["target"].keys())
+        voxel_keys = sorted(
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        )
 
         # --- PMT placement filter ---
         valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
         valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
         num_voxels = len(valid_keys)
 
-        # Read centers and layers for valid voxels (needed for spacing constraint)
+        # Read centers and layers for valid voxels
         centers = np.empty((num_voxels, 3), dtype=np.float64)
         layers = np.empty(num_voxels, dtype=object)
         for i, vkey in enumerate(valid_keys):
             centers[i] = f[f"voxels/{vkey}/center"][:]
             layer_raw = f[f"voxels/{vkey}/layer"][()]
             layers[i] = layer_raw.decode() if isinstance(layer_raw, bytes) else str(layer_raw)
-        
-        # Determine number of NCs from first dataset
-        num_ncs = f["target"][valid_keys[0]].shape[0]
+
+        # NEU:
+        # Read target column index and map valid voxel keys to matrix columns
+        target_columns = [c.decode() if isinstance(c, bytes) else str(c)
+                          for c in f["target_columns"][:]]
+        target_col_to_idx = {c: i for i, c in enumerate(target_columns)}
+        valid_col_indices_arr = np.array([target_col_to_idx[k] for k in valid_keys])
+
+        num_ncs = f["target_matrix"].shape[0]
         num_primaries = int(f["primaries"][()])
-        
+
         if verbose:
             print(f"Loading data: {num_ncs} NCs, {num_voxels} valid voxels, "
                   f"{num_primaries} primaries")
             print(f"Binarization threshold m = {m}")
-        
-        # Build sparse matrix column by column.
-        # We collect COO-format data (row_indices, col_indices, values)
-        # then convert to CSC at the end. This is the most memory-efficient
-        # way to construct a sparse matrix from columnar data.
+            if apply_area_ratio:
+                print(f"Area ratio scaling enabled: {AREA_RATIOS}")
+
+        # Precompute per-column area ratios for vectorized binarization
+        if apply_area_ratio:
+            ratio_vec = np.array(
+                [AREA_RATIOS.get(layers[c], 1.0) for c in range(num_voxels)],
+                dtype=np.float32,
+            )
+
+        # Row-block reading — aligned to chunk layout (1000, 9583)
+        BATCH_SIZE = 1000  # matches HDF5 chunk row dimension
         rows_list: list[np.ndarray] = []
         cols_list: list[np.ndarray] = []
-        
-        for col_idx, voxel_key in enumerate(valid_keys):
-            if verbose and col_idx % 1000 == 0:
-                print(f"  Loading voxel {col_idx}/{num_voxels}...", end="\r")
-            
-            hits = f["target"][voxel_key][:]
-            
-            # Binarize: which NCs have >= m hits in this voxel?
-            # This is where the threshold m enters the pipeline.
-            mask = hits >= m
-            nc_indices = np.where(mask)[0]
-            
-            if len(nc_indices) > 0:
-                rows_list.append(nc_indices)
-                cols_list.append(np.full(len(nc_indices), col_idx, dtype=np.int32))
-        
+
+        target_dset = f["target_matrix"]
+        total_batches = (num_ncs - 1) // BATCH_SIZE + 1
+        t_load_start = time.time()
+        t_last_report = t_load_start
+
+        for batch_idx, row_start in enumerate(range(0, num_ncs, BATCH_SIZE)):
+            row_end = min(row_start + BATCH_SIZE, num_ncs)
+
+            # Read full chunk row slice, then extract valid columns in RAM
+            block = target_dset[row_start:row_end, :]     # (batch, 9583)
+            block_valid = block[:, valid_col_indices_arr]  # (batch, num_valid)
+
+            # Vectorized binarization over entire block
+            if apply_area_ratio:
+                mask = (block_valid / ratio_vec) >= m
+            else:
+                mask = block_valid >= m
+
+            nc_idx, col_idx = np.nonzero(mask)
+            if len(nc_idx) > 0:
+                rows_list.append(nc_idx.astype(np.int64) + row_start)
+                cols_list.append(col_idx.astype(np.int32))
+
+            # Progress report every ~5 seconds
+            t_now = time.time()
+            if verbose and (t_now - t_last_report >= 5.0 or batch_idx == total_batches - 1):
+                elapsed = t_now - t_load_start
+                frac = (batch_idx + 1) / total_batches
+                eta = (elapsed / frac - elapsed) if frac > 0.01 else 0.0
+                rows_per_sec = row_end / elapsed if elapsed > 0 else 0.0
+                print(f"  Batch {batch_idx+1}/{total_batches} "
+                      f"({frac:.1%}) | "
+                      f"{rows_per_sec:,.0f} rows/s | "
+                      f"elapsed {elapsed:.1f}s | "
+                      f"ETA {eta:.1f}s", end="\r")
+                t_last_report = t_now
+
+        t_load_elapsed = time.time() - t_load_start
         if verbose:
-            print()  # newline after progress
-        
-        # Concatenate and build sparse matrix
+            print(f"\n  Target matrix loaded and binarized in {t_load_elapsed:.1f}s "
+                  f"({num_ncs / t_load_elapsed:,.0f} rows/s)")
+
         all_rows = np.concatenate(rows_list)
         all_cols = np.concatenate(cols_list)
         all_data = np.ones(len(all_rows), dtype=np.int8)
-        
+
         B = sparse.coo_matrix(
             (all_data, (all_rows, all_cols)),
             shape=(num_ncs, num_voxels),
             dtype=np.int8,
         ).tocsc()
-        
+
         nnz = B.nnz
         density = nnz / (num_ncs * num_voxels) * 100
         mem_mb = (B.data.nbytes + B.indices.nbytes + B.indptr.nbytes) / 1e6
-        
+
         if verbose:
             print(f"Sparse matrix: {num_ncs} x {num_voxels}, "
                   f"nnz = {nnz:,} ({density:.3f}%), "
                   f"memory = {mem_mb:.1f} MB")
-        
+
         voxel_ids = np.array(valid_keys)
-    
+
     return B, voxel_ids, centers, layers, num_primaries
 
 
-def greedy_select(
+def load_muon_data(
+    filepath: str,
+    num_ncs: int,
+    verbose: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Load muon-related fields from the phi group in the HDF5 file.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the HDF5 file.
+    num_ncs : int
+        Expected number of NCs (for consistency check).
+    verbose : bool
+        Print progress information.
+
+    Returns
+    -------
+    global_muon_id : np.ndarray, shape (num_ncs,), dtype int64
+        Global unique muon ID per NC.
+    nc_time_ns : np.ndarray, shape (num_ncs,), dtype float64
+        NC time relative to muon entry [ns].
+    nc_flag_ge77 : np.ndarray, shape (num_ncs,), dtype bool
+        True if this NC is a Ge77 capture.
+    """
+    with h5py.File(filepath, "r") as f:
+        phi_columns = [c.decode() if isinstance(c, bytes) else str(c)
+                       for c in f["phi_columns"][:]]
+        phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
+
+        phi_matrix = f["phi_matrix"]
+        global_muon_id = phi_matrix[:, phi_col_idx["global_muon_id"]].astype(np.int64)
+        nc_time_ns = phi_matrix[:, phi_col_idx["nC_time_in_ns"]].astype(np.float64)
+        nc_flag_ge77 = phi_matrix[:, phi_col_idx["nC_flag_Ge77"]].astype(bool)
+
+    if len(global_muon_id) != num_ncs:
+        raise ValueError(
+            f"Muon data length ({len(global_muon_id)}) != num_ncs ({num_ncs})"
+        )
+
+    if verbose:
+        n_ge77_ncs = int(nc_flag_ge77.sum())
+        n_unique_muons = len(np.unique(global_muon_id))
+        ge77_muon_ids = np.unique(global_muon_id[nc_flag_ge77])
+        print(f"\nMuon data loaded:")
+        print(f"  Total NCs: {num_ncs:,}")
+        print(f"  Unique muons: {n_unique_muons:,}")
+        print(f"  Ge77 NCs: {n_ge77_ncs:,}")
+        print(f"  Ge77 muons: {len(ge77_muon_ids):,}")
+
+    return global_muon_id, nc_time_ns, nc_flag_ge77
+
+
+def build_muon_index(
+    global_muon_id: np.ndarray,
+    nc_time_ns: np.ndarray,
+    nc_flag_ge77: np.ndarray,
+    verbose: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """
+    Build data structures for muon-level optimization.
+
+    Identifies Ge77 muons and their time-filtered NCs. Only NCs within
+    the coincidence window [1 µs, 200 µs] are considered for detection.
+    Ge77 NCs themselves are invisible (0 hits everywhere) and excluded
+    from the detection counting — they only serve to flag the muon.
+
+    Parameters
+    ----------
+    global_muon_id : np.ndarray, shape (num_ncs,)
+        Global muon ID per NC.
+    nc_time_ns : np.ndarray, shape (num_ncs,)
+        NC time relative to muon [ns].
+    nc_flag_ge77 : np.ndarray, shape (num_ncs,)
+        Ge77 flag per NC.
+    verbose : bool
+        Print statistics.
+
+    Returns
+    -------
+    nc_to_muon_local : np.ndarray, shape (num_ncs,), dtype int32
+        Maps each NC index to a local Ge77-muon index (0..num_ge77_muons-1).
+        Set to -1 for NCs not belonging to a Ge77 muon or outside the
+        time window or that are Ge77 NCs themselves (invisible).
+    muon_nc_counts : np.ndarray, shape (num_ge77_muons,), dtype int32
+        Number of eligible (non-Ge77, time-filtered) NCs per Ge77 muon.
+    ge77_muon_global_ids : np.ndarray, shape (num_ge77_muons,), dtype int64
+        Global muon IDs of Ge77 muons (for output mapping).
+    eligible_nc_mask : np.ndarray, shape (num_ncs,), dtype bool
+        True for NCs that participate in muon-level optimization
+        (non-Ge77, within time window, belonging to a Ge77 muon).
+    num_ge77_muons : int
+        Number of Ge77 muons.
+    """
+    num_ncs = len(global_muon_id)
+
+    # Step 1: Identify Ge77 muons (muons with at least one Ge77 NC)
+    ge77_muon_global_ids = np.unique(global_muon_id[nc_flag_ge77])
+    num_ge77_muons = len(ge77_muon_global_ids)
+
+    # Step 2: Build global -> local muon ID mapping
+    global_to_local = {int(gid): lid for lid, gid in enumerate(ge77_muon_global_ids)}
+
+    # Step 3: Time window filter
+    in_time_window = (
+        (nc_time_ns >= MUON_TIME_WINDOW_MIN_NS)
+        & (nc_time_ns <= MUON_TIME_WINDOW_MAX_NS)
+    )
+
+    # Step 4: Eligible NCs = non-Ge77, in time window, belonging to Ge77 muon
+    belongs_to_ge77_muon = np.isin(global_muon_id, ge77_muon_global_ids)
+    eligible_nc_mask = belongs_to_ge77_muon & in_time_window & (~nc_flag_ge77)
+
+    # Step 5: Map eligible NCs to local muon index (vectorized)
+    nc_to_muon_local = np.full(num_ncs, -1, dtype=np.int32)
+    eligible_indices = np.where(eligible_nc_mask)[0]
+
+    # Vectorized mapping via searchsorted (ge77_muon_global_ids is sorted
+    # from np.unique)
+    eligible_global_ids = global_muon_id[eligible_indices]
+    local_ids = np.searchsorted(ge77_muon_global_ids, eligible_global_ids)
+    nc_to_muon_local[eligible_indices] = local_ids.astype(np.int32)
+
+    # Step 6: Count eligible NCs per muon
+    muon_nc_counts = np.bincount(local_ids, minlength=num_ge77_muons).astype(np.int32)
+
+    if verbose:
+        n_eligible = int(eligible_nc_mask.sum())
+        n_muons_with_any = int((muon_nc_counts >= 1).sum())
+        print(f"\nMuon index built:")
+        print(f"  Ge77 muons: {num_ge77_muons:,}")
+        print(f"  Eligible NCs (non-Ge77, in time window): {n_eligible:,}")
+        print(f"  Ge77 muons with ≥1 eligible NC: {n_muons_with_any:,}")
+        print(f"  Time window: [{MUON_TIME_WINDOW_MIN_NS/1e3:.0f} µs, "
+              f"{MUON_TIME_WINDOW_MAX_NS/1e3:.0f} µs]")
+
+    return (nc_to_muon_local, muon_nc_counts, ge77_muon_global_ids,
+            eligible_nc_mask, num_ge77_muons)
+
+
+def greedy_select_nc(
     B: sparse.csc_matrix,
     N: int,
     M: int,
@@ -280,47 +562,11 @@ def greedy_select(
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray]:
     """
-    Greedy voxel selection maximizing threshold coverage.
-    
-    In each of N iterations, we select the voxel v* that maximizes
-    the marginal gain:
-    
+    Greedy voxel selection maximizing NC-level threshold coverage.
+
+    In each of N iterations, select the voxel v* that maximizes:
         gain(v) = |{i : c[i] == M-1  AND  B[i,v] == 1}|
-    
-    where c[i] is the current coverage count of NC i (number of already-
-    selected voxels that see NC i).
-    
-    Optional spacing constraint:
-    ----------------------------
-    If min_spacing > 0 and centers/layers are provided, voxels that are
-    within min_spacing (mm) of any already-selected voxel ON THE SAME
-    LAYER are excluded from future selection. Cross-layer pairs are never
-    excluded since PMTs on different surfaces cannot physically overlap.
-    Distance is Euclidean 3D, which is a conservative lower bound on
-    geodesic distance (relevant for wall voxels on the cylinder surface,
-    where curvature radius >> PMT radius makes the approximation tight).
-    
-    Why only c[i] == M-1?
-    ---------------------
-    The objective f(S) = |{i : c[i] >= M}| changes by exactly the number
-    of NCs that cross the threshold M when v is added. Since B is binary,
-    adding v increments c[i] by at most 1. So only NCs at c[i] == M-1
-    can cross the threshold. NCs with c[i] < M-1 need more voxels,
-    and NCs with c[i] >= M are already detected.
-    
-    Submodularity note (M=1):
-    -------------------------
-    For M=1, gain(v) = |{i : c[i]==0 AND B[i,v]==1}|, i.e. the number
-    of NEW NCs covered. This is exactly the standard greedy for Maximum
-    k-Coverage with (1-1/e) guarantee [Nemhauser et al., 1978].
-    
-    Non-submodularity note (M>1):
-    -----------------------------
-    For M>1, the marginal gain of a voxel can INCREASE as more voxels
-    are selected (NCs move from c < M-1 to c == M-1, becoming "available"
-    for detection). This violates diminishing returns. The greedy is still
-    the best polynomial approach [Barman et al., Math. Programming 201, 2023].
-    
+
     Parameters
     ----------
     B : sparse.csc_matrix
@@ -329,9 +575,15 @@ def greedy_select(
         Number of voxels to select.
     M : int
         Multiplicity threshold for detection.
+    centers : np.ndarray or None
+        Voxel centers for spacing constraint.
+    layers : np.ndarray or None
+        Layer labels for spacing constraint.
+    min_spacing : float
+        Minimum distance between selected voxels on same layer (mm).
     verbose : bool
         Print per-iteration progress.
-    
+
     Returns
     -------
     selected : list[int]
@@ -342,109 +594,52 @@ def greedy_select(
         Final coverage count per NC.
     """
     num_ncs, num_voxels = B.shape
-    
+
     if N > num_voxels:
         raise ValueError(f"N={N} exceeds number of voxels ({num_voxels})")
-    
+
     enforce_spacing = (min_spacing > 0) and (centers is not None) and (layers is not None)
-    min_spacing_sq = min_spacing ** 2  # precompute for fast distance checks
-    
-    # c[i] = number of selected voxels that see NC i.
-    # Using int16 is safe: max possible value is N, which is << 32767.
+    min_spacing_sq = min_spacing ** 2
+
     coverage_counts = np.zeros(num_ncs, dtype=np.int16)
-    
-    # Track which voxels are still candidates
     available = np.ones(num_voxels, dtype=bool)
-    
     selected: list[int] = []
     efficiencies: list[float] = []
-    
+
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
-        print(f"\nGreedy selection: N={N}, M={M}{spacing_str}")
+        print(f"\nGreedy selection (NC mode): N={N}, M={M}{spacing_str}")
         print(f"{'Step':>4} | {'Voxel':>8} | {'Gain':>8} | "
               f"{'Detected':>10} | {'Efficiency':>10}")
         print("-" * 60)
-    
+
     for step in range(N):
         t0 = time.time()
-        
-        best_gain = -1
-        best_voxel = -1
-        
-        # ---------------------------------------------------------------
-        # Core of the greedy: evaluate marginal gain for all candidates.
-        #
-        # For each candidate voxel v (column in B), we need:
-        #   gain(v) = number of NCs where c[i] == M-1 AND B[i,v] == 1
-        #
-        # Implementation via sparse CSC:
-        #   B.indices[B.indptr[v]:B.indptr[v+1]] gives the row indices
-        #   (NC indices) where B[:,v] is nonzero. We count how many of
-        #   these have coverage_counts == M-1.
-        # ---------------------------------------------------------------
-        
-        # Precompute the boolean mask of NCs at threshold boundary.
-        # This avoids re-checking coverage_counts[row] == M-1 for every
-        # voxel — instead we do a single vectorized comparison.
+
         at_threshold = (coverage_counts == (M - 1))
-        
-        candidate_indices = np.where(available)[0]
-        
-        # Vectorized gain computation for all candidates at once.
-        # For each candidate column, sum the at_threshold values over
-        # its nonzero rows. This is equivalent to: B.T @ at_threshold,
-        # but we only compute it for available columns.
-        #
-        # Using sparse matrix-vector product: gains = B[:, candidates].T @ at_threshold
-        # This leverages optimized BLAS routines inside scipy.sparse.
-        
-        if len(candidate_indices) == num_voxels - step:
-            # All remaining columns — use full matrix product
-            # B.T @ at_threshold gives gain for ALL voxels at once.
-            # This is a single sparse matrix-vector multiply: O(nnz).
-            all_gains = B.T.dot(at_threshold.astype(np.int32))
-            all_gains[~available] = -1  # mask out already selected
-            best_voxel = int(np.argmax(all_gains))
-            best_gain = int(all_gains[best_voxel])
-        else:
-            # Subset of columns — slice and multiply
-            B_sub = B[:, candidate_indices]
-            sub_gains = B_sub.T.dot(at_threshold.astype(np.int32))
-            best_sub_idx = int(np.argmax(sub_gains))
-            best_gain = int(sub_gains[best_sub_idx])
-            best_voxel = int(candidate_indices[best_sub_idx])
-        
-        # ---------------------------------------------------------------
-        # Update coverage counts.
-        # For all NCs seen by the selected voxel, increment c[i].
-        # CSC format gives us direct access to the nonzero rows of
-        # column best_voxel via B.indices[B.indptr[v]:B.indptr[v+1]].
-        # ---------------------------------------------------------------
+
+        # SpMV: g[v] = number of NCs at threshold that voxel v sees
+        all_gains = B.T.dot(at_threshold.astype(np.int32))
+        all_gains[~available] = -1
+        best_voxel = int(np.argmax(all_gains))
+        best_gain = int(all_gains[best_voxel])
+
+        # Update coverage counts
         col_start = B.indptr[best_voxel]
         col_end = B.indptr[best_voxel + 1]
         affected_ncs = B.indices[col_start:col_end]
         coverage_counts[affected_ncs] += 1
-        
-        # Mark voxel as selected
+
         available[best_voxel] = False
         selected.append(best_voxel)
-        
-        # --- Spacing constraint: exclude nearby voxels on the same layer ---
-        # After selecting a voxel, all candidates on the same detector layer
-        # within min_spacing distance are removed from the candidate pool.
-        # This prevents physical overlap of PMTs (radius 131mm each →
-        # minimum center-to-center distance = 2 * 131 = 262mm).
-        # Cross-layer pairs are never excluded: PMTs on different surfaces
-        # (e.g., pit vs wall) cannot overlap regardless of proximity.
+
+        # Spacing constraint
         if enforce_spacing:
             selected_center = centers[best_voxel]
             selected_layer = layers[best_voxel]
-            # Check all remaining candidates on the same layer
             same_layer_mask = (layers == selected_layer) & available
             same_layer_indices = np.where(same_layer_mask)[0]
             if len(same_layer_indices) > 0:
-                # Squared Euclidean distance (avoids sqrt for speed)
                 diff = centers[same_layer_indices] - selected_center
                 dist_sq = np.sum(diff ** 2, axis=1)
                 too_close = same_layer_indices[dist_sq < min_spacing_sq]
@@ -452,103 +647,750 @@ def greedy_select(
                 if verbose and len(too_close) > 0:
                     print(f"       └─ spacing: excluded {len(too_close)} "
                           f"voxels on layer '{selected_layer}'")
-        
-        # Compute cumulative detection efficiency
+
         num_detected = int(np.sum(coverage_counts >= M))
         efficiency = num_detected / num_ncs
         efficiencies.append(efficiency)
-        
+
         dt = time.time() - t0
-        
+
         if verbose:
             print(f"{step+1:>4} | {best_voxel:>8} | {best_gain:>8} | "
                   f"{num_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s)")
-    
+
     return selected, efficiencies, coverage_counts
+
+
+def greedy_select_muon(
+    B: sparse.csc_matrix,
+    N: int,
+    W: int,
+    nc_to_muon_local: np.ndarray,
+    eligible_nc_mask: np.ndarray,
+    num_ge77_muons: int,
+    centers: np.ndarray | None = None,
+    layers: np.ndarray | None = None,
+    min_spacing: float = 0.0,
+    verbose: bool = True,
+) -> tuple[list[int], list[float], np.ndarray, np.ndarray]:
+    """
+    Greedy voxel selection maximizing Ge77 muon detection.
+
+    M=1 is enforced: a NC is detected iff any selected voxel sees it.
+    A Ge77 muon is detected iff >= W of its eligible NCs are detected.
+
+    Marginal gain computation:
+        1. SpMV upper bound: w[i] = 1 if NC i is undetected, belongs
+           to a Ge77 muon at d_mu == W-1, and is eligible. Then
+           g[v] = B^T @ w gives an upper bound (may count same muon
+           multiple times if v covers multiple of its NCs).
+        2. Exact deduplication: for the top-K candidates (by SpMV score),
+           compute exact gain by counting unique muons that cross W.
+
+    Parameters
+    ----------
+    B : sparse.csc_matrix
+        Binary matrix (NCs x voxels) in CSC format.
+    N : int
+        Number of voxels to select.
+    W : int
+        Minimum number of detected NCs per muon for muon detection.
+    nc_to_muon_local : np.ndarray, shape (num_ncs,)
+        Maps NC index -> local Ge77-muon index (-1 if not eligible).
+    eligible_nc_mask : np.ndarray, shape (num_ncs,), dtype bool
+        True for NCs participating in muon optimization.
+    num_ge77_muons : int
+        Number of Ge77 muons.
+    centers : np.ndarray or None
+        Voxel centers for spacing constraint.
+    layers : np.ndarray or None
+        Layer labels for spacing constraint.
+    min_spacing : float
+        Minimum distance between selected voxels on same layer (mm).
+    verbose : bool
+        Print per-iteration progress.
+
+    Returns
+    -------
+    selected : list[int]
+        Column indices of selected voxels (in selection order).
+    efficiencies : list[float]
+        Cumulative muon detection efficiency after each step.
+    nc_detected : np.ndarray, dtype bool
+        Final detection status per NC (True if seen by any selected voxel).
+    muon_detected_counts : np.ndarray, shape (num_ge77_muons,)
+        Final number of detected eligible NCs per Ge77 muon.
+    """
+    num_ncs, num_voxels = B.shape
+
+    if N > num_voxels:
+        raise ValueError(f"N={N} exceeds number of voxels ({num_voxels})")
+
+    enforce_spacing = (min_spacing > 0) and (centers is not None) and (layers is not None)
+    min_spacing_sq = min_spacing ** 2
+
+    # Number of top SpMV candidates to evaluate exactly.
+    TOP_K = min(50, num_voxels)
+
+    # NC detection status (M=1: detected iff seen by any selected voxel)
+    nc_detected = np.zeros(num_ncs, dtype=bool)
+
+    # Per-muon count of detected eligible NCs
+    muon_detected_counts = np.zeros(num_ge77_muons, dtype=np.int32)
+
+    available = np.ones(num_voxels, dtype=bool)
+    selected: list[int] = []
+    efficiencies: list[float] = []
+
+    if verbose:
+        spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
+        print(f"\nGreedy selection (muon-ge77 mode): N={N}, W={W}{spacing_str}")
+        print(f"{'Step':>4} | {'Voxel':>8} | {'Gain':>8} | "
+              f"{'Muons det.':>10} | {'Efficiency':>10}")
+        print("-" * 60)
+
+    for step in range(N):
+        t0 = time.time()
+
+        # -----------------------------------------------------------------
+        # Step A: SpMV upper bound for marginal gain.
+        #
+        # Weight vector w[i] = 1 iff:
+        #   (a) NC i is not yet detected (nc_detected[i] == False)
+        #   (b) NC i is eligible (belongs to Ge77 muon, in time window)
+        #   (c) NC i's muon is at d_mu == W-1 (one short of threshold)
+        #
+        # Then g = B^T @ w gives per-voxel upper bound on muon gain.
+        # It overcounts when a voxel covers multiple NCs of the same
+        # muon at W-1, but this is corrected in Step B.
+        # -----------------------------------------------------------------
+        muon_at_threshold = (muon_detected_counts == (W - 1))
+
+        # Build weight vector (vectorized)
+        w = np.zeros(num_ncs, dtype=np.int32)
+        eligible_undetected = eligible_nc_mask & (~nc_detected)
+        eligible_idx = np.where(eligible_undetected)[0]
+
+        if len(eligible_idx) > 0:
+            muon_lids = nc_to_muon_local[eligible_idx]
+            at_thresh = muon_at_threshold[muon_lids]
+            w[eligible_idx[at_thresh]] = 1
+
+        all_gains_upper = B.T.dot(w)
+        all_gains_upper[~available] = -1
+
+        # -----------------------------------------------------------------
+        # Step B: Exact deduplication for top-K candidates.
+        #
+        # For each top-K candidate voxel v, find the NCs it would newly
+        # detect, map them to muon IDs, and count unique muons that
+        # cross the W threshold.
+        # -----------------------------------------------------------------
+        top_k_indices = np.argsort(all_gains_upper)[-TOP_K:][::-1]
+        # Filter to those with positive upper bound
+        top_k_indices = top_k_indices[all_gains_upper[top_k_indices] > 0]
+
+        best_gain = 0
+        best_voxel = -1
+
+        if len(top_k_indices) == 0:
+            # No voxel can improve the objective — pick arbitrary available
+            avail_idx = np.where(available)[0]
+            if len(avail_idx) > 0:
+                best_voxel = int(avail_idx[0])
+            else:
+                raise RuntimeError(
+                    f"No available voxels left at step {step+1}/{N}. "
+                    f"Spacing constraint may be too tight."
+                )
+            best_gain = 0
+        else:
+            for v in top_k_indices:
+                # NCs that voxel v sees (from CSC structure)
+                col_start = B.indptr[v]
+                col_end = B.indptr[v + 1]
+                v_ncs = B.indices[col_start:col_end]
+
+                # Filter to eligible, undetected NCs
+                mask = eligible_nc_mask[v_ncs] & (~nc_detected[v_ncs])
+                newly_detected_ncs = v_ncs[mask]
+
+                if len(newly_detected_ncs) == 0:
+                    continue
+
+                # Map to muon local IDs and count unique muons at threshold
+                muon_lids_v = nc_to_muon_local[newly_detected_ncs]
+                at_thresh_mask = muon_at_threshold[muon_lids_v]
+                muon_lids_at_thresh = muon_lids_v[at_thresh_mask]
+
+                # Deduplicate: count unique muons
+                gain = len(np.unique(muon_lids_at_thresh))
+
+                if gain > best_gain:
+                    best_gain = gain
+                    best_voxel = int(v)
+
+            # Fallback if no candidate has positive exact gain
+            if best_voxel == -1:
+                best_voxel = int(top_k_indices[0])
+                best_gain = 0
+
+        # -----------------------------------------------------------------
+        # Step C: Update state after selecting best_voxel.
+        # -----------------------------------------------------------------
+        col_start = B.indptr[best_voxel]
+        col_end = B.indptr[best_voxel + 1]
+        affected_ncs = B.indices[col_start:col_end]
+
+        # Find NCs newly detected by this voxel
+        newly_detected_mask = ~nc_detected[affected_ncs]
+        newly_detected_ncs = affected_ncs[newly_detected_mask]
+        nc_detected[affected_ncs] = True
+
+        # Update muon detected counts for eligible newly-detected NCs
+        # (vectorized: filter to eligible, then bincount)
+        eligible_new = newly_detected_ncs[eligible_nc_mask[newly_detected_ncs]]
+        if len(eligible_new) > 0:
+            muon_lids_new = nc_to_muon_local[eligible_new]
+            increments = np.bincount(muon_lids_new, minlength=num_ge77_muons)
+            muon_detected_counts += increments.astype(np.int32)
+
+        available[best_voxel] = False
+        selected.append(best_voxel)
+
+        # Spacing constraint
+        if enforce_spacing:
+            selected_center = centers[best_voxel]
+            selected_layer = layers[best_voxel]
+            same_layer_mask = (layers == selected_layer) & available
+            same_layer_indices = np.where(same_layer_mask)[0]
+            if len(same_layer_indices) > 0:
+                diff = centers[same_layer_indices] - selected_center
+                dist_sq = np.sum(diff ** 2, axis=1)
+                too_close = same_layer_indices[dist_sq < min_spacing_sq]
+                available[too_close] = False
+                if verbose and len(too_close) > 0:
+                    print(f"       └─ spacing: excluded {len(too_close)} "
+                          f"voxels on layer '{selected_layer}'")
+
+        num_muons_detected = int(np.sum(muon_detected_counts >= W))
+        efficiency = num_muons_detected / num_ge77_muons if num_ge77_muons > 0 else 0.0
+        efficiencies.append(efficiency)
+
+        dt = time.time() - t0
+
+        if verbose:
+            print(f"{step+1:>4} | {best_voxel:>8} | {best_gain:>8} | "
+                  f"{num_muons_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s)")
+
+    return selected, efficiencies, nc_detected, muon_detected_counts
+
+def plot_selected_voxels(
+    selected_centers: np.ndarray,
+    selected_layers: np.ndarray,
+    selected_ids: list[str],
+    output_path: Path,
+    title_extra: str = "",
+) -> None:
+    """
+    Generate 3D scatter plot of selected voxel positions overlaid
+    on a wireframe of the detector geometry.
+
+    Parameters
+    ----------
+    selected_centers : np.ndarray, shape (N, 3)
+        Voxel center coordinates (x, y, z) in mm.
+    selected_layers : np.ndarray of str, shape (N,)
+        Layer label per voxel.
+    selected_ids : list[str]
+        Voxel ID strings.
+    output_path : Path
+        Where to save the plot.
+    title_extra : str
+        Additional info for the plot title.
+    """
+    Z_BASE = Z_BASE_GLOBAL  # from module constants
+    Z_TOP = Z_BASE + H_ZYLINDER
+
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # --- Detector wireframe ---
+    theta = np.linspace(0, 2 * np.pi, 200)
+    n_vert = 24
+    theta_lines = np.linspace(0, 2 * np.pi, n_vert, endpoint=False)
+
+    # Cylinder
+    for z in [Z_BASE, Z_TOP]:
+        ax.plot(R_ZYLINDER * np.cos(theta), R_ZYLINDER * np.sin(theta), z,
+                color="gray", alpha=0.3, linewidth=0.5)
+    for t in theta_lines:
+        ax.plot([R_ZYLINDER * np.cos(t)] * 2, [R_ZYLINDER * np.sin(t)] * 2,
+                [Z_BASE, Z_TOP], color="gray", alpha=0.3, linewidth=0.5)
+
+    # Pit and bot ring boundaries
+    ax.plot(R_PIT * np.cos(theta), R_PIT * np.sin(theta), Z_BASE,
+            color="blue", alpha=0.7, linewidth=1.2, label=f"Pit (r={R_PIT})")
+    ax.plot(R_ZYL_BOT * np.cos(theta), R_ZYL_BOT * np.sin(theta), Z_BASE,
+            color="green", alpha=0.7, linewidth=1.2,
+            label=f"Bot ring inner (r={R_ZYL_BOT})")
+
+    # --- Selected voxels ---
+    layer_markers = {"pit": "o", "bot": "s", "top": "^", "wall": "D"}
+
+    for layer in ["pit", "bot", "top", "wall"]:
+        mask = selected_layers == layer
+        if not np.any(mask):
+            continue
+        pts = selected_centers[mask]
+        ax.scatter(
+            pts[:, 0], pts[:, 1], pts[:, 2],
+            c="red", marker=layer_markers.get(layer, "o"),
+            s=30, alpha=0.8, edgecolors="darkred", linewidths=0.5,
+            label=f"Selected ({layer}: {mask.sum()})",
+        )
+
+    # --- Check constraints and mark violations ---
+    boundary_failures = []
+    for i, (c, lay) in enumerate(zip(selected_centers, selected_layers)):
+        if not is_valid_pmt_position(c, lay):
+            boundary_failures.append(i)
+
+    distance_violations = []
+    min_dist = 2 * PMT_RADIUS
+    n = len(selected_centers)
+    for i in range(n):
+        diffs = selected_centers[i + 1:] - selected_centers[i]
+        dists = np.linalg.norm(diffs, axis=1)
+        too_close = np.where(dists < min_dist)[0]
+        for idx in too_close:
+            j = i + 1 + idx
+            distance_violations.append((i, j, dists[idx]))
+
+    if boundary_failures:
+        fail_pts = selected_centers[boundary_failures]
+        ax.scatter(
+            fail_pts[:, 0], fail_pts[:, 1], fail_pts[:, 2],
+            c="yellow", marker="x", s=100, linewidths=2,
+            label=f"Boundary violations ({len(boundary_failures)})",
+        )
+
+    if distance_violations:
+        for i, j, d in distance_violations:
+            p1, p2 = selected_centers[i], selected_centers[j]
+            ax.plot(
+                [p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                color="yellow", linewidth=2, alpha=0.8,
+            )
+
+    # --- Formatting ---
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+    ax.set_title(
+        f"Selected Voxels (N={len(selected_centers)}, "
+        f"boundary fails={len(boundary_failures)}, "
+        f"dist violations={len(distance_violations)})"
+        + (f"\n{title_extra}" if title_extra else "")
+    )
+    ax.legend(loc="upper left", fontsize=8)
+
+    max_range = max(R_ZYLINDER, (Z_TOP - Z_BASE) / 2)
+    mid_z = (Z_BASE + Z_TOP) / 2
+    ax.set_xlim(-max_range, max_range)
+    ax.set_ylim(-max_range, max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    # Print summary
+    print(f"\nPlot saved to {output_path}")
+    print(f"  Boundary check: {'PASS' if not boundary_failures else 'FAIL'}")
+    print(f"  Distance check: {'PASS' if not distance_violations else 'FAIL'}")
+    for layer in ["pit", "bot", "top", "wall"]:
+        count = np.sum(selected_layers == layer)
+        if count > 0:
+            pts = selected_centers[selected_layers == layer]
+            r_vals = np.sqrt(pts[:, 0]**2 + pts[:, 1]**2)
+            print(f"  {layer:>4}: {count:>4} voxels "
+                f"(r: {r_vals.min():.0f}-{r_vals.max():.0f} mm, "
+                f"z: {pts[:, 2].min():.0f}-{pts[:, 2].max():.0f} mm)")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Greedy voxel selection for NC detection.",
+        description="Greedy voxel selection for NC / Ge77-muon detection.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("hdf5_file", type=str, help="Path to the HDF5 data file.")
     parser.add_argument("-N", type=int, required=True,
                         help="Number of voxels to select.")
-    parser.add_argument("-M", type=int, required=True,
-                        help="Multiplicity threshold for detection "
-                             "(number of voxels that must fire).")
+    parser.add_argument("--optimize", type=str, default="nc",
+                        choices=["nc", "muon-ge77"],
+                        help="Optimization target.")
+    parser.add_argument("-M", type=int, default=1,
+                        help="Multiplicity threshold for NC detection "
+                             "(number of voxels that must fire). "
+                             "Ignored in muon-ge77 mode (forced to 1).")
     parser.add_argument("-m", type=int, default=1,
                         help="Hit threshold per voxel "
                              "(minimum hits for a voxel to count as firing).")
+    parser.add_argument("-W", type=int, default=None,
+                        help="Muon coincidence threshold: minimum number of "
+                             "detected NCs per muon. Required for muon-ge77 mode.")
     parser.add_argument("--no-spacing", action="store_true",
                         help="Disable minimum spacing constraint between "
                              "selected voxels (default: enforce 2*PMT_RADIUS).")
+    parser.add_argument("--area-ratio", action="store_true",
+                        help="Apply area-dependent hit scaling before "
+                             "binarization (hits / ratio >= m).")
+    parser.add_argument("--per-area", action="store_true",
+                        help="Optimize each detector area (pit, bot, top, wall) "
+                             "independently with N proportional to surface area.")
     parser.add_argument("--output", type=str, default=None,
                         help="Output file for results (npz format). "
                              "If not specified, auto-generates from parameters.")
+    parser.add_argument("--output-dir", type=str, default=".",
+                        help="Directory for all output files (npz, json, png).")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress progress output.")
-    
+
     args = parser.parse_args(argv)
     verbose = not args.quiet
     min_spacing = 0.0 if args.no_spacing else 2 * PMT_RADIUS
-    
-    # Auto-generate output filename from parameters if not specified
+
+    # --- Validate arguments ---
+    if args.optimize == "muon-ge77":
+        if args.W is None:
+            parser.error("--optimize muon-ge77 requires -W argument.")
+        if args.M != 1:
+            if verbose:
+                print(f"Warning: muon-ge77 mode forces M=1 (was M={args.M}).")
+            args.M = 1
+
+    # Auto-generate output filename
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.output is None:
         spacing_tag = "nospacing" if args.no_spacing else f"spacing{int(min_spacing)}mm"
-        args.output = f"greedy_N{args.N}_M{args.M}_m{args.m}_{spacing_tag}.npz"
-    
+        ratio_tag = "_arearatio" if args.area_ratio else ""
+        perarea_tag = "_perarea" if args.per_area else ""
+        if args.optimize == "nc":
+            args.output = f"greedy_N{args.N}_M{args.M}_m{args.m}_{spacing_tag}{ratio_tag}{perarea_tag}.npz"
+        else:
+            args.output = (f"greedy_muon_N{args.N}_W{args.W}_m{args.m}_"
+                           f"{spacing_tag}{ratio_tag}{perarea_tag}.npz")
+
+    args.output = str(output_dir / Path(args.output).name)
+
     # --- Step 1: Load and binarize ---
     if verbose:
         print("=" * 60)
-        print("Greedy Voxel Selection for NC Detection")
+        print(f"Greedy Voxel Selection — mode: {args.optimize}")
         print("=" * 60)
-    
+
     B, voxel_ids, centers, layers, num_primaries = load_and_binarize(
-        args.hdf5_file, m=args.m, verbose=verbose,
-    )
-    
-    # --- Step 2: Run greedy selection ---
-    selected_cols, efficiencies, coverage_counts = greedy_select(
-        B, N=args.N, M=args.M,
-        centers=centers, layers=layers, min_spacing=min_spacing,
+        args.hdf5_file, m=args.m, apply_area_ratio=args.area_ratio,
         verbose=verbose,
     )
-    
-    # --- Step 3: Report results ---
-    selected_voxel_ids = voxel_ids[selected_cols]
-    
-    if verbose:
-        print(f"\n{'=' * 60}")
-        print(f"Final detection efficiency: {efficiencies[-1]:.4%}")
-        print(f"Detected NCs: {int(np.sum(coverage_counts >= args.M)):,} "
-              f"/ {B.shape[0]:,}")
-        print(f"Total primaries: {num_primaries:,}")
-        print(f"\nSelected voxels (in selection order):")
-        for rank, (col, vid) in enumerate(zip(selected_cols, selected_voxel_ids)):
-            eff_delta = efficiencies[rank] - (efficiencies[rank-1] if rank > 0 else 0.0)
-            print(f"  {rank+1:>3}. Voxel {vid} (col {col}), "
-                  f"cumulative eff = {efficiencies[rank]:.4%}, "
-                  f"Δeff = {eff_delta:.4%}")
-    
-    # --- Step 4: Save results ---
-    np.savez(
-        args.output,
-        selected_columns=np.array(selected_cols),
-        selected_voxel_ids=selected_voxel_ids,
-        efficiencies=np.array(efficiencies),
-        coverage_counts=coverage_counts,
-        N=args.N,
-        M=args.M,
-        m=args.m,
-        min_spacing=min_spacing,
-        num_ncs=B.shape[0],
-        num_primaries=num_primaries,
-    )
+
+    # --- Step 2: Run greedy ---
+    # Optionally load muon data (needed for muon-ge77 mode)
+    muon_data = None
+    if args.optimize == "muon-ge77":
+        global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
+            args.hdf5_file, num_ncs=B.shape[0], verbose=verbose,
+        )
+        (nc_to_muon_local, muon_nc_counts, ge77_muon_global_ids,
+         eligible_nc_mask, num_ge77_muons) = build_muon_index(
+            global_muon_id, nc_time_ns, nc_flag_ge77, verbose=verbose,
+        )
+        if verbose:
+            max_ncs_per_muon = int(muon_nc_counts.max()) if num_ge77_muons > 0 else 0
+            print(f"  Max eligible NCs per Ge77 muon: {max_ncs_per_muon}")
+            n_feasible = int((muon_nc_counts >= args.W).sum())
+            print(f"  Ge77 muons with ≥ W={args.W} eligible NCs: "
+                  f"{n_feasible:,} / {num_ge77_muons:,}")
+        muon_data = {
+            "nc_to_muon_local": nc_to_muon_local,
+            "eligible_nc_mask": eligible_nc_mask,
+            "num_ge77_muons": num_ge77_muons,
+            "ge77_muon_global_ids": ge77_muon_global_ids,
+            "muon_detected_counts": None,
+            "nc_detected": None,
+        }
+
+    if args.per_area:
+        # --- Per-area optimization ---
+        allocation = compute_per_area_N(args.N, verbose=verbose)
+        all_selected_cols: list[int] = []
+
+        # For muon mode: shared state across areas
+        if args.optimize == "muon-ge77":
+            shared_nc_detected = np.zeros(B.shape[0], dtype=bool)
+            shared_muon_detected_counts = np.zeros(num_ge77_muons, dtype=np.int32)
+
+        for area_name in ["pit", "bot", "top", "wall"]:
+            n_area = allocation[area_name]
+            if n_area == 0:
+                if verbose:
+                    print(f"\nSkipping {area_name}: 0 PMTs allocated.")
+                continue
+
+            # Build mask for voxels in this area
+            area_mask = (layers == area_name)
+            area_indices = np.where(area_mask)[0]
+            n_voxels_area = len(area_indices)
+
+            if verbose:
+                print(f"\n{'=' * 60}")
+                print(f"Per-area optimization: {area_name} "
+                      f"(N={n_area}, {n_voxels_area} voxels)")
+                print(f"{'=' * 60}")
+
+            if n_voxels_area == 0:
+                if verbose:
+                    print(f"  No valid voxels in {area_name}, skipping.")
+                continue
+
+            # Extract sub-matrix for this area
+            B_area = B[:, area_indices]
+            centers_area = centers[area_indices]
+            layers_area = layers[area_indices]
+
+            if args.optimize == "nc":
+                sel_local, eff_area, cov_area = greedy_select_nc(
+                    B_area, N=n_area, M=args.M,
+                    centers=centers_area, layers=layers_area,
+                    min_spacing=min_spacing, verbose=verbose,
+                )
+                # Map local column indices back to global
+                sel_global = [int(area_indices[i]) for i in sel_local]
+                all_selected_cols.extend(sel_global)
+
+            elif args.optimize == "muon-ge77":
+                # Run greedy on sub-matrix but with shared muon state.
+                # We pass the full nc_to_muon_local etc. — the sub-matrix
+                # B_area still has all NC rows, just fewer voxel columns.
+                sel_local, eff_area, nc_det_area, muon_det_area = (
+                    greedy_select_muon(
+                        B_area, N=n_area, W=args.W,
+                        nc_to_muon_local=nc_to_muon_local,
+                        eligible_nc_mask=eligible_nc_mask,
+                        num_ge77_muons=num_ge77_muons,
+                        centers=centers_area, layers=layers_area,
+                        min_spacing=min_spacing, verbose=verbose,
+                    )
+                )
+                sel_global = [int(area_indices[i]) for i in sel_local]
+                all_selected_cols.extend(sel_global)
+                # Merge detection state: OR for nc_detected, MAX for muon counts
+                shared_nc_detected |= nc_det_area
+                # Muon counts: accumulate (each area contributes independently)
+                shared_muon_detected_counts += muon_det_area
+
+        selected_cols = all_selected_cols
+        selected_voxel_ids = voxel_ids[selected_cols]
+
+        # Final combined reporting
+        if verbose:
+            print(f"\n{'=' * 60}")
+            print(f"Per-area optimization complete (N={args.N})")
+            print(f"{'=' * 60}")
+
+        if args.optimize == "nc":
+            # Recompute coverage with all selected voxels
+            coverage_counts = np.zeros(B.shape[0], dtype=np.int16)
+            for col in selected_cols:
+                col_start = B.indptr[col]
+                col_end = B.indptr[col + 1]
+                coverage_counts[B.indices[col_start:col_end]] += 1
+            num_detected = int(np.sum(coverage_counts >= args.M))
+            final_eff = num_detected / B.shape[0]
+            efficiencies = [final_eff]  # only final combined efficiency
+
+            if verbose:
+                print(f"Final NC detection efficiency: {final_eff:.4%}")
+                print(f"Detected NCs: {num_detected:,} / {B.shape[0]:,}")
+
+            np.savez(
+                args.output,
+                selected_columns=np.array(selected_cols),
+                selected_voxel_ids=selected_voxel_ids,
+                efficiencies=np.array(efficiencies),
+                coverage_counts=coverage_counts,
+                N=args.N, M=args.M, m=args.m,
+                optimize="nc", per_area=True,
+                allocation=json.dumps(allocation),
+                min_spacing=min_spacing,
+                num_ncs=B.shape[0],
+                num_primaries=num_primaries,
+            )
+
+        elif args.optimize == "muon-ge77":
+            num_muons_detected = int(np.sum(shared_muon_detected_counts >= args.W))
+            final_eff = num_muons_detected / num_ge77_muons if num_ge77_muons > 0 else 0.0
+            efficiencies = [final_eff]
+
+            if verbose:
+                print(f"Final Ge77 muon detection efficiency: {final_eff:.4%}")
+                print(f"Detected Ge77 muons: {num_muons_detected:,} "
+                      f"/ {num_ge77_muons:,}")
+                num_ncs_detected = int(shared_nc_detected.sum())
+                print(f"NCs detected (any): {num_ncs_detected:,} / {B.shape[0]:,} "
+                      f"({num_ncs_detected/B.shape[0]:.4%})")
+
+            np.savez(
+                args.output,
+                selected_columns=np.array(selected_cols),
+                selected_voxel_ids=selected_voxel_ids,
+                efficiencies=np.array(efficiencies),
+                muon_detected_counts=shared_muon_detected_counts,
+                nc_detected=shared_nc_detected,
+                ge77_muon_global_ids=ge77_muon_global_ids,
+                N=args.N, W=args.W, m=args.m, M=1,
+                optimize="muon-ge77", per_area=True,
+                allocation=json.dumps(allocation),
+                min_spacing=min_spacing,
+                num_ncs=B.shape[0],
+                num_ge77_muons=num_ge77_muons,
+                num_primaries=num_primaries,
+            )
+
+    else:
+        # --- Global optimization (original behavior) ---
+        if args.optimize == "nc":
+            selected_cols, efficiencies, coverage_counts = greedy_select_nc(
+                B, N=args.N, M=args.M,
+                centers=centers, layers=layers, min_spacing=min_spacing,
+                verbose=verbose,
+            )
+            selected_voxel_ids = voxel_ids[selected_cols]
+            if verbose:
+                print(f"\n{'=' * 60}")
+                print(f"Final NC detection efficiency: {efficiencies[-1]:.4%}")
+                print(f"Detected NCs: {int(np.sum(coverage_counts >= args.M)):,} "
+                      f"/ {B.shape[0]:,}")
+                print(f"Total primaries: {num_primaries:,}")
+
+            np.savez(
+                args.output,
+                selected_columns=np.array(selected_cols),
+                selected_voxel_ids=selected_voxel_ids,
+                efficiencies=np.array(efficiencies),
+                coverage_counts=coverage_counts,
+                N=args.N, M=args.M, m=args.m,
+                optimize="nc",
+                min_spacing=min_spacing,
+                num_ncs=B.shape[0],
+                num_primaries=num_primaries,
+            )
+
+        elif args.optimize == "muon-ge77":
+            selected_cols, efficiencies, nc_detected, muon_detected_counts = (
+                greedy_select_muon(
+                    B, N=args.N, W=args.W,
+                    nc_to_muon_local=nc_to_muon_local,
+                    eligible_nc_mask=eligible_nc_mask,
+                    num_ge77_muons=num_ge77_muons,
+                    centers=centers, layers=layers, min_spacing=min_spacing,
+                    verbose=verbose,
+                )
+            )
+
+            selected_voxel_ids = voxel_ids[selected_cols]
+            num_muons_detected = int(np.sum(muon_detected_counts >= args.W))
+            if verbose:
+                print(f"\n{'=' * 60}")
+                print(f"Final Ge77 muon detection efficiency: {efficiencies[-1]:.4%}")
+                print(f"Detected Ge77 muons: {num_muons_detected:,} "
+                      f"/ {num_ge77_muons:,}")
+                print(f"Total primaries: {num_primaries:,}")
+                num_ncs_detected = int(nc_detected.sum())
+                print(f"NCs detected (any): {num_ncs_detected:,} / {B.shape[0]:,} "
+                      f"({num_ncs_detected/B.shape[0]:.4%})")
+
+            np.savez(
+                args.output,
+                selected_columns=np.array(selected_cols),
+                selected_voxel_ids=selected_voxel_ids,
+                efficiencies=np.array(efficiencies),
+                muon_detected_counts=muon_detected_counts,
+                nc_detected=nc_detected,
+                ge77_muon_global_ids=ge77_muon_global_ids,
+                N=args.N, W=args.W, m=args.m, M=1,
+                optimize="muon-ge77",
+                min_spacing=min_spacing,
+                num_ncs=B.shape[0],
+                num_ge77_muons=num_ge77_muons,
+                num_primaries=num_primaries,
+            )
+
     if verbose:
         print(f"\nResults saved to {args.output}")
+        print(f"\nSelected voxels (in selection order):")
+        for rank, (col, vid) in enumerate(zip(selected_cols, selected_voxel_ids)):
+            if len(efficiencies) > rank:
+                eff_val = efficiencies[rank]
+                eff_delta = eff_val - (efficiencies[rank-1] if rank > 0 else 0.0)
+                print(f"  {rank+1:>3}. Voxel {vid} (col {col}), "
+                      f"cumulative eff = {eff_val:.4%}, "
+                      f"Δeff = {eff_delta:.4%}")
+            else:
+                print(f"  {rank+1:>3}. Voxel {vid} (col {col})")
 
+    # --- Export selected voxels as JSON ---
+    json_output = Path(args.output).with_suffix(".json")
+    selected_voxels_json = []
+
+    with h5py.File(args.hdf5_file, "r") as f:
+        for col_idx in selected_cols:
+            vid = voxel_ids[col_idx]
+            center = f[f"voxels/{vid}/center"][:].tolist()
+            corners_x = f[f"voxels/{vid}/corners/x"][:].tolist()
+            corners_y = f[f"voxels/{vid}/corners/y"][:].tolist()
+            corners_z = f[f"voxels/{vid}/corners/z"][:].tolist()
+            corners = [[x, y, z] for x, y, z in zip(corners_x, corners_y, corners_z)]
+            layer_raw = f[f"voxels/{vid}/layer"][()]
+            layer = layer_raw.decode() if isinstance(layer_raw, bytes) else str(layer_raw)
+
+            selected_voxels_json.append({
+                "index": vid,
+                "center": center,
+                "corners": corners,
+                "layer": layer,
+            })
+
+    with open(json_output, "w") as jf:
+        json.dump(selected_voxels_json, jf, indent=2)
+
+    if verbose:
+        print(f"Selected voxels JSON saved to {json_output}")
+
+    # --- Plot selected voxels ---
+    plot_centers = centers[selected_cols]
+    plot_layers = layers[selected_cols]
+    plot_ids = [str(voxel_ids[c]) for c in selected_cols]
+    plot_path = Path(args.output).with_suffix(".png")
+
+    title_extra = f"mode={args.optimize}"
+    if args.optimize == "nc":
+        title_extra += f", M={args.M}, m={args.m}"
+    else:
+        title_extra += f", W={args.W}, m={args.m}"
+    if args.per_area:
+        title_extra += ", per-area"
+    if args.area_ratio:
+        title_extra += ", area-ratio"
+
+    plot_selected_voxels(
+        plot_centers, plot_layers, plot_ids,
+        output_path=plot_path,
+        title_extra=title_extra,
+    )
 
 if __name__ == "__main__":
     main()
