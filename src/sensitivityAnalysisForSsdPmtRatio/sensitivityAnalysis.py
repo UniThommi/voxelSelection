@@ -41,7 +41,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import sparse
-
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../core")
 # ---------------------------------------------------------------------------
 # Import shared constants and functions from greedy script.
 # If not importable, they are redefined below.
@@ -63,6 +64,8 @@ try:
         build_muon_index,
         greedy_select_nc,
         greedy_select_muon,
+        muon_weight_delta,
+        plot_muon_nc_histogram,
     )
     _IMPORTED_GREEDY = True
 except ImportError:
@@ -441,6 +444,7 @@ def run_single_greedy(
     W: int = 1,
     min_spacing: float = 0.0,
     per_area: bool = False,
+    muon_weight_k: float | None = None,
     verbose: bool = False,
 ) -> tuple[list[int], float]:
     """
@@ -489,6 +493,32 @@ def run_single_greedy(
         )
     )
 
+    # Load muon IDs for NC-mode muon-awareness (no time filter)
+    nc_muon_weight_data = None
+    if optimize == "nc" and muon_weight_k is not None:
+        with h5py.File(filepath, "r") as f:
+            phi_columns = [c.decode() if isinstance(c, bytes) else str(c)
+                           for c in f["phi_columns"][:]]
+            phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
+            phi_matrix = f["phi_matrix"]
+            nc_global_muon_id = phi_matrix[:, phi_col_idx["global_muon_id"]].astype(np.int64)
+
+        if len(nc_global_muon_id) != B.shape[0]:
+            raise RuntimeError(
+                f"Muon data length ({len(nc_global_muon_id)}) != "
+                f"num_ncs ({B.shape[0]})"
+            )
+        unique_muon_ids = np.unique(nc_global_muon_id)
+        num_muons_nc = len(unique_muon_ids)
+        nc_to_muon_local_nc = np.searchsorted(
+            unique_muon_ids, nc_global_muon_id
+        ).astype(np.int32)
+
+        nc_muon_weight_data = {
+            "nc_to_muon_local": nc_to_muon_local_nc,
+            "num_muons": num_muons_nc,
+        }
+
     if optimize == "muon-ge77":
         global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
             filepath, num_ncs=B.shape[0], verbose=False,
@@ -521,7 +551,7 @@ def run_single_greedy(
             layers_area = layers[area_indices]
 
             if optimize == "nc":
-                sel_local, _, _ = greedy_select_nc(
+                sel_local, _, _, _ = greedy_select_nc(
                     B_area, N=n_area, M=M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing, verbose=False,
@@ -536,7 +566,9 @@ def run_single_greedy(
                     eligible_nc_mask=eligible_nc_mask,
                     num_ge77_muons=num_ge77_muons,
                     centers=centers_area, layers=layers_area,
-                    min_spacing=min_spacing, verbose=False,
+                    min_spacing=min_spacing,
+                    muon_weight_k=muon_weight_k,
+                    verbose=False,
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
                 all_selected.extend(sel_global)
@@ -561,10 +593,18 @@ def run_single_greedy(
     else:
         # Global optimization
         if optimize == "nc":
-            selected_cols, effs, _ = greedy_select_nc(
+            mw_kwargs = {}
+            if nc_muon_weight_data is not None:
+                mw_kwargs = {
+                    "muon_weight_k": muon_weight_k,
+                    "nc_to_muon_local": nc_muon_weight_data["nc_to_muon_local"],
+                    "num_muons": nc_muon_weight_data["num_muons"],
+                }
+            selected_cols, effs, _, _ = greedy_select_nc(
                 B, N=N, M=M,
                 centers=centers, layers=layers,
                 min_spacing=min_spacing, verbose=False,
+                **mw_kwargs,
             )
             final_eff = effs[-1] if effs else 0.0
 
@@ -575,7 +615,9 @@ def run_single_greedy(
                 eligible_nc_mask=eligible_nc_mask,
                 num_ge77_muons=num_ge77_muons,
                 centers=centers, layers=layers,
-                min_spacing=min_spacing, verbose=False,
+                min_spacing=min_spacing,
+                muon_weight_k=muon_weight_k,
+                verbose=False,
             )
             final_eff = effs[-1] if effs else 0.0
 
@@ -609,6 +651,11 @@ def main(argv: Optional[list[str]] = None) -> None:
                         help="Optimize each area independently.")
     parser.add_argument("--output-dir", type=str, default="sensitivity_results",
                         help="Directory for output files.")
+    parser.add_argument("--muon-weight", type=float, default=None, metavar="K",
+                        help="Enable muon-level diminishing-returns weighting "
+                             "with saturation constant k. Uses f(d) = 1 - exp(-d/k). "
+                             "For 90%% saturation at 10 detected NCs, use k ≈ 4.34. "
+                             "Not compatible with --per-area.")
     parser.add_argument("--deltas", type=str, default=None,
                         help="Comma-separated delta values (e.g. '-0.20,-0.10,...'). "
                              "Default: -0.20,-0.10,-0.05,+0.05,+0.10,+0.20")
@@ -619,6 +666,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         args.M = 1
 
     min_spacing = 0.0 if args.no_spacing else 2 * PMT_RADIUS
+
+    if args.muon_weight is not None and args.per_area:
+        parser.error("--muon-weight and --per-area cannot be combined. "
+                     "This combination is not implemented.")
 
     # Parse deltas
     if args.deltas is not None:
@@ -648,6 +699,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"  Deltas:      {deltas}")
     print(f"  k-values:    {k_values}")
     print(f"  Nominal ratios: {AREA_RATIOS}")
+    if args.muon_weight is not None:
+        print(f"  Muon weight: k = {args.muon_weight:.4f}")
     print(f"  Output dir:  {output_dir}")
     print()
 
@@ -665,6 +718,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         M=args.M, W=args.W,
         min_spacing=min_spacing,
         per_area=args.per_area,
+        muon_weight_k=args.muon_weight,
         verbose=True,
     )
 
@@ -711,6 +765,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             M=args.M, W=args.W,
             min_spacing=min_spacing,
             per_area=args.per_area,
+            muon_weight_k=args.muon_weight,
             verbose=False,
         )
 
@@ -761,6 +816,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "per_area": args.per_area,
             "min_spacing": min_spacing,
             "nominal_ratios": AREA_RATIOS,
+            "muon_weight_k": args.muon_weight,
             "deltas": deltas,
             "k_values": k_values,
         },

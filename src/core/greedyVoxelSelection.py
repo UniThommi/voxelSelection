@@ -165,6 +165,98 @@ def compute_per_area_N(
     return allocation
 
 
+def muon_weight_delta(d: np.ndarray, k: float) -> np.ndarray:
+    """
+    Marginal gain of detecting the (d+1)-th NC of a muon under
+    exponential saturation weighting.
+
+    f(d) = 1 - exp(-d / k)
+    Δf(d) = f(d+1) - f(d) = exp(-d/k) * (1 - exp(-1/k))
+
+    Parameters
+    ----------
+    d : np.ndarray
+        Current number of detected NCs per muon (integer array).
+    k : float
+        Saturation constant. k = d* / ln(10) gives f(d*) = 0.9.
+
+    Returns
+    -------
+    np.ndarray, dtype float32
+        Marginal weight Δf(d) for each element.
+    """
+    c = 1.0 - np.exp(-1.0 / k)  # constant factor
+    return (np.exp(-d.astype(np.float32) / k) * c).astype(np.float32)
+
+
+def muon_weight_k_for_90pct(d_star: int) -> float:
+    """
+    Compute k such that f(d_star) = 0.9.
+
+    Parameters
+    ----------
+    d_star : int
+        Number of detected NCs at which 90% saturation is reached.
+
+    Returns
+    -------
+    float
+        Saturation constant k.
+    """
+    return d_star / np.log(10)
+
+
+def plot_muon_nc_histogram(
+    muon_det_counts: np.ndarray,
+    output_path: Path,
+    title_extra: str = "",
+) -> None:
+    """
+    Histogram of detected NCs per muon.
+
+    Parameters
+    ----------
+    muon_det_counts : np.ndarray, shape (num_muons,)
+        Number of detected NCs per muon.
+    output_path : Path
+        Where to save.
+    title_extra : str
+        Additional info for title.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    max_count = int(muon_det_counts.max()) if len(muon_det_counts) > 0 else 0
+    bins = np.arange(0, max_count + 2) - 0.5
+
+    ax.hist(muon_det_counts, bins=bins, edgecolor="black", linewidth=0.5,
+            color="#1976d2", alpha=0.85)
+    ax.set_xlabel("Detected NCs per muon", fontsize=12)
+    ax.set_ylabel("Number of muons", fontsize=12)
+    ax.set_title(f"Muon NC Detection Distribution"
+                 + (f"\n{title_extra}" if title_extra else ""),
+                 fontsize=13)
+    ax.set_xlim(-0.5, min(max_count + 1.5, 50.5))
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Annotate summary stats
+    n_total = len(muon_det_counts)
+    n_zero = int(np.sum(muon_det_counts == 0))
+    mean_d = float(np.mean(muon_det_counts)) if n_total > 0 else 0.0
+    median_d = float(np.median(muon_det_counts)) if n_total > 0 else 0.0
+    textstr = (f"Total muons: {n_total:,}\n"
+               f"Undetected (d=0): {n_zero:,}\n"
+               f"Mean d: {mean_d:.1f}\n"
+               f"Median d: {median_d:.0f}")
+    ax.text(0.97, 0.97, textstr, transform=ax.transAxes, fontsize=9,
+            verticalalignment="top", horizontalalignment="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.5))
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"  Muon NC histogram saved to {output_path}")
+
+
 def is_valid_pmt_position(
     center: np.ndarray,
     layer: str,
@@ -559,8 +651,11 @@ def greedy_select_nc(
     centers: np.ndarray | None = None,
     layers: np.ndarray | None = None,
     min_spacing: float = 0.0,
+    muon_weight_k: float | None = None,
+    nc_to_muon_local: np.ndarray | None = None,
+    num_muons: int = 0,
     verbose: bool = True,
-) -> tuple[list[int], list[float], np.ndarray]:
+) -> tuple[list[int], list[float], np.ndarray, np.ndarray | None]:
     """
     Greedy voxel selection maximizing NC-level threshold coverage.
 
@@ -592,6 +687,9 @@ def greedy_select_nc(
         Cumulative detection efficiency after each selection step.
     coverage_counts : np.ndarray
         Final coverage count per NC.
+    muon_det_counts : np.ndarray or None
+        If muon_weight_k is set, number of detected NCs per muon.
+        None otherwise.
     """
     num_ncs, num_voxels = B.shape
 
@@ -606,9 +704,30 @@ def greedy_select_nc(
     selected: list[int] = []
     efficiencies: list[float] = []
 
+    # Muon-level tracking for diminishing-returns weighting
+    use_muon_weight = (muon_weight_k is not None
+                       and nc_to_muon_local is not None
+                       and num_muons > 0)
+    if use_muon_weight:
+        # nc_detected_flag[i] = True once NC i is seen by any selected voxel
+        nc_detected_flag = np.zeros(num_ncs, dtype=bool)
+        # Number of detected NCs per muon
+        muon_det_counts = np.zeros(num_muons, dtype=np.int32)
+    else:
+        nc_detected_flag = None
+        muon_det_counts = None
+
+    # Dynamic M ramp: when M>1, each step checks whether any NC has
+    # reached c_i == M-1. If yes, optimize for M (promote M-1 -> M).
+    # If no, fall back to M=1 (maximize first-time coverage).
+    # This switches dynamically per step — no fixed phase boundary.
+    use_dynamic_M = (M > 1)
+
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
-        print(f"\nGreedy selection (NC mode): N={N}, M={M}{spacing_str}")
+        weight_str = f", muon_weight_k={muon_weight_k:.2f}" if use_muon_weight else ""
+        dynamic_str = f" (dynamic M: fallback to M=1 when no NCs at M-1)" if use_dynamic_M else ""
+        print(f"\nGreedy selection (NC mode): N={N}, M={M}{spacing_str}{weight_str}{dynamic_str}")
         print(f"{'Step':>4} | {'Voxel':>8} | {'Gain':>8} | "
               f"{'Detected':>10} | {'Efficiency':>10}")
         print("-" * 60)
@@ -616,10 +735,36 @@ def greedy_select_nc(
     for step in range(N):
         t0 = time.time()
 
-        at_threshold = (coverage_counts == (M - 1))
+        # Dynamic M: prefer promoting M-1 -> M when possible,
+        # otherwise fall back to building coverage with M=1.
+        if use_dynamic_M:
+            # Priority: promote M-1 -> M if possible.
+            # Otherwise, find the highest occupied level below M
+            # and promote that. This avoids zero-gain steps.
+            if np.any(coverage_counts == (M - 1)):
+                effective_M = M
+            else:
+                # Find highest c where any NC sits, up to M-2
+                max_c = 0
+                for c_level in range(M - 2, -1, -1):
+                    if np.any(coverage_counts == c_level):
+                        max_c = c_level + 1
+                        break
+                effective_M = max(max_c, 1)
+        else:
+            effective_M = M
+        at_threshold = (coverage_counts == (effective_M - 1))
 
-        # SpMV: g[v] = number of NCs at threshold that voxel v sees
-        all_gains = B.T.dot(at_threshold.astype(np.int32))
+        if use_muon_weight:
+            # Weighted SpMV: w[i] = Δf(d_μ(i)) for NCs at threshold
+            muon_ids_per_nc = nc_to_muon_local  # shape (num_ncs,)
+            d_per_nc = muon_det_counts[muon_ids_per_nc]  # current d_μ for each NC
+            weights = muon_weight_delta(d_per_nc, muon_weight_k)
+            weights[~at_threshold] = 0.0
+            all_gains = B.T.dot(weights)
+        else:
+            # SpMV: g[v] = number of NCs at threshold that voxel v sees
+            all_gains = B.T.dot(at_threshold.astype(np.int32))
         all_gains[~available] = -1
         best_voxel = int(np.argmax(all_gains))
         best_gain = int(all_gains[best_voxel])
@@ -629,6 +774,15 @@ def greedy_select_nc(
         col_end = B.indptr[best_voxel + 1]
         affected_ncs = B.indices[col_start:col_end]
         coverage_counts[affected_ncs] += 1
+
+        # Update muon detection counts (track which NCs are newly seen)
+        if use_muon_weight:
+            newly_seen = affected_ncs[~nc_detected_flag[affected_ncs]]
+            nc_detected_flag[affected_ncs] = True
+            if len(newly_seen) > 0:
+                muon_lids = nc_to_muon_local[newly_seen]
+                increments = np.bincount(muon_lids, minlength=num_muons)
+                muon_det_counts += increments.astype(np.int32)
 
         available[best_voxel] = False
         selected.append(best_voxel)
@@ -655,10 +809,12 @@ def greedy_select_nc(
         dt = time.time() - t0
 
         if verbose:
-            print(f"{step+1:>4} | {best_voxel:>8} | {best_gain:>8} | "
-                  f"{num_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s)")
+            phase_tag = f" [M=1]" if (use_dynamic_M and effective_M == 1) else ""
+            gain_str = f"{best_gain:>8.3f}" if use_muon_weight else f"{best_gain:>8}"
+            print(f"{step+1:>4} | {best_voxel:>8} | {gain_str} | "
+                  f"{num_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s){phase_tag}")
 
-    return selected, efficiencies, coverage_counts
+    return selected, efficiencies, coverage_counts, muon_det_counts
 
 
 def greedy_select_muon(
@@ -671,6 +827,7 @@ def greedy_select_muon(
     centers: np.ndarray | None = None,
     layers: np.ndarray | None = None,
     min_spacing: float = 0.0,
+    muon_weight_k: float | None = None,
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray]:
     """
@@ -742,9 +899,18 @@ def greedy_select_muon(
     selected: list[int] = []
     efficiencies: list[float] = []
 
+    use_muon_weight = (muon_weight_k is not None)
+
+    # Dynamic W ramp: when W>1, each step checks whether any muon has
+    # reached d_μ == W-1. If yes, optimize for W (promote W-1 -> W).
+    # If no, fall back to W=1 (maximize first-time NC detections).
+    use_dynamic_W = (W > 1) and not use_muon_weight
+
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
-        print(f"\nGreedy selection (muon-ge77 mode): N={N}, W={W}{spacing_str}")
+        weight_str = f", muon_weight_k={muon_weight_k:.2f}" if use_muon_weight else ""
+        dynamic_str = f" (dynamic W: fallback to W=1 when no muons at W-1)" if use_dynamic_W else ""
+        print(f"\nGreedy selection (muon-ge77 mode): N={N}, W={W}{spacing_str}{weight_str}{dynamic_str}")
         print(f"{'Step':>4} | {'Voxel':>8} | {'Gain':>8} | "
               f"{'Muons det.':>10} | {'Efficiency':>10}")
         print("-" * 60)
@@ -764,17 +930,42 @@ def greedy_select_muon(
         # It overcounts when a voxel covers multiple NCs of the same
         # muon at W-1, but this is corrected in Step B.
         # -----------------------------------------------------------------
-        muon_at_threshold = (muon_detected_counts == (W - 1))
+        # Dynamic W: prefer promoting W-1 -> W when possible.
+        # Otherwise, find the highest occupied level below W
+        # and promote that. This avoids zero-gain steps when all
+        # muons have d_μ >= 1 but none has reached W-1.
+        if use_dynamic_W:
+            if np.any(muon_detected_counts == (W - 1)):
+                effective_W = W
+            else:
+                # Find highest d where any muon sits, up to W-2
+                max_d = 0
+                for d_level in range(W - 2, -1, -1):
+                    if np.any(muon_detected_counts == d_level):
+                        max_d = d_level + 1
+                        break
+                effective_W = max(max_d, 1)
+        else:
+            effective_W = W
+        muon_at_threshold = (muon_detected_counts == (effective_W - 1))
 
         # Build weight vector (vectorized)
-        w = np.zeros(num_ncs, dtype=np.int32)
         eligible_undetected = eligible_nc_mask & (~nc_detected)
         eligible_idx = np.where(eligible_undetected)[0]
 
-        if len(eligible_idx) > 0:
-            muon_lids = nc_to_muon_local[eligible_idx]
-            at_thresh = muon_at_threshold[muon_lids]
-            w[eligible_idx[at_thresh]] = 1
+        if use_muon_weight:
+            # Weighted: w[i] = Δf(d_μ(i)) for eligible undetected NCs
+            w = np.zeros(num_ncs, dtype=np.float32)
+            if len(eligible_idx) > 0:
+                muon_lids = nc_to_muon_local[eligible_idx]
+                d_vals = muon_detected_counts[muon_lids]
+                w[eligible_idx] = muon_weight_delta(d_vals, muon_weight_k)
+        else:
+            w = np.zeros(num_ncs, dtype=np.int32)
+            if len(eligible_idx) > 0:
+                muon_lids = nc_to_muon_local[eligible_idx]
+                at_thresh = muon_at_threshold[muon_lids]
+                w[eligible_idx[at_thresh]] = 1
 
         all_gains_upper = B.T.dot(w)
         all_gains_upper[~available] = -1
@@ -790,7 +981,7 @@ def greedy_select_muon(
         # Filter to those with positive upper bound
         top_k_indices = top_k_indices[all_gains_upper[top_k_indices] > 0]
 
-        best_gain = 0
+        best_gain = 0.0 if use_muon_weight else 0
         best_voxel = -1
 
         if len(top_k_indices) == 0:
@@ -818,13 +1009,33 @@ def greedy_select_muon(
                 if len(newly_detected_ncs) == 0:
                     continue
 
-                # Map to muon local IDs and count unique muons at threshold
                 muon_lids_v = nc_to_muon_local[newly_detected_ncs]
-                at_thresh_mask = muon_at_threshold[muon_lids_v]
-                muon_lids_at_thresh = muon_lids_v[at_thresh_mask]
 
-                # Deduplicate: count unique muons
-                gain = len(np.unique(muon_lids_at_thresh))
+                if use_muon_weight:
+                    # Weighted gain: sum Δf per unique muon
+                    # For each muon, Δf depends on current d_μ.
+                    # Multiple NCs of same muon: each increments d sequentially.
+                    # Approximate: use Δf(d_μ) for each unique muon (ignoring
+                    # intra-step multi-NC increments — conservative estimate).
+                    unique_muons, counts = np.unique(muon_lids_v, return_counts=True)
+                    d_vals = muon_detected_counts[unique_muons]
+                    # Sum marginal gains: Σ_j Δf(d + j) for j=0..count-1
+                    gain = 0.0
+                    for um_idx in range(len(unique_muons)):
+                        d_cur = d_vals[um_idx]
+                        n_new = counts[um_idx]
+                        for j in range(n_new):
+                            gain += float(
+                                muon_weight_delta(
+                                    np.array([d_cur + j]), muon_weight_k
+                                )[0]
+                            )
+                else:
+                    # Unweighted: count unique muons at threshold
+                    # (uses effective_W via muon_at_threshold computed above)
+                    at_thresh_mask = muon_at_threshold[muon_lids_v]
+                    muon_lids_at_thresh = muon_lids_v[at_thresh_mask]
+                    gain = len(np.unique(muon_lids_at_thresh))
 
                 if gain > best_gain:
                     best_gain = gain
@@ -880,8 +1091,10 @@ def greedy_select_muon(
         dt = time.time() - t0
 
         if verbose:
-            print(f"{step+1:>4} | {best_voxel:>8} | {best_gain:>8} | "
-                  f"{num_muons_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s)")
+            phase_tag = f" [W=1]" if (use_dynamic_W and effective_W == 1) else ""
+            gain_str = f"{best_gain:>8.3f}" if use_muon_weight else f"{best_gain:>8}"
+            print(f"{step+1:>4} | {best_voxel:>8} | {gain_str} | "
+                  f"{num_muons_detected:>10} | {efficiency:>10.4%}  ({dt:.2f}s){phase_tag}")
 
     return selected, efficiencies, nc_detected, muon_detected_counts
 
@@ -995,6 +1208,18 @@ def plot_selected_voxels(
     )
     ax.legend(loc="upper left", fontsize=8)
 
+    # Per-area count annotation
+    area_counts = {area: int(np.sum(selected_layers == area))
+                   for area in ["pit", "bot", "top", "wall"]}
+    count_str = "\n".join(f"{a.upper():>4}: {cnt:>3} PMTs"
+                          for a, cnt in area_counts.items())
+    count_str += f"\n{'Total':>4}: {len(selected_centers):>3} PMTs"
+    ax.text2D(0.98, 0.50, count_str, transform=ax.transAxes, fontsize=9,
+              verticalalignment="center", horizontalalignment="right",
+              fontfamily="monospace",
+              bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow",
+                        edgecolor="gray", alpha=0.85))
+
     max_range = max(R_ZYLINDER, (Z_TOP - Z_BASE) / 2)
     mid_z = (Z_BASE + Z_TOP) / 2
     ax.set_xlim(-max_range, max_range)
@@ -1046,6 +1271,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--area-ratio", action="store_true",
                         help="Apply area-dependent hit scaling before "
                              "binarization (hits / ratio >= m).")
+    parser.add_argument("--muon-weight", type=float, default=None, metavar="K",
+                        help="Enable muon-level diminishing-returns weighting "
+                             "with saturation constant k. Uses f(d) = 1 - exp(-d/k). "
+                             "For 90%% saturation at 10 detected NCs, use k ≈ 4.34. "
+                             "Not compatible with --per-area.")
     parser.add_argument("--per-area", action="store_true",
                         help="Optimize each detector area (pit, bot, top, wall) "
                              "independently with N proportional to surface area.")
@@ -1071,6 +1301,15 @@ def main(argv: Optional[list[str]] = None) -> None:
             args.M = 1
 
     # Auto-generate output filename
+    # Validate muon-weight + per-area incompatibility
+    if args.muon_weight is not None and args.per_area:
+        parser.error("--muon-weight and --per-area cannot be combined. "
+                     "This combination is not implemented.")
+
+    if args.muon_weight is not None and args.muon_weight <= 0:
+        parser.error("--muon-weight must be a positive float.")
+
+    # Auto-generate output filename
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1078,11 +1317,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         spacing_tag = "nospacing" if args.no_spacing else f"spacing{int(min_spacing)}mm"
         ratio_tag = "_arearatio" if args.area_ratio else ""
         perarea_tag = "_perarea" if args.per_area else ""
+        mw_tag = f"_mw{args.muon_weight:.2f}" if args.muon_weight is not None else ""
         if args.optimize == "nc":
-            args.output = f"greedy_N{args.N}_M{args.M}_m{args.m}_{spacing_tag}{ratio_tag}{perarea_tag}.npz"
+            args.output = f"greedy_N{args.N}_M{args.M}_m{args.m}_{spacing_tag}{ratio_tag}{perarea_tag}{mw_tag}.npz"
         else:
             args.output = (f"greedy_muon_N{args.N}_W{args.W}_m{args.m}_"
-                           f"{spacing_tag}{ratio_tag}{perarea_tag}.npz")
+                           f"{spacing_tag}{ratio_tag}{perarea_tag}{mw_tag}.npz")
 
     args.output = str(output_dir / Path(args.output).name)
 
@@ -1100,6 +1340,45 @@ def main(argv: Optional[list[str]] = None) -> None:
     # --- Step 2: Run greedy ---
     # Optionally load muon data (needed for muon-ge77 mode)
     muon_data = None
+    # Load muon data for muon-ge77 mode OR for NC mode with muon weighting
+    nc_muon_weight_data = None
+    if args.optimize == "nc" and args.muon_weight is not None:
+        # Load muon IDs for NC-mode muon-awareness (no time filter)
+        with h5py.File(args.hdf5_file, "r") as f:
+            phi_columns = [c.decode() if isinstance(c, bytes) else str(c)
+                           for c in f["phi_columns"][:]]
+            phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
+            phi_matrix = f["phi_matrix"]
+            nc_global_muon_id = phi_matrix[:, phi_col_idx["global_muon_id"]].astype(np.int64)
+
+        if len(nc_global_muon_id) != B.shape[0]:
+            raise RuntimeError(
+                f"Muon data length ({len(nc_global_muon_id)}) != "
+                f"num_ncs ({B.shape[0]})"
+            )
+
+        # Validate: every NC must belong to a muon
+        unique_muon_ids = np.unique(nc_global_muon_id)
+        num_muons_nc = len(unique_muon_ids)
+        # Build local muon index (no time filter, all NCs)
+        global_to_local_nc = {int(gid): lid for lid, gid in enumerate(unique_muon_ids)}
+        nc_to_muon_local_nc = np.array(
+            [global_to_local_nc[int(gid)] for gid in nc_global_muon_id],
+            dtype=np.int32,
+        )
+
+        if verbose:
+            print(f"\nMuon weighting (NC mode):")
+            print(f"  Unique muons: {num_muons_nc:,}")
+            print(f"  k = {args.muon_weight:.4f}")
+            print(f"  f(10) = {1 - np.exp(-10/args.muon_weight):.4f}")
+
+        nc_muon_weight_data = {
+            "nc_to_muon_local": nc_to_muon_local_nc,
+            "num_muons": num_muons_nc,
+            "unique_muon_ids": unique_muon_ids,
+        }
+
     if args.optimize == "muon-ge77":
         global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
             args.hdf5_file, num_ncs=B.shape[0], verbose=verbose,
@@ -1162,7 +1441,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             layers_area = layers[area_indices]
 
             if args.optimize == "nc":
-                sel_local, eff_area, cov_area = greedy_select_nc(
+                sel_local, eff_area, cov_area, _ = greedy_select_nc(
                     B_area, N=n_area, M=args.M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing, verbose=verbose,
@@ -1182,7 +1461,9 @@ def main(argv: Optional[list[str]] = None) -> None:
                         eligible_nc_mask=eligible_nc_mask,
                         num_ge77_muons=num_ge77_muons,
                         centers=centers_area, layers=layers_area,
-                        min_spacing=min_spacing, verbose=verbose,
+                        min_spacing=min_spacing,
+                        muon_weight_k=args.muon_weight,
+                        verbose=verbose,
                     )
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
@@ -1263,10 +1544,17 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         # --- Global optimization (original behavior) ---
         if args.optimize == "nc":
-            selected_cols, efficiencies, coverage_counts = greedy_select_nc(
+            mw_kwargs = {}
+            if nc_muon_weight_data is not None:
+                mw_kwargs = {
+                    "muon_weight_k": args.muon_weight,
+                    "nc_to_muon_local": nc_muon_weight_data["nc_to_muon_local"],
+                    "num_muons": nc_muon_weight_data["num_muons"],
+                }
+            selected_cols, efficiencies, coverage_counts, muon_det_counts_nc = greedy_select_nc(
                 B, N=args.N, M=args.M,
                 centers=centers, layers=layers, min_spacing=min_spacing,
-                verbose=verbose,
+                verbose=verbose, **mw_kwargs,
             )
             selected_voxel_ids = voxel_ids[selected_cols]
             if verbose:
@@ -1297,6 +1585,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     eligible_nc_mask=eligible_nc_mask,
                     num_ge77_muons=num_ge77_muons,
                     centers=centers, layers=layers, min_spacing=min_spacing,
+                    muon_weight_k=args.muon_weight,
                     verbose=verbose,
                 )
             )
@@ -1341,6 +1630,25 @@ def main(argv: Optional[list[str]] = None) -> None:
                       f"Δeff = {eff_delta:.4%}")
             else:
                 print(f"  {rank+1:>3}. Voxel {vid} (col {col})")
+
+    # --- Muon NC detection histogram ---
+    if args.muon_weight is not None:
+        hist_path = Path(args.output).parent / (
+            Path(args.output).stem + "_muon_hist.png"
+        )
+        title_info = f"mode={args.optimize}, k={args.muon_weight:.2f}"
+        if args.optimize == "nc" and nc_muon_weight_data is not None:
+            plot_muon_nc_histogram(
+                muon_det_counts_nc,
+                hist_path,
+                title_extra=title_info,
+            )
+        elif args.optimize == "muon-ge77":
+            plot_muon_nc_histogram(
+                muon_detected_counts,
+                hist_path,
+                title_extra=title_info + f", W={args.W}",
+            )
 
     # --- Export selected voxels as JSON ---
     json_output = Path(args.output).with_suffix(".json")
