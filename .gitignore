@@ -2,4 +2,5 @@ selected/
 *.npz
 *.jpg
 *.png
+__pycache__/
 *.pyc
