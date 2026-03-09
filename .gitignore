@@ -2,3 +2,4 @@ selected/
 *.npz
 *.jpg
 *.png
+*.pyc
