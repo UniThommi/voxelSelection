@@ -107,6 +107,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--muon-weight", type=float, default=None, metavar="K",
                         help="Muon-level diminishing-returns weighting "
                              "with saturation constant k.")
+    parser.add_argument("--dynamic", action="store_true",
+                        help="Use dynamic M/W fallback instead of priority "
+                             "logic. Cannot be used with M>1 and W>1 "
+                             "simultaneously.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for stochastic rounding.")
 
@@ -161,6 +165,8 @@ def main(argv: Optional[list[str]] = None) -> None:
             greedy_only_errors.append("--muon-weight")
         if do_sensitivity:
             greedy_only_errors.append("--sensitivity")
+        if args.dynamic:
+            greedy_only_errors.append("--dynamic")
         if args.deltas is not None:
             greedy_only_errors.append("--deltas")
         if greedy_only_errors:
@@ -188,6 +194,11 @@ def main(argv: Optional[list[str]] = None) -> None:
 
         if args.muon_weight is not None and args.muon_weight <= 0:
             parser.error("--muon-weight must be a positive float.")
+
+        if args.dynamic and args.M > 1 and args.W is not None and args.W > 1:
+            parser.error("--dynamic does not support M>1 and W>1 "
+                            "simultaneously. Use priority mode (without "
+                            "--dynamic) instead.")
 
     # --- Build ratios ---
     area_ratios = dict(DEFAULT_AREA_RATIOS)
@@ -350,20 +361,23 @@ def main(argv: Optional[list[str]] = None) -> None:
                 sel_local, _, _, _ = greedy_select_nc(
                     B_area, N=n_area, M=args.M,
                     centers=centers_area, layers=layers_area,
-                    min_spacing=min_spacing, verbose=verbose,
+                    min_spacing=min_spacing, dynamic=args.dynamic,
+                    verbose=verbose,
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
                 all_selected_cols.extend(sel_global)
 
             elif args.optimize == "muon-ge77":
-                sel_local, _, nc_det_area, muon_det_area = greedy_select_muon(
+                sel_local, _, nc_det_area, muon_det_area, _ = greedy_select_muon(
                     B_area, N=n_area, W=args.W,
                     nc_to_muon_local=nc_to_muon_local,
                     eligible_nc_mask=eligible_nc_mask,
                     num_ge77_muons=num_ge77_muons,
+                    M=args.M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing,
                     muon_weight_k=args.muon_weight,
+                    dynamic=args.dynamic,
                     verbose=verbose,
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
@@ -407,8 +421,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                 greedy_select_nc(
                     B, N=args.N, M=args.M,
                     centers=centers, layers=layers,
-                    min_spacing=min_spacing, verbose=verbose,
-                    **mw_kwargs,
+                    min_spacing=min_spacing, dynamic=args.dynamic,
+                    verbose=verbose, **mw_kwargs,
                 )
             )
             final_eff = efficiencies[-1]
@@ -416,15 +430,17 @@ def main(argv: Optional[list[str]] = None) -> None:
             nc_detected = None
 
         elif args.optimize == "muon-ge77":
-            selected_cols, efficiencies, nc_detected, muon_detected_counts = (
+            selected_cols, efficiencies, nc_detected, muon_detected_counts, _ = (
                 greedy_select_muon(
                     B, N=args.N, W=args.W,
                     nc_to_muon_local=nc_to_muon_local,
                     eligible_nc_mask=eligible_nc_mask,
                     num_ge77_muons=num_ge77_muons,
+                    M=args.M,
                     centers=centers, layers=layers,
                     min_spacing=min_spacing,
                     muon_weight_k=args.muon_weight,
+                    dynamic=args.dynamic,
                     verbose=verbose,
                 )
             )
@@ -604,6 +620,9 @@ def main(argv: Optional[list[str]] = None) -> None:
             seed=args.seed,
             deltas=deltas,
             output_dir=sens_output_dir,
+            dynamic=args.dynamic,
+            baseline_selected=selected_cols,
+            baseline_eff=final_eff,
             verbose=verbose,
         )
 

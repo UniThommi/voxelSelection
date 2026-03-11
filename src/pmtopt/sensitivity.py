@@ -15,6 +15,7 @@ from .geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS, compute_per_area_N
 from .data_loading import (
     get_valid_voxel_mask, load_and_binarize,
     load_muon_data, build_muon_index, load_nc_muon_ids,
+    load_raw_sparse, binarize_from_raw,
 )
 from .greedy import greedy_select_nc, greedy_select_muon
 from .plotting import (
@@ -75,11 +76,19 @@ def compute_per_area_jaccard(
 # Single greedy run with custom ratios
 # ---------------------------------------------------------------------------
 
-def run_single_greedy(
+def run_single_greedy_from_raw(
+    raw_rows: np.ndarray,
+    raw_cols: np.ndarray,
+    raw_vals: np.ndarray,
+    num_ncs: int,
+    voxel_ids: np.ndarray,
+    centers: np.ndarray,
+    layers: np.ndarray,
+    num_primaries: int,
+    area_ratios: dict[str, float],
     filepath: str,
     N: int,
     m: int,
-    area_ratios: dict[str, float],
     optimize: str,
     M: int = 1,
     W: int = 1,
@@ -87,24 +96,31 @@ def run_single_greedy(
     per_area: bool = False,
     muon_weight_k: float | None = None,
     seed: int = 42,
+    dynamic: bool = False,
     verbose: bool = False,
 ) -> tuple[list[int], float]:
     """
-    Run a single greedy optimization with given area ratios.
-
-    Returns selected voxel column indices (in order) and final efficiency.
-    B is constructed and released within this function to avoid OOM.
+    Run greedy optimization from pre-loaded raw sparse data.
+    No HDF5 I/O — only in-memory rounding and greedy.
     """
-    B, voxel_ids, centers, layers, num_primaries = load_and_binarize(
-        filepath, m=m, area_ratios=area_ratios,
-        seed=seed, verbose=verbose,
+
+    num_voxels = len(voxel_ids)
+    B = binarize_from_raw(
+        raw_rows, raw_cols, raw_vals,
+        num_ncs, num_voxels, layers,
+        area_ratios, m, seed=seed,
     )
 
-    # Load muon data if needed
+    if verbose:
+        nnz = B.nnz
+        density = nnz / (num_ncs * num_voxels) * 100 if num_ncs * num_voxels > 0 else 0
+        print(f"  B: nnz={nnz:,} ({density:.4f}%)")
+
+    # Load muon data if needed (lightweight, cached by OS)
     nc_muon_weight_data = None
     if optimize == "nc" and muon_weight_k is not None:
         nc_to_muon_local_nc, num_muons_nc, _ = load_nc_muon_ids(
-            filepath, num_ncs=B.shape[0], verbose=False,
+            filepath, num_ncs=num_ncs, verbose=False,
         )
         nc_muon_weight_data = {
             "nc_to_muon_local": nc_to_muon_local_nc,
@@ -116,7 +132,7 @@ def run_single_greedy(
     num_ge77_muons = 0
     if optimize == "muon-ge77":
         global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
-            filepath, num_ncs=B.shape[0], verbose=False,
+            filepath, num_ncs=num_ncs, verbose=False,
         )
         (nc_to_muon_local, _, _,
          eligible_nc_mask, num_ge77_muons) = build_muon_index(
@@ -135,7 +151,6 @@ def run_single_greedy(
             n_area = allocation[area_name]
             if n_area == 0:
                 continue
-
             area_mask = (layers == area_name)
             area_indices = np.where(area_mask)[0]
             if len(area_indices) == 0:
@@ -149,31 +164,28 @@ def run_single_greedy(
                 sel_local, _, _, _ = greedy_select_nc(
                     B_area, N=n_area, M=M,
                     centers=centers_area, layers=layers_area,
-                    min_spacing=min_spacing, verbose=False,
+                    min_spacing=min_spacing, dynamic=dynamic,
+                    verbose=False,
                 )
-                sel_global = [int(area_indices[i]) for i in sel_local]
-                all_selected.extend(sel_global)
-
+                all_selected.extend(int(area_indices[i]) for i in sel_local)
             elif optimize == "muon-ge77":
-                sel_local, _, nc_det, muon_det = greedy_select_muon(
+                sel_local, _, nc_det, muon_det, _ = greedy_select_muon(
                     B_area, N=n_area, W=W,
                     nc_to_muon_local=nc_to_muon_local,
                     eligible_nc_mask=eligible_nc_mask,
                     num_ge77_muons=num_ge77_muons,
+                    M=M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing,
                     muon_weight_k=muon_weight_k,
-                    verbose=False,
+                    dynamic=dynamic, verbose=False,
                 )
-                sel_global = [int(area_indices[i]) for i in sel_local]
-                all_selected.extend(sel_global)
+                all_selected.extend(int(area_indices[i]) for i in sel_local)
                 shared_nc_detected |= nc_det
                 shared_muon_counts += muon_det
-
             del B_area
 
         selected_cols = all_selected
-
         if optimize == "nc":
             coverage_counts = np.zeros(B.shape[0], dtype=np.int16)
             for col in selected_cols:
@@ -183,7 +195,6 @@ def run_single_greedy(
         else:
             n_det = int(np.sum(shared_muon_counts >= W))
             final_eff = n_det / num_ge77_muons if num_ge77_muons > 0 else 0.0
-
     else:
         if optimize == "nc":
             mw_kwargs = {}
@@ -196,21 +207,21 @@ def run_single_greedy(
             selected_cols, effs, _, _ = greedy_select_nc(
                 B, N=N, M=M,
                 centers=centers, layers=layers,
-                min_spacing=min_spacing, verbose=False,
-                **mw_kwargs,
+                min_spacing=min_spacing, dynamic=dynamic,
+                verbose=False, **mw_kwargs,
             )
             final_eff = effs[-1] if effs else 0.0
-
         elif optimize == "muon-ge77":
-            selected_cols, effs, _, _ = greedy_select_muon(
+            selected_cols, effs, _, _, _ = greedy_select_muon(
                 B, N=N, W=W,
                 nc_to_muon_local=nc_to_muon_local,
                 eligible_nc_mask=eligible_nc_mask,
                 num_ge77_muons=num_ge77_muons,
+                M=M,
                 centers=centers, layers=layers,
                 min_spacing=min_spacing,
                 muon_weight_k=muon_weight_k,
-                verbose=False,
+                dynamic=dynamic, verbose=False,
             )
             final_eff = effs[-1] if effs else 0.0
 
@@ -236,6 +247,9 @@ def run_sensitivity(
     seed: int = 42,
     deltas: list[float] | None = None,
     output_dir: str = "sensitivity_results",
+    dynamic: bool = False,
+    baseline_selected: list[int] | None = None,
+    baseline_eff: float | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -298,38 +312,36 @@ def run_sensitivity(
     print(f"  Output dir:  {out_dir}")
     print()
 
-    # Baseline
-    print(f"[Baseline] Running nominal greedy (δ = 0)...")
-    t0 = time.time()
+    # ---- Load raw data ONCE ----
+    print("Loading raw sparse data (one-time I/O)...")
+    (raw_rows, raw_cols, raw_vals,
+     voxel_ids, centers, layers_all,
+     num_ncs, num_primaries) = load_raw_sparse(filepath, verbose=True)
+    num_voxels = len(voxel_ids)
 
-    baseline_selected, baseline_eff = run_single_greedy(
-        filepath=filepath, N=N, m=m,
-        area_ratios=area_ratios,
-        optimize=optimize, M=M, W=W,
-        min_spacing=min_spacing,
-        per_area=per_area,
-        muon_weight_k=muon_weight_k,
-        seed=seed, verbose=True,
-    )
+    # ---- Baseline ----
+    if baseline_selected is not None and baseline_eff is not None:
+        print(f"\n[Baseline] Using pre-computed baseline from greedy phase.")
+        print(f"  Baseline efficiency: {baseline_eff:.4%}")
+        t_baseline = 0.0
+    else:
+        print(f"\n[Baseline] Running nominal greedy (δ = 0)...")
+        t0 = time.time()
 
-    t_baseline = time.time() - t0
-    print(f"  Baseline efficiency: {baseline_eff:.4%}")
-    print(f"  Baseline time: {t_baseline:.1f}s")
-
-    # Load layers for per-area Jaccard
-    with h5py.File(filepath, "r") as f:
-        voxel_keys = sorted(
-            c.decode() if isinstance(c, bytes) else str(c)
-            for c in f["target_columns"][:]
+        baseline_selected, baseline_eff = run_single_greedy_from_raw(
+            raw_rows, raw_cols, raw_vals,
+            num_ncs, voxel_ids, centers, layers_all, num_primaries,
+            area_ratios=area_ratios,
+            filepath=filepath,
+            N=N, m=m, optimize=optimize,
+            M=M, W=W, min_spacing=min_spacing,
+            per_area=per_area, muon_weight_k=muon_weight_k,
+            seed=seed, dynamic=dynamic, verbose=True,
         )
-        valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=False)
-        valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
-        layers_all = np.empty(len(valid_keys), dtype=object)
-        for i, vkey in enumerate(valid_keys):
-            layer_raw = f[f"voxels/{vkey}/layer"][()]
-            layers_all[i] = (layer_raw.decode()
-                             if isinstance(layer_raw, bytes)
-                             else str(layer_raw))
+
+        t_baseline = time.time() - t0
+        print(f"  Baseline efficiency: {baseline_eff:.4%}")
+        print(f"  Baseline time: {t_baseline:.1f}s")
 
     # Perturbed runs
     results: dict[float, dict] = {}
@@ -344,14 +356,15 @@ def run_sensitivity(
               f"Ratios: { {a: f'{r:.4f}' for a, r in perturbed_ratios.items()} }")
         t0 = time.time()
 
-        pert_selected, pert_eff = run_single_greedy(
-            filepath=filepath, N=N, m=m,
+        pert_selected, pert_eff = run_single_greedy_from_raw(
+            raw_rows, raw_cols, raw_vals,
+            num_ncs, voxel_ids, centers, layers_all, num_primaries,
             area_ratios=perturbed_ratios,
-            optimize=optimize, M=M, W=W,
-            min_spacing=min_spacing,
-            per_area=per_area,
-            muon_weight_k=muon_weight_k,
-            seed=seed, verbose=False,
+            filepath=filepath,
+            N=N, m=m, optimize=optimize,
+            M=M, W=W, min_spacing=min_spacing,
+            per_area=per_area, muon_weight_k=muon_weight_k,
+            seed=seed, dynamic=dynamic, verbose=False,
         )
 
         dt = time.time() - t0

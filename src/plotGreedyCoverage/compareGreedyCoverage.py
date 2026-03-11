@@ -29,7 +29,7 @@ Usage:
         results/ncM6m1.npz "NC M=6" \
         -o comparison.png
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Ferundo (Thesis project, University of Tübingen)
 """
 
 import argparse

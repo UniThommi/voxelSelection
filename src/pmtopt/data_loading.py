@@ -396,3 +396,196 @@ def load_nc_muon_ids(
         print(f"  Unique muons: {num_muons:,}")
 
     return nc_to_muon_local, num_muons, unique_muon_ids
+
+def load_raw_sparse(
+    filepath: str,
+    verbose: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """
+    Load raw (unscaled) hit values from HDF5 as sparse COO arrays.
+    Only valid voxels (PMT-placeable) and non-zero entries are kept.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to HDF5 file.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    raw_rows : np.ndarray, dtype int64
+        NC indices of non-zero entries.
+    raw_cols : np.ndarray, dtype int32
+        Valid-voxel column indices of non-zero entries.
+    raw_vals : np.ndarray, dtype int32
+        Hit counts (before any scaling).
+    voxel_ids : np.ndarray of str
+        Voxel ID strings for valid voxels.
+    centers : np.ndarray, shape (num_valid, 3)
+        Voxel centers.
+    layers : np.ndarray of str
+        Layer labels per valid voxel.
+    num_ncs : int
+        Total number of NCs.
+    num_primaries : int
+        Total number of primaries.
+    """
+    with h5py.File(filepath, "r") as f:
+        voxel_keys = sorted(
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        )
+
+        valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
+        valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
+        num_voxels = len(valid_keys)
+
+        centers = np.empty((num_voxels, 3), dtype=np.float64)
+        layers = np.empty(num_voxels, dtype=object)
+        for i, vkey in enumerate(valid_keys):
+            centers[i] = f[f"voxels/{vkey}/center"][:]
+            layer_raw = f[f"voxels/{vkey}/layer"][()]
+            layers[i] = (layer_raw.decode() if isinstance(layer_raw, bytes)
+                         else str(layer_raw))
+
+        target_columns = [
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        ]
+        target_col_to_idx = {c: i for i, c in enumerate(target_columns)}
+        valid_col_indices_arr = np.array(
+            [target_col_to_idx[k] for k in valid_keys]
+        )
+
+        num_ncs = f["target_matrix"].shape[0]
+        num_primaries = int(f["primaries"][()])
+
+        if verbose:
+            print(f"Loading raw sparse data: {num_ncs} NCs, "
+                  f"{num_voxels} valid voxels")
+
+        BATCH_SIZE = 1000
+        rows_list: list[np.ndarray] = []
+        cols_list: list[np.ndarray] = []
+        vals_list: list[np.ndarray] = []
+
+        target_dset = f["target_matrix"]
+        total_batches = (num_ncs - 1) // BATCH_SIZE + 1
+        t_start = time.time()
+        t_last = t_start
+
+        for batch_idx, row_start in enumerate(range(0, num_ncs, BATCH_SIZE)):
+            row_end = min(row_start + BATCH_SIZE, num_ncs)
+            block = target_dset[row_start:row_end, :]
+            block_valid = block[:, valid_col_indices_arr]
+
+            nc_idx, col_idx = np.nonzero(block_valid)
+            if len(nc_idx) > 0:
+                rows_list.append(nc_idx.astype(np.int64) + row_start)
+                cols_list.append(col_idx.astype(np.int32))
+                vals_list.append(
+                    block_valid[nc_idx, col_idx].astype(np.int32)
+                )
+
+            t_now = time.time()
+            if verbose and (t_now - t_last >= 5.0
+                            or batch_idx == total_batches - 1):
+                elapsed = t_now - t_start
+                frac = (batch_idx + 1) / total_batches
+                eta = (elapsed / frac - elapsed) if frac > 0.01 else 0.0
+                print(f"  Batch {batch_idx+1}/{total_batches} "
+                      f"({frac:.1%}) | "
+                      f"elapsed {elapsed:.1f}s | "
+                      f"ETA {eta:.1f}s", end="\r")
+                t_last = t_now
+
+        elapsed = time.time() - t_start
+        if verbose:
+            print(f"\n  Raw data loaded in {elapsed:.1f}s")
+
+        if len(rows_list) > 0:
+            raw_rows = np.concatenate(rows_list)
+            raw_cols = np.concatenate(cols_list)
+            raw_vals = np.concatenate(vals_list)
+        else:
+            raw_rows = np.array([], dtype=np.int64)
+            raw_cols = np.array([], dtype=np.int32)
+            raw_vals = np.array([], dtype=np.int32)
+
+        if verbose:
+            mem_mb = (raw_rows.nbytes + raw_cols.nbytes
+                      + raw_vals.nbytes) / 1e6
+            print(f"  Non-zero entries: {len(raw_vals):,}")
+            print(f"  Sparse RAM: {mem_mb:.1f} MB")
+
+        voxel_ids = np.array(valid_keys)
+
+    return (raw_rows, raw_cols, raw_vals,
+            voxel_ids, centers, layers, num_ncs, num_primaries)
+
+
+def binarize_from_raw(
+    raw_rows: np.ndarray,
+    raw_cols: np.ndarray,
+    raw_vals: np.ndarray,
+    num_ncs: int,
+    num_voxels: int,
+    layers: np.ndarray,
+    area_ratios: dict[str, float],
+    m: int,
+    seed: int = 42,
+) -> sparse.csc_matrix:
+    """
+    Apply stochastic rounding to raw hits and binarize.
+
+    Parameters
+    ----------
+    raw_rows, raw_cols, raw_vals : np.ndarray
+        Sparse COO arrays of raw hit counts.
+    num_ncs : int
+        Total number of NCs (rows).
+    num_voxels : int
+        Number of valid voxels (columns).
+    layers : np.ndarray of str
+        Layer labels per valid voxel.
+    area_ratios : dict[str, float]
+        SSD/PMT ratios per area.
+    m : int
+        Hit threshold for binarization.
+    seed : int
+        Random seed for stochastic rounding.
+
+    Returns
+    -------
+    B : sparse.csc_matrix
+        Binary matrix (NCs x valid_voxels).
+    """
+    from .ratio_scaling import build_ratio_vec
+
+    rng = np.random.default_rng(seed)
+    ratio_vec = build_ratio_vec(layers, area_ratios)
+
+    # Scale each non-zero entry by its column's ratio
+    ratios_per_entry = ratio_vec[raw_cols]
+    scaled = raw_vals.astype(np.float64) / ratios_per_entry
+
+    # Stochastic rounding
+    floor_vals = np.floor(scaled).astype(np.int32)
+    fractional = scaled - floor_vals
+    coin = rng.random(len(fractional)) < fractional
+    rounded = floor_vals + coin.astype(np.int32)
+
+    # Binarize: keep only entries where rounded >= m
+    keep = rounded >= m
+    b_rows = raw_rows[keep]
+    b_cols = raw_cols[keep]
+    b_data = np.ones(keep.sum(), dtype=np.int8)
+
+    B = sparse.coo_matrix(
+        (b_data, (b_rows, b_cols)),
+        shape=(num_ncs, num_voxels),
+        dtype=np.int8,
+    ).tocsc()
+
+    return B
