@@ -97,6 +97,8 @@ def run_single_greedy_from_raw(
     muon_weight_k: float | None = None,
     seed: int = 42,
     dynamic: bool = False,
+    worst: bool = False,
+    muon_cache: dict | None = None,
     verbose: bool = False,
 ) -> tuple[list[int], float]:
     """
@@ -116,28 +118,39 @@ def run_single_greedy_from_raw(
         density = nnz / (num_ncs * num_voxels) * 100 if num_ncs * num_voxels > 0 else 0
         print(f"  B: nnz={nnz:,} ({density:.4f}%)")
 
-    # Load muon data if needed (lightweight, cached by OS)
+    # Use cached muon data if available, otherwise load
     nc_muon_weight_data = None
-    if optimize == "nc" and muon_weight_k is not None:
-        nc_to_muon_local_nc, num_muons_nc, _ = load_nc_muon_ids(
-            filepath, num_ncs=num_ncs, verbose=False,
-        )
-        nc_muon_weight_data = {
-            "nc_to_muon_local": nc_to_muon_local_nc,
-            "num_muons": num_muons_nc,
-        }
-
     nc_to_muon_local = None
     eligible_nc_mask = None
     num_ge77_muons = 0
-    if optimize == "muon-ge77":
-        global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
-            filepath, num_ncs=num_ncs, verbose=False,
-        )
-        (nc_to_muon_local, _, _,
-         eligible_nc_mask, num_ge77_muons) = build_muon_index(
-            global_muon_id, nc_time_ns, nc_flag_ge77, verbose=False,
-        )
+
+    if muon_cache is not None:
+        if optimize == "muon-ge77":
+            nc_to_muon_local = muon_cache["nc_to_muon_local"]
+            eligible_nc_mask = muon_cache["eligible_nc_mask"]
+            num_ge77_muons = muon_cache["num_ge77_muons"]
+        elif optimize == "nc" and muon_weight_k is not None:
+            nc_muon_weight_data = {
+                "nc_to_muon_local": muon_cache["nc_to_muon_local"],
+                "num_muons": muon_cache["num_muons"],
+            }
+    else:
+        if optimize == "nc" and muon_weight_k is not None:
+            nc_to_muon_local_nc, num_muons_nc, _ = load_nc_muon_ids(
+                filepath, num_ncs=num_ncs, verbose=False,
+            )
+            nc_muon_weight_data = {
+                "nc_to_muon_local": nc_to_muon_local_nc,
+                "num_muons": num_muons_nc,
+            }
+        if optimize == "muon-ge77":
+            global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
+                filepath, num_ncs=num_ncs, verbose=False,
+            )
+            (nc_to_muon_local, _, _,
+             eligible_nc_mask, num_ge77_muons) = build_muon_index(
+                global_muon_id, nc_time_ns, nc_flag_ge77, verbose=False,
+            )
 
     if per_area:
         allocation = compute_per_area_N(N, verbose=False)
@@ -248,6 +261,7 @@ def run_sensitivity(
     deltas: list[float] | None = None,
     output_dir: str = "sensitivity_results",
     dynamic: bool = False,
+    worst: bool = False,
     baseline_selected: list[int] | None = None,
     baseline_eff: float | None = None,
     verbose: bool = True,
@@ -319,6 +333,32 @@ def run_sensitivity(
      num_ncs, num_primaries) = load_raw_sparse(filepath, verbose=True)
     num_voxels = len(voxel_ids)
 
+    # ---- Pre-load muon data ONCE (avoids re-reading per perturbation) ----
+    muon_cache = None
+    if optimize == "muon-ge77":
+        from .data_loading import load_muon_data, build_muon_index
+        global_muon_id, nc_time_ns, nc_flag_ge77 = load_muon_data(
+            filepath, num_ncs=num_ncs, verbose=True,
+        )
+        (nc_to_muon_local, muon_nc_counts, ge77_muon_global_ids,
+         eligible_nc_mask, num_ge77_muons) = build_muon_index(
+            global_muon_id, nc_time_ns, nc_flag_ge77, verbose=True,
+        )
+        muon_cache = {
+            "nc_to_muon_local": nc_to_muon_local,
+            "eligible_nc_mask": eligible_nc_mask,
+            "num_ge77_muons": num_ge77_muons,
+        }
+    elif optimize == "nc" and muon_weight_k is not None:
+        from .data_loading import load_nc_muon_ids
+        nc_to_muon_local_nc, num_muons_nc, _ = load_nc_muon_ids(
+            filepath, num_ncs=num_ncs, verbose=True,
+        )
+        muon_cache = {
+            "nc_to_muon_local": nc_to_muon_local_nc,
+            "num_muons": num_muons_nc,
+        }
+
     # ---- Baseline ----
     if baseline_selected is not None and baseline_eff is not None:
         print(f"\n[Baseline] Using pre-computed baseline from greedy phase.")
@@ -336,7 +376,8 @@ def run_sensitivity(
             N=N, m=m, optimize=optimize,
             M=M, W=W, min_spacing=min_spacing,
             per_area=per_area, muon_weight_k=muon_weight_k,
-            seed=seed, dynamic=dynamic, verbose=True,
+            seed=seed, dynamic=dynamic, worst=worst,
+            muon_cache=muon_cache, verbose=True,
         )
 
         t_baseline = time.time() - t0
@@ -364,7 +405,8 @@ def run_sensitivity(
             N=N, m=m, optimize=optimize,
             M=M, W=W, min_spacing=min_spacing,
             per_area=per_area, muon_weight_k=muon_weight_k,
-            seed=seed, dynamic=dynamic, verbose=False,
+            seed=seed, dynamic=dynamic, worst=worst,
+            muon_cache=muon_cache, verbose=True,
         )
 
         dt = time.time() - t0

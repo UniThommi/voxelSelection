@@ -111,6 +111,10 @@ def main(argv: Optional[list[str]] = None) -> None:
                         help="Use dynamic M/W fallback instead of priority "
                              "logic. Cannot be used with M>1 and W>1 "
                              "simultaneously.")
+    parser.add_argument("--worst", action="store_true",
+                        help="Worst-case benchmark: select voxels with "
+                             "minimal gain, avoiding M/W promotions. "
+                             "Cannot be combined with --dynamic.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for stochastic rounding.")
 
@@ -167,6 +171,8 @@ def main(argv: Optional[list[str]] = None) -> None:
             greedy_only_errors.append("--sensitivity")
         if args.dynamic:
             greedy_only_errors.append("--dynamic")
+        if args.worst:
+            greedy_only_errors.append("--worst")
         if args.deltas is not None:
             greedy_only_errors.append("--deltas")
         if greedy_only_errors:
@@ -199,6 +205,8 @@ def main(argv: Optional[list[str]] = None) -> None:
             parser.error("--dynamic does not support M>1 and W>1 "
                             "simultaneously. Use priority mode (without "
                             "--dynamic) instead.")
+        if args.dynamic and args.worst:
+            parser.error("--dynamic and --worst cannot be combined.")
 
     # --- Build ratios ---
     area_ratios = dict(DEFAULT_AREA_RATIOS)
@@ -362,7 +370,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     B_area, N=n_area, M=args.M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing, dynamic=args.dynamic,
-                    verbose=verbose,
+                    worst=args.worst, verbose=verbose,
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
                 all_selected_cols.extend(sel_global)
@@ -378,6 +386,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     min_spacing=min_spacing,
                     muon_weight_k=args.muon_weight,
                     dynamic=args.dynamic,
+                    worst=args.worst,
                     verbose=verbose,
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
@@ -422,7 +431,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     B, N=args.N, M=args.M,
                     centers=centers, layers=layers,
                     min_spacing=min_spacing, dynamic=args.dynamic,
-                    verbose=verbose, **mw_kwargs,
+                    worst=args.worst, verbose=verbose, **mw_kwargs,
                 )
             )
             final_eff = efficiencies[-1]
@@ -441,6 +450,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     min_spacing=min_spacing,
                     muon_weight_k=args.muon_weight,
                     dynamic=args.dynamic,
+                    worst=args.worst,
                     verbose=verbose,
                 )
             )
@@ -621,6 +631,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             deltas=deltas,
             output_dir=sens_output_dir,
             dynamic=args.dynamic,
+            worst=args.worst,
             baseline_selected=selected_cols,
             baseline_eff=final_eff,
             verbose=verbose,

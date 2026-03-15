@@ -79,6 +79,7 @@ def greedy_select_nc(
     nc_to_muon_local: np.ndarray | None = None,
     num_muons: int = 0,
     dynamic: bool = False,
+    worst: bool = False,
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray | None]:
     """
@@ -150,13 +151,15 @@ def greedy_select_nc(
         nc_detected_flag = None
         muon_det_counts = None
 
-    use_priority_M = (M > 1) and not dynamic
+    use_priority_M = (M > 1) and not dynamic and not worst
     use_dynamic_M = (M > 1) and dynamic
 
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
         weight_str = f", muon_weight_k={muon_weight_k:.2f}" if use_muon_weight else ""
-        if use_dynamic_M:
+        if worst:
+            mode_str = " (WORST: minimal gain selection)"
+        elif use_dynamic_M:
             mode_str = " (dynamic M: fallback when no NCs at M-1)"
         elif use_priority_M:
             mode_str = " (priority M: M=1 baseline, M-1→M prioritized)"
@@ -172,7 +175,29 @@ def greedy_select_nc(
         t0 = time.time()
         phase_tag = ""
 
-        if use_priority_M:
+        if worst:
+            # --- Worst mode: select voxel with MINIMAL gain ---
+            at_m1 = (coverage_counts == 0)
+            gains_m1 = B.T.dot(at_m1.astype(np.int32))
+            gains_m1[~available] = num_ncs + 1  # exclude unavailable
+
+            # Check M-promotion avoidance if M > 1
+            if M > 1:
+                at_mthresh = (coverage_counts == (M - 1))
+                if np.any(at_mthresh):
+                    gains_M = B.T.dot(at_mthresh.astype(np.int32))
+                    # Exclude voxels that would promote any NC to M
+                    promotes_M = (gains_M > 0) & available
+                    if promotes_M.sum() < available.sum():
+                        # There are voxels that don't promote — prefer those
+                        gains_m1[promotes_M] = num_ncs + 1
+
+            # Select minimum gain among available
+            best_voxel = int(np.argmin(gains_m1))
+            best_gain = int(B.T.dot(at_m1.astype(np.int32))[best_voxel])
+            phase_tag = " [WORST]"
+
+        elif use_priority_M:
             # --- Priority mode ---
             # Always compute M=1 gain as baseline
             at_m1 = (coverage_counts == 0)
@@ -301,6 +326,7 @@ def greedy_select_muon(
     min_spacing: float = 0.0,
     muon_weight_k: float | None = None,
     dynamic: bool = False,
+    worst: bool = False,
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -368,13 +394,15 @@ def greedy_select_muon(
     efficiencies: list[float] = []
 
     use_muon_weight = (muon_weight_k is not None)
-    use_priority = (not dynamic) and ((M > 1) or (W > 1))
+    use_priority = (not dynamic) and (not worst) and ((M > 1) or (W > 1))
     use_dynamic_W = dynamic and (W > 1) and not use_muon_weight
 
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
         weight_str = f", muon_weight_k={muon_weight_k:.2f}" if use_muon_weight else ""
-        if use_dynamic_W:
+        if worst:
+            mode_str = " (WORST: minimal gain, avoids M/W promotion)"
+        elif use_dynamic_W:
             mode_str = " (dynamic W: fallback when no muons at W-1)"
         elif use_priority:
             mode_str = f" (priority: M=1 baseline, M-trigger, W-trigger; M={M}, W={W})"
@@ -390,7 +418,82 @@ def greedy_select_muon(
         t0 = time.time()
         phase_tag = ""
 
-        if use_priority:
+        if worst:
+            # ============================================================
+            # WORST MODE: select voxel with minimal gain, avoiding
+            # M and W promotions when possible.
+            # ============================================================
+            eligible_unseen = eligible_nc_mask & (coverage_counts == 0)
+            w_m1 = np.zeros(num_ncs, dtype=np.int32)
+            w_m1[eligible_unseen] = 1
+            gains_m1 = B.T.dot(w_m1)
+            gains_m1[~available] = num_ncs + 1
+
+            # Compute per-voxel: how many muons would cross W, how many
+            # NCs would cross M
+            avail_indices = np.where(available)[0]
+
+            # Precompute M-threshold and W-threshold states
+            at_m_thresh = (coverage_counts == (M - 1)) & eligible_nc_mask
+            muon_at_w_thresh = (muon_detected_counts == (W - 1))
+
+            # For each available voxel, compute W-promotions and M-promotions
+            w_promotes = np.zeros(num_voxels, dtype=np.int32)
+            m_promotes = np.zeros(num_voxels, dtype=np.int32)
+
+            if M > 1 and np.any(at_m_thresh):
+                m_promotes_vec = B.T.dot(at_m_thresh.astype(np.int32))
+                m_promotes = m_promotes_vec
+
+            if W > 1 and np.any(muon_at_w_thresh):
+                # W-promotions need per-voxel dedup over muons
+                # Use SpMV upper bound (fast, slight overcount is fine
+                # for exclusion logic — we want to AVOID these voxels)
+                w_weight = np.zeros(num_ncs, dtype=np.int32)
+                if M > 1:
+                    # NC must be at M-1 to be promoted, and its muon at W-1
+                    at_both = at_m_thresh.copy()
+                    nc_muon_lids = nc_to_muon_local[np.where(at_both)[0]]
+                    at_w = muon_at_w_thresh[nc_muon_lids]
+                    both_idx = np.where(at_both)[0][at_w]
+                    w_weight[both_idx] = 1
+                else:
+                    # M=1: NC just needs to be unseen and muon at W-1
+                    eligible_und = eligible_nc_mask & (~nc_detected)
+                    eligible_und_idx = np.where(eligible_und)[0]
+                    if len(eligible_und_idx) > 0:
+                        muon_lids = nc_to_muon_local[eligible_und_idx]
+                        at_w = muon_at_w_thresh[muon_lids]
+                        w_weight[eligible_und_idx[at_w]] = 1
+                w_promotes = B.T.dot(w_weight)
+
+            # Selection logic: minimize, with exclusion tiers
+            # Tier 1: Exclude voxels that promote W (if alternatives exist)
+            # Tier 2: Among remaining, exclude voxels that promote M
+            # Tier 3: Among remaining, take minimal gain
+
+            candidate_mask = available.copy()
+
+            if W > 1:
+                no_w_promote = candidate_mask & (w_promotes == 0)
+                if no_w_promote.any():
+                    candidate_mask = no_w_promote
+
+            if M > 1:
+                no_m_promote = candidate_mask & (m_promotes == 0)
+                if no_m_promote.any():
+                    candidate_mask = no_m_promote
+
+            # Among candidates, pick minimal gain
+            # (for ties in gain: pick minimal W-promotion, then M-promotion)
+            scores = gains_m1.copy().astype(np.float64)
+            scores[~candidate_mask] = num_ncs + 1
+
+            best_voxel = int(np.argmin(scores))
+            best_gain = int(gains_m1[best_voxel]) if gains_m1[best_voxel] <= num_ncs else 0
+            phase_tag = " [WORST]"
+
+        elif use_priority:
             # ============================================================
             # PRIORITY MODE
             # ============================================================

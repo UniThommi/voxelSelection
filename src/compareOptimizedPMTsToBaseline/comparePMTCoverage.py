@@ -900,6 +900,51 @@ def plot_confusion_matrix(
     print("  Saved 04_ge77_confusion_matrix.png")
 
 
+def _build_log_bins(max_val: int) -> list[int]:
+    """
+    Build bin edges: 0,1,2,...,9,10,20,30,...,90,100,200,...  up to max_val.
+
+    Each bin covers exactly one value for 0–9, then decades (10–19 in one
+    bin labelled "10", 20–29 labelled "20", etc.).  The returned list
+    contains the *lower* edge of each bin; the upper edge of the last bin
+    is implicitly max_val+1.
+    """
+    edges: list[int] = list(range(min(max_val + 1, 10)))  # 0..9
+    if max_val < 10:
+        return edges
+
+    # decades: 10,20,...,90, 100,200,...,900, 1000,...
+    decade = 10
+    while decade <= max_val:
+        for mult in range(1, 10):
+            val = mult * decade
+            if val > max_val:
+                break
+            edges.append(val)
+        decade *= 10
+
+    return sorted(set(edges))
+
+
+def _bin_data(data: list[int], bin_edges: list[int]) -> list[int]:
+    """
+    Bin data into the log-spaced bins.  Each value is assigned to the
+    largest bin edge ≤ value.  Returns counts aligned with bin_edges.
+    """
+    edges_arr = np.array(bin_edges)
+    data_arr = np.array(data)
+    counts = [0] * len(bin_edges)
+    if len(data_arr) == 0:
+        return counts
+    # np.searchsorted gives index where value would be inserted;
+    # subtract 1 to get the bin it falls into
+    indices = np.searchsorted(edges_arr, data_arr, side="right") - 1
+    indices = np.clip(indices, 0, len(bin_edges) - 1)
+    for idx in indices:
+        counts[idx] += 1
+    return counts
+
+
 def plot_w_histogram(
     hom: DetectionResult,
     opt: DetectionResult,
@@ -922,35 +967,57 @@ def plot_w_histogram(
         max(hom_data) if hom_data else 0,
         max(opt_data) if opt_data else 0,
     )
-    bins = np.arange(0, max_w + 2) - 0.5
 
-    ax.hist(
-        hom_data,
-        bins=bins,
-        alpha=0.6,
+    if max_w == 0:
+        # Edge case: no data
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center")
+        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        plt.close(fig)
+        print(f"  Saved {fname} (empty)")
+        return
+
+    bin_edges = _build_log_bins(max_w)
+    hom_counts = _bin_data(hom_data, bin_edges)
+    opt_counts = _bin_data(opt_data, bin_edges)
+
+    # Build labels: "0","1",...,"9","10","20",...
+    bin_labels = [str(e) for e in bin_edges]
+
+    x = np.arange(len(bin_edges))
+    width = 0.38
+
+    ax.bar(
+        x - width / 2,
+        hom_counts,
+        width,
         label=hom.label,
         color=COLOR_HOM,
         edgecolor="black",
         linewidth=0.5,
     )
-    ax.hist(
-        opt_data,
-        bins=bins,
-        alpha=0.6,
+    ax.bar(
+        x + width / 2,
+        opt_counts,
+        width,
         label=opt.label,
         color=COLOR_OPT,
         edgecolor="black",
         linewidth=0.5,
     )
 
+    # W threshold line
+    # Find the x-position of the bin that contains W
+    w_bin_idx = np.searchsorted(bin_edges, W, side="right") - 1
     ax.axvline(
-        W - 0.5,
+        w_bin_idx - 0.5,
         color="red",
         linestyle="--",
         linewidth=1.5,
         label=f"W threshold = {W}",
     )
 
+    ax.set_xticks(x)
+    ax.set_xticklabels(bin_labels, rotation=45, ha="right", fontsize=7)
     ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})")
     ax.set_ylabel("Number of Muons")
     ax.set_title(
@@ -975,7 +1042,7 @@ def plot_w_histogram(
     )
     ax.text(
         0.5,
-        -0.1,
+        -0.15,
         stats,
         transform=ax.transAxes,
         ha="center",
