@@ -1,330 +1,796 @@
 #!/usr/bin/env python3
 """
-Greedy Coverage Curve Comparison
-=================================
+PMT Configuration Evaluator
+============================
 
-Loads efficiency curves from multiple greedy NPZ result files and
-plots them on a single figure. Optionally computes and displays the
-theoretical upper bound ε_max (fraction of NCs coverable by any
-combination of all valid voxels).
+Evaluates multiple PMT configurations (given as JSON voxel lists)
+against a common SSD dataset. Produces:
+
+  - NC coverage histograms (cumulative, M=0..8) per config
+  - Ge77 muon heatmaps (Accuracy, Precision, Recall) for W x Config, per M
+  - Confusion matrix text file for all (config, M, W) combinations
+  - Summary text file with NC statistics
 
 Usage:
-    # Basic comparison
-    python compareGreedyCurves.py \
-        results/ncM1m1.npz \
-        results/ncM1m1Weight.npz \
-        results/muonM1m1W1.npz \
-        -o comparison.png
+    python -m pmtopt.evaluate_configs \\
+        --hdf5 data.hdf5 \\
+        --baseline baseline.json \\
+        --configs opt1.json opt2.json random1.json \\
+        --labels "Baseline" "ncM1m1" "random" \\
+        --output-dir eval_results/ \\
+        --seed 42
 
-    # With upper bound from HDF5
-    python compareGreedyCurves.py \
-        results/ncM1m1.npz \
-        results/ncM6m1.npz \
-        --hdf5 data.hdf5 --area-ratio \
-        -o comparison.png
-
-    # Custom labels
-    python compareGreedyCurves.py \
-        results/ncM1m1.npz "NC M=1" \
-        results/ncM6m1.npz "NC M=6" \
-        -o comparison.png
-
-Author: Ferundo (Thesis project, University of Tübingen)
+Author: Thomas Buerger (University of Tübingen)
 """
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
+from scipy import sparse
+
+from pmtopt.geometry import (
+    DEFAULT_AREA_RATIOS,
+    MUON_TIME_WINDOW_MIN_NS,
+    MUON_TIME_WINDOW_MAX_NS,
+)
+from pmtopt.data_loading import (
+    load_raw_sparse,
+    binarize_from_raw,
+    load_muon_data,
+    build_muon_index,
+)
 
 
-def load_efficiency_curve(npz_path: str) -> tuple[np.ndarray, dict]:
-    """
-    Load efficiency curve and metadata from a greedy result NPZ file.
+# ===================================================================
+# Constants
+# ===================================================================
 
-    Parameters
-    ----------
-    npz_path : str
-        Path to the NPZ file.
-
-    Returns
-    -------
-    efficiencies : np.ndarray
-        Efficiency at each greedy step (length N).
-    metadata : dict
-        Run parameters extracted from the NPZ.
-    """
-    data = np.load(npz_path, allow_pickle=True)
-    efficiencies = data["efficiencies"]
-
-    metadata = {}
-    for key in ["N", "M", "m", "W", "optimize", "min_spacing",
-                "num_ncs", "num_primaries", "num_ge77_muons",
-                "per_area"]:
-        if key in data:
-            val = data[key]
-            # np.load wraps scalars in 0-d arrays
-            metadata[key] = val.item() if val.ndim == 0 else val
-    metadata["npz_path"] = npz_path
-
-    return efficiencies, metadata
+M_VALUES = list(range(1, 9))  # M = 1..8
+W_VALUES = list(range(1, 9))  # W = 1..8
 
 
-def compute_epsilon_max(
+# ===================================================================
+# Data structures
+# ===================================================================
+
+class ConfigResult:
+    """Stores evaluation results for one PMT configuration."""
+
+    def __init__(self, name: str, voxel_ids: list[str], label: str):
+        self.name = name
+        self.label = label
+        self.voxel_ids = voxel_ids
+        self.col_indices: np.ndarray | None = None
+
+        # NC coverage: coverage_counts[nc] = #selected voxels seeing NC
+        self.coverage_counts: np.ndarray | None = None
+
+        # NC statistics
+        self.num_ncs: int = 0
+        self.num_visible: int = 0       # >= 1 hit in B (after binarization)
+        self.num_detected: dict[int, int] = {}  # M -> count(coverage >= M)
+
+        # Muon confusion: (M, W) -> {"TP", "FP", "TN", "FN"}
+        self.confusion: dict[tuple[int, int], dict[str, int]] = {}
+
+
+class EvalData:
+    """Shared simulation data loaded once."""
+
+    def __init__(self):
+        self.B: sparse.csc_matrix | None = None
+        self.voxel_ids: np.ndarray | None = None
+        self.voxel_id_to_col: dict[str, int] = {}
+        self.num_ncs: int = 0
+        self.num_primaries: int = 0
+
+        # Muon data
+        self.global_muon_id: np.ndarray | None = None
+        self.nc_time_ns: np.ndarray | None = None
+        self.nc_flag_ge77: np.ndarray | None = None
+        self.nc_to_muon_local: np.ndarray | None = None
+        self.eligible_nc_mask: np.ndarray | None = None
+        self.num_ge77_muons: int = 0
+        self.ge77_muon_global_ids: np.ndarray | None = None
+        self.total_muons: int = 0
+
+        # Precomputed for muon evaluation (all muons)
+        self.all_unique_muons: np.ndarray | None = None
+        self.global_to_all_local: np.ndarray | None = None
+        self.ge77_mask_all: np.ndarray | None = None
+        self.nc_is_veto_candidate: np.ndarray | None = None
+
+
+# ===================================================================
+# Loading
+# ===================================================================
+
+def load_config_json(json_path: str) -> tuple[list[str], dict]:
+    """Load voxel IDs and full config from a greedy result JSON."""
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    voxels = data.get("selected_voxels", [])
+    voxel_ids = [v["index"] for v in voxels]
+
+    if len(voxel_ids) == 0:
+        raise ValueError(f"No voxels found in {json_path}")
+
+    return voxel_ids, data
+
+
+def load_shared_data(
     hdf5_path: str,
-    M: int = 1,
-    m: int = 1,
-    apply_area_ratio: bool = False,
-) -> float:
+    all_voxel_ids: set[str],
+    area_ratios: dict[str, float],
+    m: int,
+    seed: int,
+    verbose: bool = True,
+) -> EvalData:
     """
-    Compute the theoretical upper bound: fraction of NCs that are
-    seen by >= M valid voxels in total (i.e., the coverage if all
-    voxels were selected).
-
-    Parameters
-    ----------
-    hdf5_path : str
-        Path to the HDF5 data file.
-    M : int
-        Multiplicity threshold.
-    m : int
-        Hit threshold per voxel.
-    apply_area_ratio : bool
-        Apply area-dependent scaling before binarization.
-
-    Returns
-    -------
-    float
-        ε_max: fraction of NCs coverable.
+    Load HDF5 data once, build B matrix for the union of all
+    voxels needed by any configuration.
     """
-    # Import from greedy script
-    try:
-        from greedyVoxelSelection import load_and_binarize
-    except ImportError:
-        import os
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../core")
-        from greedyVoxelSelection import load_and_binarize
+    ed = EvalData()
 
-    B, _, _, _, _ = load_and_binarize(
-        hdf5_path, m=m, apply_area_ratio=apply_area_ratio, verbose=False,
+    if verbose:
+        print("\n" + "=" * 65)
+        print("Loading shared simulation data")
+        print("=" * 65)
+
+    # Load raw sparse (all valid voxels)
+    (raw_rows, raw_cols, raw_vals,
+     full_voxel_ids, centers, layers,
+     num_ncs, num_primaries) = load_raw_sparse(hdf5_path, verbose=verbose)
+
+    ed.num_ncs = num_ncs
+    ed.num_primaries = num_primaries
+
+    full_id_to_col = {vid: i for i, vid in enumerate(full_voxel_ids)}
+
+    # Validate all requested voxels exist
+    missing = all_voxel_ids - set(full_id_to_col.keys())
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} voxel(s) from configs not found in HDF5 "
+            f"valid voxels. First 5: {list(missing)[:5]}"
+        )
+
+    # Subset to needed columns only
+    needed_old_cols = sorted(full_id_to_col[vid] for vid in all_voxel_ids)
+    col_old_to_new = {old: new for new, old in enumerate(needed_old_cols)}
+
+    col_mask = np.isin(raw_cols, needed_old_cols)
+    sub_rows = raw_rows[col_mask]
+    sub_cols = np.array(
+        [col_old_to_new[c] for c in raw_cols[col_mask]], dtype=np.int32
+    )
+    sub_vals = raw_vals[col_mask]
+
+    num_sub_voxels = len(needed_old_cols)
+    sub_voxel_ids = full_voxel_ids[needed_old_cols]
+    sub_layers = layers[needed_old_cols]
+
+    if verbose:
+        print(f"\nSubset: {num_sub_voxels} voxels needed "
+              f"(of {len(full_voxel_ids)} valid)")
+
+    # Binarize
+    B = binarize_from_raw(
+        sub_rows, sub_cols, sub_vals,
+        num_ncs=num_ncs,
+        num_voxels=num_sub_voxels,
+        layers=sub_layers,
+        area_ratios=area_ratios,
+        m=m,
+        seed=seed,
     )
 
-    # Number of voxels seeing each NC
-    nnz_per_row = np.diff(B.tocsr().indptr)
-    num_coverable = int(np.sum(nnz_per_row >= M))
-    epsilon_max = num_coverable / B.shape[0]
+    ed.B = B
+    ed.voxel_ids = sub_voxel_ids
+    ed.voxel_id_to_col = {vid: i for i, vid in enumerate(sub_voxel_ids)}
 
-    print(f"ε_max (M={M}, m={m}, area_ratio={apply_area_ratio}): "
-          f"{epsilon_max:.4%} ({num_coverable:,} / {B.shape[0]:,})")
+    if verbose:
+        nnz = B.nnz
+        density = nnz / (num_ncs * num_sub_voxels) * 100
+        mem_mb = (B.data.nbytes + B.indices.nbytes + B.indptr.nbytes) / 1e6
+        print(f"B matrix: {num_ncs} x {num_sub_voxels}, "
+              f"nnz={nnz:,} ({density:.3f}%), {mem_mb:.1f} MB")
 
-    return epsilon_max
+    # Load muon data
+    (ed.global_muon_id, ed.nc_time_ns,
+     ed.nc_flag_ge77) = load_muon_data(
+        hdf5_path, num_ncs=num_ncs, verbose=verbose,
+    )
 
+    (ed.nc_to_muon_local, _, ed.ge77_muon_global_ids,
+     ed.eligible_nc_mask, ed.num_ge77_muons) = build_muon_index(
+        ed.global_muon_id, ed.nc_time_ns, ed.nc_flag_ge77,
+        verbose=verbose,
+    )
 
-def auto_label(metadata: dict, npz_path: str) -> str:
-    """
-    Generate a descriptive label from NPZ metadata.
+    ed.all_unique_muons = np.unique(ed.global_muon_id)
+    ed.total_muons = len(ed.all_unique_muons)
+    ed.global_to_all_local = np.searchsorted(
+        ed.all_unique_muons, ed.global_muon_id
+    )
+    ed.ge77_mask_all = np.isin(
+        ed.all_unique_muons, ed.ge77_muon_global_ids
+    )
 
-    Parameters
-    ----------
-    metadata : dict
-        Run parameters.
-    npz_path : str
-        Filename for fallback.
+    # Veto candidate NCs: in time window, not Ge77 themselves
+    in_time = (
+        (ed.nc_time_ns >= MUON_TIME_WINDOW_MIN_NS)
+        & (ed.nc_time_ns <= MUON_TIME_WINDOW_MAX_NS)
+    )
+    ed.nc_is_veto_candidate = in_time & (~ed.nc_flag_ge77)
 
-    Returns
-    -------
-    str
-        Human-readable label.
-    """
-    opt = metadata.get("optimize", "?")
-    parts = [opt]
+    if verbose:
+        print(f"\nTotal muons: {ed.total_muons:,}")
+        print(f"Ge77 muons: {ed.num_ge77_muons:,}")
 
-    M = metadata.get("M", 1)
-    if M != 1:
-        parts.append(f"M={M}")
-
-    m = metadata.get("m", 1)
-    if m != 1:
-        parts.append(f"m={m}")
-
-    W = metadata.get("W", None)
-    if W is not None and opt == "muon-ge77":
-        parts.append(f"W={int(W)}")
-
-    if metadata.get("per_area", False):
-        parts.append("per-area")
-
-    # Detect muon-weight and area-ratio from filename
-    stem = Path(npz_path).stem
-    if "_mw" in stem:
-        mw_part = stem.split("_mw")[1].split("_")[0].split(".npz")[0]
-        parts.append(f"mw={mw_part}")
-    if "arearatio" in stem:
-        parts.append("ratio")
-    if "nospacing" in stem:
-        parts.append("no-sp")
-
-    return ", ".join(parts)
+    return ed
 
 
-def plot_comparison(
-    curves: list[tuple[np.ndarray, str]],
-    output_path: Path,
-    epsilon_max: Optional[float] = None,
-    title: str = "Greedy Coverage Curves",
+# ===================================================================
+# Evaluation
+# ===================================================================
+
+def map_voxels_to_columns(config: ConfigResult, ed: EvalData) -> None:
+    """Map config voxel IDs to B-matrix column indices."""
+    col_indices = []
+    for vid in config.voxel_ids:
+        if vid not in ed.voxel_id_to_col:
+            raise RuntimeError(
+                f"Voxel '{vid}' from config '{config.name}' "
+                f"not found in B matrix."
+            )
+        col_indices.append(ed.voxel_id_to_col[vid])
+    config.col_indices = np.array(col_indices, dtype=np.int32)
+
+
+def evaluate_nc(
+    config: ConfigResult,
+    ed: EvalData,
+    M_values: list[int],
 ) -> None:
     """
-    Plot multiple efficiency curves on one figure.
+    Compute NC coverage counts and detection statistics.
 
-    Parameters
-    ----------
-    curves : list of (efficiencies, label)
-        Each entry is an efficiency array and its display label.
-    output_path : Path
-        Where to save the plot.
-    epsilon_max : float or None
-        If given, draw a horizontal reference line.
-    title : str
-        Plot title.
+    Fills config.coverage_counts, config.num_visible,
+    config.num_detected[M] for each M.
     """
-    fig, (ax_main, ax_zoom) = plt.subplots(
-        1, 2, figsize=(16, 7), gridspec_kw={"width_ratios": [2, 1]},
+    B = ed.B
+    col_indices = config.col_indices
+    num_ncs = ed.num_ncs
+
+    coverage_counts = np.zeros(num_ncs, dtype=np.int16)
+    for col in col_indices:
+        s, e = B.indptr[col], B.indptr[col + 1]
+        coverage_counts[B.indices[s:e]] += 1
+
+    config.coverage_counts = coverage_counts
+    config.num_ncs = num_ncs
+    config.num_visible = int(np.sum(coverage_counts >= 1))
+
+    for M in M_values:
+        config.num_detected[M] = int(np.sum(coverage_counts >= M))
+
+
+def evaluate_muon(
+    config: ConfigResult,
+    ed: EvalData,
+    M_values: list[int],
+    W_values: list[int],
+) -> None:
+    """
+    Compute Ge77 muon confusion matrix for all (M, W).
+
+    NC detected iff coverage_counts >= M.
+    Muon's detected-NC count = #eligible NCs (in time window, non-Ge77)
+    that are detected.
+    Muon classified positive iff detected_nc_count >= W.
+    """
+    coverage_counts = config.coverage_counts
+    if coverage_counts is None:
+        raise RuntimeError("Call evaluate_nc before evaluate_muon")
+
+    num_all_muons = ed.total_muons
+
+    for M in M_values:
+        nc_detected_veto = (coverage_counts >= M) & ed.nc_is_veto_candidate
+
+        detected_veto_idx = np.where(nc_detected_veto)[0]
+        if len(detected_veto_idx) > 0:
+            all_muon_lids = ed.global_to_all_local[detected_veto_idx]
+            all_muon_det_counts = np.bincount(
+                all_muon_lids, minlength=num_all_muons
+            ).astype(np.int32)
+        else:
+            all_muon_det_counts = np.zeros(num_all_muons, dtype=np.int32)
+
+        for W in W_values:
+            classified_pos = (all_muon_det_counts >= W)
+
+            TP = int(np.sum(classified_pos & ed.ge77_mask_all))
+            FP = int(np.sum(classified_pos & ~ed.ge77_mask_all))
+            FN = int(np.sum(~classified_pos & ed.ge77_mask_all))
+            TN = int(np.sum(~classified_pos & ~ed.ge77_mask_all))
+
+            config.confusion[(M, W)] = {
+                "TP": TP, "FP": FP, "TN": TN, "FN": FN,
+            }
+
+
+# ===================================================================
+# Plotting: NC coverage histogram
+# ===================================================================
+
+def plot_nc_coverage(
+    configs: list[ConfigResult],
+    M_max: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Bar chart: for each M (0..M_max), number of NCs with coverage >= M.
+    M=0 shows total NCs (= all NCs). Grouped bars per config.
+
+    Annotations below: total NCs, visible, detected (M=1).
+    """
+    M_range = list(range(0, M_max + 1))
+    num_configs = len(configs)
+    num_bars = len(M_range)
+
+    fig, ax = plt.subplots(figsize=(max(12, num_bars * 1.5), 7))
+
+    bar_width = 0.8 / num_configs
+    colors = plt.cm.tab10.colors
+
+    for ci, cfg in enumerate(configs):
+        counts = []
+        for M in M_range:
+            if M == 0:
+                counts.append(cfg.num_ncs)
+            else:
+                counts.append(cfg.num_detected.get(M, 0))
+
+        x_pos = np.arange(num_bars) + ci * bar_width
+        bars = ax.bar(
+            x_pos, counts, bar_width,
+            label=cfg.label,
+            color=colors[ci % len(colors)],
+            edgecolor="white", linewidth=0.5,
+        )
+
+        # Annotate bars with percentage
+        for bi, (bar, count) in enumerate(zip(bars, counts)):
+            if count == 0:
+                continue
+            M_val = M_range[bi]
+            pct_total = count / cfg.num_ncs * 100
+            if M_val == 0:
+                txt = f"{count:,}"
+            else:
+                pct_vis = (count / cfg.num_visible * 100
+                           if cfg.num_visible > 0 else 0)
+                txt = f"{pct_total:.1f}%\n({pct_vis:.1f}%)"
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                txt,
+                ha="center", va="bottom",
+                fontsize=6, rotation=0,
+            )
+
+    # X-axis
+    ax.set_xticks(np.arange(num_bars) + bar_width * (num_configs - 1) / 2)
+    ax.set_xticklabels(
+        ["All NCs"] + [f"M ≥ {M}" for M in M_range[1:]],
+        fontsize=10,
+    )
+    ax.set_ylabel("Number of NCs", fontsize=12)
+    ax.set_title("NC Detection Coverage by Multiplicity Threshold", fontsize=13)
+    ax.legend(fontsize=9, loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_yscale("log")
+
+    # Annotation box below plot
+    anno_lines = []
+    for cfg in configs:
+        line = (
+            f"{cfg.label}: "
+            f"total={cfg.num_ncs:,}, "
+            f"visible={cfg.num_visible:,} "
+            f"({cfg.num_visible / cfg.num_ncs:.2%}), "
+            f"detected(M=1)={cfg.num_detected.get(1, 0):,} "
+            f"({cfg.num_detected.get(1, 0) / cfg.num_ncs:.2%})"
+        )
+        anno_lines.append(line)
+
+    anno_text = "\n".join(anno_lines)
+    fig.text(
+        0.5, -0.02, anno_text,
+        ha="center", va="top",
+        fontsize=8, family="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow",
+                  alpha=0.8),
     )
 
-    # Color cycle
-    colors = plt.cm.tab10.colors
-    line_styles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
-
-    for i, (eff, label) in enumerate(curves):
-        k_vals = np.arange(1, len(eff) + 1)
-        color = colors[i % len(colors)]
-        ls = line_styles[i % len(line_styles)]
-
-        ax_main.plot(k_vals, eff * 100, label=label,
-                     color=color, linestyle=ls, linewidth=1.8)
-        ax_zoom.plot(k_vals, eff * 100, label=label,
-                     color=color, linestyle=ls, linewidth=1.8)
-
-    # Upper bound
-    if epsilon_max is not None:
-        for ax in [ax_main, ax_zoom]:
-            ax.axhline(y=epsilon_max * 100, color="black",
-                       linestyle="--", linewidth=1.2, alpha=0.7,
-                       label=f"ε_max = {epsilon_max:.2%}")
-
-    # Main plot formatting
-    ax_main.set_xlabel("Number of selected PMTs (k)", fontsize=12)
-    ax_main.set_ylabel("Detection Efficiency (%)", fontsize=12)
-    ax_main.set_title(title, fontsize=13)
-    ax_main.legend(fontsize=9, loc="lower right")
-    ax_main.grid(True, alpha=0.3)
-    ax_main.set_xlim(1, max(len(eff) for eff, _ in curves))
-
-    # Zoom: first 50 voxels
-    zoom_limit = min(50, min(len(eff) for eff, _ in curves))
-    ax_zoom.set_xlabel("Number of selected PMTs (k)", fontsize=12)
-    ax_zoom.set_ylabel("Detection Efficiency (%)", fontsize=12)
-    ax_zoom.set_title(f"Zoom: first {zoom_limit} PMTs", fontsize=13)
-    ax_zoom.set_xlim(1, zoom_limit)
-    ax_zoom.legend(fontsize=8, loc="lower right")
-    ax_zoom.grid(True, alpha=0.3)
-
     plt.tight_layout()
-    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    out_path = output_dir / "nc_coverage_histogram.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
-    print(f"Comparison plot saved to {output_path}")
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plotting: Muon Ge77 heatmaps
+# ===================================================================
+
+def plot_muon_heatmaps(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: Path,
+    num_ge77_muons: int,
+    total_muons: int,
+    verbose: bool = True,
+) -> None:
+    """
+    Per M: one figure with 3 heatmaps (Accuracy, Precision, Recall).
+    Axes: W (y) x Config (x). Cell text = value.
+    """
+    config_labels = [c.label for c in configs]
+    num_configs = len(configs)
+
+    for M in M_values:
+        fig, axes = plt.subplots(
+            1, 3, figsize=(max(6, num_configs * 1.8 + 2), len(W_values) * 0.8 + 3),
+            sharey=True,
+        )
+
+        metric_names = ["Accuracy", "Precision", "Recall"]
+        cmaps = ["YlGn", "YlOrRd", "PuBu"]
+
+        for mi, (metric_name, cmap) in enumerate(
+            zip(metric_names, cmaps)
+        ):
+            ax = axes[mi]
+            data_matrix = np.full((len(W_values), num_configs), np.nan)
+
+            for wi, W in enumerate(W_values):
+                for ci, cfg in enumerate(configs):
+                    cm = cfg.confusion.get((M, W))
+                    if cm is None:
+                        continue
+
+                    TP, FP, TN, FN = cm["TP"], cm["FP"], cm["TN"], cm["FN"]
+
+                    if metric_name == "Accuracy":
+                        denom = TP + FP + TN + FN
+                        val = (TP + TN) / denom if denom > 0 else 0.0
+                    elif metric_name == "Precision":
+                        denom = TP + FP
+                        val = TP / denom if denom > 0 else 0.0
+                    elif metric_name == "Recall":
+                        denom = TP + FN
+                        val = TP / denom if denom > 0 else 0.0
+                    else:
+                        val = 0.0
+
+                    data_matrix[wi, ci] = val
+
+            # Plot heatmap
+            im = ax.imshow(
+                data_matrix, aspect="auto", cmap=cmap,
+                vmin=0, vmax=1,
+            )
+
+            # Cell text
+            for wi in range(len(W_values)):
+                for ci in range(num_configs):
+                    val = data_matrix[wi, ci]
+                    if np.isnan(val):
+                        continue
+                    text_color = "white" if val > 0.7 else "black"
+                    ax.text(
+                        ci, wi, f"{val:.3f}",
+                        ha="center", va="center",
+                        fontsize=7, color=text_color,
+                    )
+
+            ax.set_xticks(range(num_configs))
+            ax.set_xticklabels(config_labels, rotation=45, ha="right",
+                               fontsize=8)
+            ax.set_yticks(range(len(W_values)))
+            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=9)
+            ax.set_title(f"{metric_name}", fontsize=11)
+
+            if mi == 0:
+                ax.set_ylabel("W threshold", fontsize=10)
+
+        fig.suptitle(
+            f"Ge77 Muon Classification (M={M})\n"
+            f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total",
+            fontsize=12, y=1.02,
+        )
+        fig.colorbar(im, ax=axes, shrink=0.8, label="Value")
+        plt.tight_layout()
+
+        out_path = output_dir / f"muon_heatmap_M{M}.png"
+        plt.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        if verbose:
+            print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Text output
+# ===================================================================
+
+def write_confusion_txt(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: Path,
+    num_ge77_muons: int,
+    total_muons: int,
+    verbose: bool = True,
+) -> None:
+    """Write confusion matrices to text file."""
+    out_path = output_dir / "confusion_matrices.txt"
+    with open(out_path, "w") as f:
+        f.write(f"# Ge77 Muon Confusion Matrices\n")
+        f.write(f"# Total muons: {total_muons:,}\n")
+        f.write(f"# Ge77 muons: {num_ge77_muons:,}\n")
+        f.write(f"# Non-Ge77 muons: {total_muons - num_ge77_muons:,}\n\n")
+
+        header = (f"{'Config':<25} {'M':>3} {'W':>3} "
+                  f"{'TP':>8} {'FP':>8} {'TN':>10} {'FN':>8} "
+                  f"{'Acc':>8} {'Prec':>8} {'Rec':>8}\n")
+        f.write(header)
+        f.write("-" * len(header) + "\n")
+
+        for cfg in configs:
+            for M in M_values:
+                for W in W_values:
+                    cm = cfg.confusion.get((M, W))
+                    if cm is None:
+                        continue
+                    TP, FP, TN, FN = cm["TP"], cm["FP"], cm["TN"], cm["FN"]
+                    total = TP + FP + TN + FN
+                    acc = (TP + TN) / total if total > 0 else 0
+                    prec = TP / (TP + FP) if (TP + FP) > 0 else 0
+                    rec = TP / (TP + FN) if (TP + FN) > 0 else 0
+                    f.write(
+                        f"{cfg.label:<25} {M:>3} {W:>3} "
+                        f"{TP:>8} {FP:>8} {TN:>10} {FN:>8} "
+                        f"{acc:>8.4f} {prec:>8.4f} {rec:>8.4f}\n"
+                    )
+            f.write("\n")
+
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+def write_nc_summary_txt(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Write NC detection summary to text file."""
+    out_path = output_dir / "nc_summary.txt"
+    with open(out_path, "w") as f:
+        f.write(f"# NC Detection Summary\n\n")
+
+        for cfg in configs:
+            f.write(f"--- {cfg.label} ---\n")
+            f.write(f"  Total NCs:    {cfg.num_ncs:>12,}\n")
+            f.write(f"  Visible:      {cfg.num_visible:>12,} "
+                    f"({cfg.num_visible / cfg.num_ncs:.4%})\n")
+            for M in M_values:
+                n = cfg.num_detected.get(M, 0)
+                pct_total = n / cfg.num_ncs if cfg.num_ncs > 0 else 0
+                pct_vis = n / cfg.num_visible if cfg.num_visible > 0 else 0
+                f.write(f"  Detected M≥{M}: {n:>12,} "
+                        f"({pct_total:.4%} total, {pct_vis:.4%} of visible)\n")
+            f.write("\n")
+
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# CLI
+# ===================================================================
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate and compare multiple PMT configurations.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument("--hdf5", type=str, required=True,
+                        help="Path to the SSD HDF5 data file.")
+    parser.add_argument("--baseline", type=str, required=True,
+                        help="JSON file for the baseline (homogeneous) config. "
+                             "This is mandatory.")
+    parser.add_argument("--configs", type=str, nargs="+", required=True,
+                        help="JSON files for additional PMT configs.")
+    parser.add_argument("--labels", type=str, nargs="*", default=None,
+                        help="Labels for configs (excluding baseline). "
+                             "If omitted, filenames are used.")
+    parser.add_argument("--output-dir", type=str, default="eval_results",
+                        help="Directory for output files.")
+    parser.add_argument("-m", type=int, default=1,
+                        help="Hit threshold per voxel for binarization.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for stochastic rounding.")
+    parser.add_argument("--M-max", type=int, default=8,
+                        help="Maximum M value to evaluate.")
+    parser.add_argument("--W-max", type=int, default=8,
+                        help="Maximum W value to evaluate.")
+
+    # Area ratios
+    parser.add_argument("--pit", type=float, default=None)
+    parser.add_argument("--bot", type=float, default=None)
+    parser.add_argument("--top", type=float, default=None)
+    parser.add_argument("--wall", type=float, default=None)
+
+    parser.add_argument("--quiet", action="store_true")
+
+    args = parser.parse_args(argv)
+    return args
 
 
 def main(argv: Optional[list[str]] = None) -> None:
-    parser = argparse.ArgumentParser(
-        description="Compare greedy coverage curves from multiple runs.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Positional arguments are NPZ files, optionally followed by\n"
-            "a custom label in quotes:\n"
-            "  compareGreedyCurves.py run1.npz \"Label 1\" run2.npz \"Label 2\"\n"
-            "If no label is given, one is auto-generated from metadata."
-        ),
+    args = parse_args(argv)
+    verbose = not args.quiet
+
+    # Area ratios
+    area_ratios = dict(DEFAULT_AREA_RATIOS)
+    if args.pit is not None:
+        area_ratios["pit"] = args.pit
+    if args.bot is not None:
+        area_ratios["bot"] = args.bot
+    if args.top is not None:
+        area_ratios["top"] = args.top
+    if args.wall is not None:
+        area_ratios["wall"] = args.wall
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    M_values = list(range(1, args.M_max + 1))
+    W_values = list(range(1, args.W_max + 1))
+
+    # ------------------------------------------------------------------
+    # Load all configs
+    # ------------------------------------------------------------------
+    if verbose:
+        print("=" * 65)
+        print("Loading PMT configurations")
+        print("=" * 65)
+
+    # Baseline (always labeled "Baseline")
+    bl_voxels, bl_data = load_config_json(args.baseline)
+    baseline = ConfigResult(
+        name=Path(args.baseline).stem,
+        voxel_ids=bl_voxels,
+        label="Baseline",
     )
-    parser.add_argument("inputs", nargs="+",
-                        help="NPZ files, optionally each followed by a label string.")
-    parser.add_argument("-o", "--output", type=str, default="greedy_comparison.png",
-                        help="Output plot path.")
-    parser.add_argument("--hdf5", type=str, default=None,
-                        help="HDF5 file for computing ε_max upper bound.")
-    parser.add_argument("-M", type=int, default=1,
-                        help="M threshold for ε_max computation.")
-    parser.add_argument("-m", type=int, default=1,
-                        help="m threshold for ε_max computation.")
-    parser.add_argument("--area-ratio", action="store_true",
-                        help="Apply area-ratio scaling for ε_max computation.")
-    parser.add_argument("--title", type=str,
-                        default="Greedy Coverage Curves",
-                        help="Plot title.")
+    if verbose:
+        print(f"  Baseline: {args.baseline} ({len(bl_voxels)} voxels)")
 
-    args = parser.parse_args(argv)
-
-    # Parse inputs: alternating NPZ paths and optional labels
-    npz_files: list[str] = []
-    labels: list[Optional[str]] = []
-
-    i = 0
-    inputs = args.inputs
-    while i < len(inputs):
-        if inputs[i].endswith(".npz"):
-            npz_files.append(inputs[i])
-            # Check if next arg is a label (not an NPZ)
-            if i + 1 < len(inputs) and not inputs[i + 1].endswith(".npz"):
-                labels.append(inputs[i + 1])
-                i += 2
-            else:
-                labels.append(None)
-                i += 1
-        else:
-            parser.error(f"Expected .npz file, got: {inputs[i]}")
-
-    if len(npz_files) == 0:
-        parser.error("No NPZ files provided.")
-
-    # Load curves
-    curves: list[tuple[np.ndarray, str]] = []
-    for npz_path, custom_label in zip(npz_files, labels):
-        eff, meta = load_efficiency_curve(npz_path)
-        if custom_label is not None:
-            label = custom_label
-        else:
-            label = auto_label(meta, npz_path)
-        curves.append((eff, label))
-        print(f"Loaded: {npz_path} ({len(eff)} steps) → \"{label}\"")
-
-    # Compute upper bound if requested
-    epsilon_max = None
-    if args.hdf5 is not None:
-        epsilon_max = compute_epsilon_max(
-            args.hdf5, M=args.M, m=args.m,
-            apply_area_ratio=args.area_ratio,
+    # Other configs
+    if args.labels and len(args.labels) != len(args.configs):
+        raise RuntimeError(
+            f"Number of --labels ({len(args.labels)}) must match "
+            f"number of --configs ({len(args.configs)}). "
+            f"Do not include a label for the baseline."
         )
 
-    # Print summary table
-    print(f"\n{'Label':<35} {'N':>5} {'Final ε':>10} {'ε at k=50':>10}")
-    print("-" * 65)
-    for eff, label in curves:
-        final = eff[-1] if len(eff) > 0 else 0.0
-        at_50 = eff[49] if len(eff) >= 50 else eff[-1]
-        print(f"{label:<35} {len(eff):>5} {final:>10.4%} {at_50:>10.4%}")
-    if epsilon_max is not None:
-        print(f"{'ε_max':<35} {'':>5} {epsilon_max:>10.4%}")
+    configs_extra: list[ConfigResult] = []
+    for i, cfg_path in enumerate(args.configs):
+        voxel_ids, cfg_data = load_config_json(cfg_path)
+        if args.labels:
+            label = args.labels[i]
+        else:
+            label = Path(cfg_path).stem
+        cr = ConfigResult(
+            name=Path(cfg_path).stem,
+            voxel_ids=voxel_ids,
+            label=label,
+        )
+        configs_extra.append(cr)
+        if verbose:
+            print(f"  Config {i+1}: {cfg_path} ({len(voxel_ids)} voxels) "
+                  f"-> \"{label}\"")
 
-    # Plot
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plot_comparison(curves, output_path, epsilon_max=epsilon_max,
-                    title=args.title)
+    all_configs = [baseline] + configs_extra
+
+    # Collect all voxel IDs
+    all_voxel_ids: set[str] = set()
+    for cfg in all_configs:
+        all_voxel_ids.update(cfg.voxel_ids)
+
+    if verbose:
+        print(f"\n  Total unique voxels across all configs: "
+              f"{len(all_voxel_ids)}")
+
+    # ------------------------------------------------------------------
+    # Load shared data
+    # ------------------------------------------------------------------
+    ed = load_shared_data(
+        hdf5_path=args.hdf5,
+        all_voxel_ids=all_voxel_ids,
+        area_ratios=area_ratios,
+        m=args.m,
+        seed=args.seed,
+        verbose=verbose,
+    )
+
+    # ------------------------------------------------------------------
+    # Evaluate all configs
+    # ------------------------------------------------------------------
+    if verbose:
+        print("\n" + "=" * 65)
+        print("Evaluating configurations")
+        print("=" * 65)
+
+    for cfg in all_configs:
+        t0 = time.time()
+        map_voxels_to_columns(cfg, ed)
+        evaluate_nc(cfg, ed, M_values)
+        evaluate_muon(cfg, ed, M_values, W_values)
+        dt = time.time() - t0
+        if verbose:
+            det1 = cfg.num_detected.get(1, 0)
+            print(f"  {cfg.label:<25} | visible={cfg.num_visible:>10,} | "
+                  f"det(M=1)={det1:>10,} | {dt:.1f}s")
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+    if verbose:
+        print("\n" + "=" * 65)
+        print("Generating output")
+        print("=" * 65)
+
+    # NC histogram
+    plot_nc_coverage(all_configs, args.M_max, output_dir, verbose=verbose)
+
+    # Muon heatmaps
+    plot_muon_heatmaps(
+        all_configs, M_values, W_values, output_dir,
+        num_ge77_muons=ed.num_ge77_muons,
+        total_muons=ed.total_muons,
+        verbose=verbose,
+    )
+
+    # Text files
+    write_confusion_txt(
+        all_configs, M_values, W_values, output_dir,
+        num_ge77_muons=ed.num_ge77_muons,
+        total_muons=ed.total_muons,
+        verbose=verbose,
+    )
+    write_nc_summary_txt(all_configs, M_values, output_dir, verbose=verbose)
+
+    if verbose:
+        print("\nDone.")
 
 
 if __name__ == "__main__":

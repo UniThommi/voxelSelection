@@ -4,3 +4,4 @@ selected/
 *.png
 __pycache__/
 *.pyc
+*.md
