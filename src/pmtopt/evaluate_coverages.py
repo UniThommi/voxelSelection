@@ -12,7 +12,7 @@ against a common SSD dataset. Produces:
   - Summary text file with NC statistics
 
 Usage:
-    python -m pmtopt.evaluate_configs \\
+    python -m pmtopt.evaluate_coverages \\
         --hdf5 data.hdf5 \\
         --baseline baseline.json \\
         --configs opt1.json opt2.json random1.json \\
