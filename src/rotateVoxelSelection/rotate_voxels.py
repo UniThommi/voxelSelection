@@ -16,13 +16,18 @@ After all voxels are mapped, two batch checks are run:
 A spacing-distribution test then compares pairwise distances before/after.
 A 3D plot of original (red) vs. rotated (green) positions is always produced.
 
-Usage:
+Usage — single angle:
     python rotate_voxels.py \\
         --all-voxels all_valid.json \\
         --selected greedy_N300.json \\
         --angle 0.25 \\          # fraction of 2π → 90°
-        --output-dir plots/ \\
-        [--plot]
+        --output-dir plots/
+
+Usage — explore all valid angles interactively (omit --angle):
+    python rotate_voxels.py \\
+        --all-voxels all_valid.json \\
+        --selected greedy_N300.json \\
+        --output-dir plots/
 """
 
 import argparse
@@ -85,7 +90,7 @@ def load_voxel_file(path: str) -> list[dict]:
 
 
 def derive_output_stem(selected_path: str, phi_frac: float) -> str:
-    """Base filename stem derived from the selected voxel file: ``{stem}_rotated_{phi_frac:.4f}x2pi``."""
+    """Base filename stem: ``{stem}_rotated_{phi_frac:.4f}x2pi``."""
     return f"{Path(selected_path).stem}_rotated_{phi_frac:.4f}x2pi"
 
 
@@ -223,6 +228,306 @@ def assemble_output_voxels(mapping: list[tuple[dict, dict]]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Explore mode: find all valid rotation angles
+# ---------------------------------------------------------------------------
+
+def _precompute_scores(
+    source: dict,
+    candidates: list[dict],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute scoring coefficients for one source voxel.
+
+    For rotation angle θ the squared distance from the rotated source to
+    candidate c is:
+
+        dist²(θ, c) = K[c] - 2*(A[c]*cos(θ) + B[c]*sin(θ))
+
+    so the nearest candidate is ``argmax_c (A[c]*cos(θ) + B[c]*sin(θ) - K[c]/2)``.
+
+    Returns
+    -------
+    A, B, K : np.ndarray of shape (len(candidates),)
+    """
+    x, y, z = source["center"]
+    cxyz = np.array([v["center"] for v in candidates])   # (C, 3)
+    cx, cy, cz = cxyz[:, 0], cxyz[:, 1], cxyz[:, 2]
+
+    A = x * cx + y * cy
+    B = x * cy - y * cx
+    K = cx**2 + cy**2 + (z - cz)**2 + (x**2 + y**2)
+    return A, B, K
+
+
+def find_valid_angles(
+    selected: list[dict],
+    all_voxels: list[dict],
+    n_samples: int = 3600,
+    skip_validity: bool = False,
+) -> list[float]:
+    """Scan all rotation angles and return those producing valid mappings.
+
+    Uses dense angular sampling (``n_samples`` evenly-spaced steps from 0
+    to 2π exclusive).  Since adjacent distinct voxel-assignment regions are
+    separated by >2° on this detector, the default of 3600 steps (0.1°) is
+    effectively exact.
+
+    Each source voxel's nearest-candidate assignment is computed via
+    vectorised numpy operations over all sample angles at once.
+
+    Parameters
+    ----------
+    selected : list of voxel dicts (the selection to rotate).
+    all_voxels : the full candidate pool.
+    n_samples : number of angle steps (default 3600 → every 0.1°).
+    skip_validity : if True, skip the ``is_valid_pmt_position`` check.
+
+    Returns
+    -------
+    Sorted list of phi_frac values (one representative per distinct valid
+    mapping configuration).
+    """
+    V = len(selected)
+    original_indices: set[str] = {v["index"] for v in selected}
+
+    # Build per-source-voxel candidate pools and scoring coefficients
+    pools: list[list[dict]] = []
+    A_list: list[np.ndarray] = []
+    B_list: list[np.ndarray] = []
+    K_list: list[np.ndarray] = []
+
+    for voxel in selected:
+        pool = build_candidate_pool(voxel, all_voxels)
+        A, B, K = _precompute_scores(voxel, pool)
+        pools.append(pool)
+        A_list.append(A)
+        B_list.append(B)
+        K_list.append(K)
+
+    # Precompute validity mask for every voxel in all_voxels (if needed)
+    if not skip_validity:
+        validity_mask = np.array(
+            [is_valid_pmt_position(v["center"], v["layer"]) for v in all_voxels],
+            dtype=bool,
+        )
+        # Map each pool voxel to its index in all_voxels
+        all_index_map: dict[str, int] = {v["index"]: i
+                                          for i, v in enumerate(all_voxels)}
+
+    # Sample angles
+    theta = np.linspace(0.0, 2.0 * np.pi, n_samples, endpoint=False)
+    cos_t = np.cos(theta)   # (n_samples,)
+    sin_t = np.sin(theta)   # (n_samples,)
+
+    # mapping_matrix[i, j] = local index into pool[i] of nearest candidate
+    # for source voxel i at angle sample j
+    mapping_matrix = np.empty((V, n_samples), dtype=np.int32)
+
+    print(f"  Scanning {n_samples} angles for {V} voxels ...")
+    for i, (A, B, K) in enumerate(zip(A_list, B_list, K_list)):
+        # scores shape: (C, n_samples)
+        scores = (A[:, None] * cos_t[None, :]
+                  + B[:, None] * sin_t[None, :]
+                  - K[:, None] / 2.0)
+        mapping_matrix[i] = np.argmax(scores, axis=0)
+
+    # Convert local pool indices → global voxel index strings per angle
+    # We work with integer IDs to avoid slow Python string operations.
+    # Build a (V, n_samples) array of global all_voxels indices.
+    global_idx_matrix = np.empty((V, n_samples), dtype=np.int32)
+    pool_global_indices: list[np.ndarray] = []
+    for i, pool in enumerate(pools):
+        gi = np.array([all_index_map[v["index"]] if not skip_validity
+                       else 0   # placeholder when not checking
+                       for v in pool], dtype=np.int32)
+        if skip_validity:
+            # Just store pool-local indices as strings via the pool list
+            pool_global_indices.append(None)  # not used
+        else:
+            pool_global_indices.append(gi)
+        if not skip_validity:
+            global_idx_matrix[i] = gi[mapping_matrix[i]]
+
+    # Per-angle checks — vectorised where possible
+    print(f"  Checking collision, self-overlap"
+          + ("" if skip_validity else ", validity") + " ...")
+
+    # original_int_indices: set of all_voxels positions of original voxels
+    if not skip_validity:
+        original_int_set = {all_index_map[v["index"]] for v in selected
+                            if v["index"] in all_index_map}
+
+    valid_mask_angles = np.ones(n_samples, dtype=bool)
+
+    for j in range(n_samples):
+        targets_local = mapping_matrix[:, j]   # shape (V,)
+
+        # Collision: all target local indices must be distinct
+        # (we check per-source-voxel within its own pool, so we need the
+        # actual global pool-voxel identity — use the pool object index)
+        # Two source voxels can collide only if they share a pool (same layer),
+        # so use the pool voxel index tuple as the collision key.
+        target_keys = [pools[i][targets_local[i]]["index"] for i in range(V)]
+        if len(set(target_keys)) < V:
+            valid_mask_angles[j] = False
+            continue
+
+        # Self-overlap: no target should be in original selection
+        if original_indices & set(target_keys):
+            valid_mask_angles[j] = False
+            continue
+
+        # Validity
+        if not skip_validity:
+            gi = global_idx_matrix[:, j]
+            if not validity_mask[gi].all():
+                valid_mask_angles[j] = False
+                continue
+
+    # Find distinct valid mapping configurations via run-length encoding.
+    # Two angle samples with identical target_keys arrays are the same config.
+    # Build a compact hash per angle (use frozenset of target strings).
+    valid_indices = np.where(valid_mask_angles)[0]
+    if len(valid_indices) == 0:
+        return []
+
+    # Group consecutive valid angles that share the same full mapping tuple
+    seen_configs: dict[tuple, float] = {}   # config → representative phi_frac
+    for j in valid_indices:
+        config_key = tuple(
+            pools[i][mapping_matrix[i, j]]["index"] for i in range(V)
+        )
+        if config_key not in seen_configs:
+            seen_configs[config_key] = j / n_samples   # phi_frac representative
+
+    valid_fracs = sorted(seen_configs.values())
+    return valid_fracs
+
+
+def prompt_angle_selection(valid_fracs: list[float]) -> list[float]:
+    """Display valid angles and prompt the user to select which to run.
+
+    Accepts:
+      - Space- or comma-separated indices: ``0 2 4`` or ``0,2,4``
+      - Ranges: ``1-3`` (inclusive)
+      - The keyword ``all``
+    """
+    print(f"\n{'=' * 50}")
+    print(f"Found {len(valid_fracs)} valid rotation angle(s):")
+    print(f"{'=' * 50}")
+    print(f"  {'#':>4}  {'phi_frac':>10}  {'phi_deg':>9}")
+    print(f"  {'-'*4}  {'-'*10}  {'-'*9}")
+    for idx, frac in enumerate(valid_fracs):
+        deg = frac * 360.0
+        print(f"  {idx:>4}  {frac:>10.4f}  {deg:>8.2f}°")
+    print(f"{'=' * 50}")
+
+    while True:
+        raw = input(
+            'Select angles to run (e.g. "0 2 4", "1-3", or "all"): '
+        ).strip()
+        if not raw:
+            print("  No input — please enter at least one index.")
+            continue
+        if raw.lower() == "all":
+            return list(valid_fracs)
+        try:
+            selected_indices: list[int] = []
+            for token in raw.replace(",", " ").split():
+                if "-" in token:
+                    lo, hi = token.split("-", 1)
+                    selected_indices.extend(range(int(lo), int(hi) + 1))
+                else:
+                    selected_indices.append(int(token))
+            # Validate
+            out_of_range = [i for i in selected_indices
+                            if i < 0 or i >= len(valid_fracs)]
+            if out_of_range:
+                print(f"  Invalid indices: {out_of_range}. "
+                      f"Valid range: 0–{len(valid_fracs) - 1}.")
+                continue
+            return [valid_fracs[i] for i in selected_indices]
+        except ValueError:
+            print("  Could not parse input. Try e.g. '0 2', '1-3', or 'all'.")
+
+
+# ---------------------------------------------------------------------------
+# Single-angle execution (extracted so both modes can call it)
+# ---------------------------------------------------------------------------
+
+def run_for_angle(
+    selected: list[dict],
+    all_voxels: list[dict],
+    phi_frac: float,
+    output_dir: Path,
+    selected_path: str,
+    skip_validity: bool,
+    plot: bool,
+) -> None:
+    """Run the full rotation pipeline for one angle and save outputs.
+
+    In explore mode ``output_dir`` is a subfolder per angle; in single-angle
+    mode it is the directory passed directly by the user.
+    """
+    phi_deg = phi_frac * 360.0
+    print(f"\n{'=' * 62}")
+    print(f"Running angle: {phi_frac:.4f} × 2π = {phi_deg:.1f}°")
+    print(f"{'=' * 62}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = derive_output_stem(selected_path, phi_frac)
+    output_path = output_dir / f"{stem}.json"
+
+    # Compute mapping
+    print("Computing rotation mapping ...")
+    mapping = compute_voxel_mapping(selected, all_voxels, phi_frac)
+
+    # Validation
+    print("Validating mapping (collision + self-overlap check) ...")
+    check_mapping(mapping)
+    print("  OK — no collisions or self-overlaps detected")
+
+    if skip_validity:
+        print("PMT placement validity check skipped (--skip-validity).")
+    else:
+        print("Checking PMT placement validity of rotated voxels ...")
+        check_validity(mapping)
+        print(f"  OK — all {len(mapping)} rotated voxels are valid PMT positions")
+
+    rotated_voxels = assemble_output_voxels(mapping)
+
+    # Spacing distribution test
+    print("\nRunning spacing distribution test ...")
+    spacing_results = run_spacing_test(
+        selected, rotated_voxels,
+        plot=plot,
+        output_dir=output_dir if plot else None,
+    )
+    print_spacing_report(spacing_results, phi_frac, mapping)
+
+    # 3D plot
+    plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
+    plot_rotated_voxels(selected, rotated_voxels, plot_3d_path, phi_frac)
+
+    # 2D per-layer arrow plot
+    plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
+    plot_2d_arrows(mapping, plot_2d_path, phi_frac)
+
+    # JSON output
+    out_data = {
+        "config": {
+            "rotation_angle_2pi": phi_frac,
+            "source_file": str(selected_path),
+            "all_voxels_file": "",   # filled by caller if available
+            "n_voxels": len(rotated_voxels),
+        },
+        "selected_voxels": rotated_voxels,
+    }
+    with open(output_path, "w") as f:
+        json.dump(out_data, f, indent=2)
+    print(f"Output written to {output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Spacing distribution test
 # ---------------------------------------------------------------------------
 
@@ -244,14 +549,11 @@ def compute_spacing_stats(centers: np.ndarray) -> Optional[dict]:
     if n < 2:
         return None
 
-    # Full distance matrix (reused for both pairwise and NN)
     diffs = centers[:, None, :] - centers[None, :, :]   # (n, n, 3)
     dists = np.sqrt(np.sum(diffs ** 2, axis=2))          # (n, n)
 
-    # Pairwise (upper triangle)
     pw = dists[np.triu_indices(n, k=1)]
 
-    # Per-voxel nearest-neighbour distance
     dists_nn = dists.copy()
     np.fill_diagonal(dists_nn, np.inf)
     nn = dists_nn.min(axis=1)
@@ -274,12 +576,7 @@ def run_spacing_test(
     plot: bool = False,
     output_dir: Optional[Path] = None,
 ) -> dict:
-    """Compare per-layer spacing distributions before and after rotation.
-
-    Returns a dict keyed by layer name, each containing:
-    ``before``, ``after`` (stats dicts), ``delta_rel`` (relative changes),
-    ``passed`` (bool or None when skipped), ``count`` (number of voxels).
-    """
+    """Compare per-layer spacing distributions before and after rotation."""
     layers = sorted({v["layer"] for v in before})
     results: dict = {}
 
@@ -333,7 +630,7 @@ def _save_spacing_histogram(
     lo = min(pw_b.min(), pw_a.min())
     hi = max(pw_b.max(), pw_a.max())
     bins = np.linspace(lo, hi, 40)
-    ax.hist(pw_b, bins=bins, alpha=0.6, color="red",    label="before", density=False)
+    ax.hist(pw_b, bins=bins, alpha=0.6, color="red",       label="before", density=False)
     ax.hist(pw_a, bins=bins, alpha=0.6, color="limegreen", label="after",  density=False)
     ax.set_xlabel("Pairwise distance (mm)", fontsize=11)
     ax.set_ylabel("Count", fontsize=11)
@@ -402,17 +699,13 @@ def plot_rotated_voxels(
     output_path: Path,
     phi_frac: float,
 ) -> None:
-    """3D scatter of original (red) and rotated (green) voxel positions.
-
-    Mirrors the visual style of pmtopt/plotting.py:plot_selected_voxels.
-    """
+    """3D scatter of original (red) and rotated (green) voxel positions."""
     Z_BASE = Z_BASE_GLOBAL
     Z_TOP  = Z_BASE + H_ZYLINDER
 
     fig = plt.figure(figsize=(14, 10))
     ax  = fig.add_subplot(111, projection="3d")
 
-    # Cylinder wireframe
     theta = np.linspace(0, 2 * np.pi, 200)
     n_vert = 24
     theta_lines = np.linspace(0, 2 * np.pi, n_vert, endpoint=False)
@@ -423,7 +716,6 @@ def plot_rotated_voxels(
         ax.plot([R_ZYLINDER * np.cos(t)] * 2, [R_ZYLINDER * np.sin(t)] * 2,
                 [Z_BASE, Z_TOP], color="gray", alpha=0.3, linewidth=0.5)
 
-    # Reference circles
     ax.plot(R_PIT     * np.cos(theta), R_PIT     * np.sin(theta), Z_BASE,
             color="steelblue", alpha=0.6, linewidth=1.0,
             label=f"Pit (r={R_PIT})")
@@ -431,7 +723,6 @@ def plot_rotated_voxels(
             color="seagreen",  alpha=0.6, linewidth=1.0,
             label=f"Bot inner (r={R_ZYL_BOT})")
 
-    # Scatter: original (red) and rotated (green) per layer
     for layer in ["pit", "bot", "top", "wall"]:
         marker = LAYER_MARKERS[layer]
         orig_pts = np.array([v["center"] for v in original_voxels
@@ -480,12 +771,7 @@ def plot_2d_arrows(
     output_path: Path,
     phi_frac: float,
 ) -> None:
-    """2x2 figure with one subplot per layer showing original→rotated shifts.
-
-    Flat layers (pit, bot, top): x-y plane.
-    Wall layer: unwrapped azimuthal angle φ (deg) vs. z height (mm).
-    Each arrow goes from the original (red dot) to the rotated (green dot).
-    """
+    """2x2 figure with one subplot per layer showing original→rotated shifts."""
     phi_deg = phi_frac * 360.0
     layers = ["pit", "bot", "top", "wall"]
     layer_titles = {
@@ -512,7 +798,6 @@ def plot_2d_arrows(
             continue
 
         if layer == "wall":
-            # Unwrapped: φ in degrees on x-axis, z on y-axis
             orig_phi = np.degrees(
                 np.arctan2([o["center"][1] for o, _ in pairs],
                            [o["center"][0] for o, _ in pairs])
@@ -524,7 +809,6 @@ def plot_2d_arrows(
             )
             rot_z = np.array([t["center"][2] for _, t in pairs])
 
-            # Wrap arrow Δφ to [-180, 180] to avoid long cross-boundary arrows
             dphi = rot_phi - orig_phi
             dphi = (dphi + 180.0) % 360.0 - 180.0
             dz   = rot_z - orig_z
@@ -545,7 +829,6 @@ def plot_2d_arrows(
             ax.set_ylabel("z (mm)", fontsize=10)
 
         else:
-            # Flat layer: x-y plane
             orig_x = np.array([o["center"][0] for o, _ in pairs])
             orig_y = np.array([o["center"][1] for o, _ in pairs])
             rot_x  = np.array([t["center"][0] for _, t in pairs])
@@ -585,24 +868,40 @@ def plot_2d_arrows(
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Rotate a greedy PMT voxel selection by a fraction of 2π."
+        description=(
+            "Rotate a greedy PMT voxel selection by a fraction of 2π.\n\n"
+            "Single-angle mode (--angle provided): run immediately and save "
+            "outputs to --output-dir.\n"
+            "Explore mode (--angle omitted): scan all valid angles, display "
+            "them, prompt for selection, then run each chosen angle in its "
+            "own subfolder inside --output-dir."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--all-voxels", required=True, metavar="PATH",
-        help="JSON file with all valid voxel positions "
-             "(same 'selected_voxels' list format as greedy output)",
+        help="JSON file with all available voxel positions "
+             "(bare list or 'selected_voxels' wrapper format).",
     )
     parser.add_argument(
         "--selected", required=True, metavar="PATH",
-        help="JSON greedy output (or bare voxel list) to rotate",
+        help="JSON greedy output (or bare voxel list) to rotate.",
     )
     parser.add_argument(
-        "--angle", required=True, type=float, metavar="FRAC",
-        help="Rotation as a fraction of 2π (e.g. 0.5 → 180°, 0.25 → 90°)",
+        "--angle", default=None, type=float, metavar="FRAC",
+        help="Rotation as a fraction of 2π (e.g. 0.5 → 180°). "
+             "Omit to enter explore mode and discover all valid angles.",
+    )
+    parser.add_argument(
+        "--n-samples", type=int, default=3600, metavar="N",
+        help="Angular sampling resolution for explore mode: number of steps "
+             "from 0 to 2π (default 3600 = every 0.1°). Increase for finer "
+             "resolution; the default is sufficient for all practical voxel "
+             "grid spacings on this detector.",
     )
     parser.add_argument(
         "--plot", action="store_true",
-        help="Save per-layer pairwise-distance histograms",
+        help="Save per-layer pairwise-distance histograms.",
     )
     parser.add_argument(
         "--skip-validity", action="store_true",
@@ -611,13 +910,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     parser.add_argument(
         "--output-dir", required=True, metavar="PATH",
-        help="Directory where the output JSON and all plots are saved",
+        help="Output directory. In single-angle mode files go directly here; "
+             "in explore mode a subfolder phi_{frac:.4f}x2pi/ is created per "
+             "selected angle.",
     )
     args = parser.parse_args(argv)
-
-    phi_frac: float = args.angle
-    phi_deg = phi_frac * 360.0
-    print(f"\nRotating voxels by {phi_frac:.4f} × 2π = {phi_deg:.1f}°")
 
     # Load inputs
     print(f"Loading all voxels from  {args.all_voxels} ...")
@@ -628,60 +925,51 @@ def main(argv: Optional[list[str]] = None) -> None:
     selected = load_voxel_file(args.selected)
     print(f"  {len(selected)} voxels selected")
 
-    # Output paths
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = derive_output_stem(args.selected, phi_frac)
-    output_path = output_dir / f"{stem}.json"
 
-    # Compute mapping (no per-voxel checks)
-    print("\nComputing rotation mapping ...")
-    mapping = compute_voxel_mapping(selected, all_voxels, phi_frac)
+    # -----------------------------------------------------------------------
+    # Single-angle mode
+    # -----------------------------------------------------------------------
+    if args.angle is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        run_for_angle(
+            selected, all_voxels,
+            phi_frac=args.angle,
+            output_dir=output_dir,
+            selected_path=args.selected,
+            skip_validity=args.skip_validity,
+            plot=args.plot,
+        )
+        return
 
-    # Batch validation
-    print("Validating mapping (collision + self-overlap check) ...")
-    check_mapping(mapping)
-    print("  OK — no collisions or self-overlaps detected")
-
-    if args.skip_validity:
-        print("PMT placement validity check skipped (--skip-validity).")
-    else:
-        print("Checking PMT placement validity of rotated voxels ...")
-        check_validity(mapping)
-        print(f"  OK — all {len(mapping)} rotated voxels are valid PMT positions")
-
-    rotated_voxels = assemble_output_voxels(mapping)
-
-    # Spacing distribution test
-    print("\nRunning spacing distribution test ...")
-    spacing_results = run_spacing_test(
-        selected, rotated_voxels,
-        plot=args.plot,
-        output_dir=output_dir if args.plot else None,
+    # -----------------------------------------------------------------------
+    # Explore mode: find all valid angles, let user pick
+    # -----------------------------------------------------------------------
+    print(f"\nExplore mode: scanning {args.n_samples} angles ...")
+    valid_fracs = find_valid_angles(
+        selected, all_voxels,
+        n_samples=args.n_samples,
+        skip_validity=args.skip_validity,
     )
-    print_spacing_report(spacing_results, phi_frac, mapping)
 
-    # 3D plot (always produced)
-    plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
-    plot_rotated_voxels(selected, rotated_voxels, plot_3d_path, phi_frac)
+    if not valid_fracs:
+        print("No valid rotation angles found.")
+        return
 
-    # 2D per-layer arrow plot (always produced)
-    plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
-    plot_2d_arrows(mapping, plot_2d_path, phi_frac)
+    chosen_fracs = prompt_angle_selection(valid_fracs)
 
-    # Write JSON output
-    out_data = {
-        "config": {
-            "rotation_angle_2pi": phi_frac,
-            "source_file": str(args.selected),
-            "all_voxels_file": str(args.all_voxels),
-            "n_voxels": len(rotated_voxels),
-        },
-        "selected_voxels": rotated_voxels,
-    }
-    with open(output_path, "w") as f:
-        json.dump(out_data, f, indent=2)
-    print(f"Output written to {output_path}")
+    for phi_frac in chosen_fracs:
+        subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
+        run_for_angle(
+            selected, all_voxels,
+            phi_frac=phi_frac,
+            output_dir=subfolder,
+            selected_path=args.selected,
+            skip_validity=args.skip_validity,
+            plot=args.plot,
+        )
+
+    print(f"\nAll done. Results in: {output_dir}")
 
 
 if __name__ == "__main__":
