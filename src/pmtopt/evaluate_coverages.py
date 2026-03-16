@@ -115,12 +115,22 @@ class EvalData:
 # ===================================================================
 
 def load_config_json(json_path: str) -> tuple[list[str], dict]:
-    """Load voxel IDs and full config from a greedy result JSON."""
+    """Load voxel IDs and full config from a greedy result JSON.
+
+    Supports two formats:
+    - Greedy result: dict with ``selected_voxels`` list of objects with
+      ``index`` keys, and optional ``config`` metadata.
+    - Plain list: a JSON array of voxel ID strings.
+    """
     with open(json_path, "r") as f:
         data = json.load(f)
 
-    voxels = data.get("selected_voxels", [])
-    voxel_ids = [v["index"] for v in voxels]
+    if isinstance(data, list):
+        voxel_ids = data
+        data = {}
+    else:
+        voxels = data.get("selected_voxels", [])
+        voxel_ids = [v["index"] for v in voxels]
 
     if len(voxel_ids) == 0:
         raise ValueError(f"No voxels found in {json_path}")
