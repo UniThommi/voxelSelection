@@ -21,9 +21,8 @@ Usage:
         --all-voxels all_valid.json \\
         --selected greedy_N300.json \\
         --angle 0.25 \\          # fraction of 2π → 90°
-        [--output rotated.json] \\
-        [--plot] \\
-        [--output-dir plots/]
+        --output-dir plots/ \\
+        [--plot]
 """
 
 import argparse
@@ -84,10 +83,9 @@ def load_voxel_file(path: str) -> list[dict]:
     )
 
 
-def derive_output_path(selected_path: str, phi_frac: float) -> Path:
-    """Default output path: ``{stem}_rotated_{phi_frac:.4f}x2pi.json``."""
-    p = Path(selected_path)
-    return p.parent / f"{p.stem}_rotated_{phi_frac:.4f}x2pi.json"
+def derive_output_stem(selected_path: str, phi_frac: float) -> str:
+    """Base filename stem derived from the selected voxel file: ``{stem}_rotated_{phi_frac:.4f}x2pi``."""
+    return f"{Path(selected_path).stem}_rotated_{phi_frac:.4f}x2pi"
 
 
 # ---------------------------------------------------------------------------
@@ -474,17 +472,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         help="Rotation as a fraction of 2π (e.g. 0.5 → 180°, 0.25 → 90°)",
     )
     parser.add_argument(
-        "--output", default=None, metavar="PATH",
-        help="Output JSON path (default: derived from --selected)",
-    )
-    parser.add_argument(
         "--plot", action="store_true",
         help="Save per-layer pairwise-distance histograms",
     )
     parser.add_argument(
-        "--output-dir", default=None, metavar="PATH",
-        help="Directory for spacing histogram plots "
-             "(default: same directory as --output)",
+        "--output-dir", required=True, metavar="PATH",
+        help="Directory where the output JSON and all plots are saved",
     )
     args = parser.parse_args(argv)
 
@@ -502,12 +495,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"  {len(selected)} voxels selected")
 
     # Output paths
-    output_path = (
-        Path(args.output) if args.output
-        else derive_output_path(args.selected, phi_frac)
-    )
-    output_dir = Path(args.output_dir) if args.output_dir else output_path.parent
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    stem = derive_output_stem(args.selected, phi_frac)
+    output_path = output_dir / f"{stem}.json"
 
     # Compute mapping (no per-voxel checks)
     print("\nComputing rotation mapping ...")
