@@ -76,6 +76,7 @@ def load_and_binarize(
     area_ratios: dict[str, float],
     seed: int = 42,
     verbose: bool = True,
+    skip_validity: bool = False,
 ) -> tuple[sparse.csc_matrix, np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Load HDF5 data, apply stochastic rounding with area ratios,
@@ -83,8 +84,6 @@ def load_and_binarize(
 
     B[i, j] = 1 iff the stochastically rounded hit count for voxel j
     and NC i is >= m.
-
-    Only voxels where a PMT can physically be placed are included.
 
     Parameters
     ----------
@@ -98,17 +97,19 @@ def load_and_binarize(
         Random seed for stochastic rounding.
     verbose : bool
         Print progress information.
+    skip_validity : bool
+        If True, skip the PMT placement filter and use all voxels.
 
     Returns
     -------
     B : sparse.csc_matrix
-        Binary (NCs x valid_voxels) matrix in CSC format.
+        Binary (NCs x voxels) matrix in CSC format.
     voxel_ids : np.ndarray
         Array of voxel ID strings, mapping column index -> voxel name.
-    centers : np.ndarray, shape (num_valid_voxels, 3)
+    centers : np.ndarray, shape (num_voxels, 3)
         Voxel center coordinates (x, y, z) in mm.
-    layers : np.ndarray of str, shape (num_valid_voxels,)
-        Layer label per valid voxel.
+    layers : np.ndarray of str, shape (num_voxels,)
+        Layer label per voxel.
     num_primaries : int
         Total number of primary events.
     """
@@ -120,10 +121,17 @@ def load_and_binarize(
             for c in f["target_columns"][:]
         )
 
-        # PMT placement filter
-        valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
-        valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
-        num_voxels = len(valid_keys)
+        # PMT placement filter (optional)
+        if skip_validity:
+            valid_keys = voxel_keys
+            num_voxels = len(valid_keys)
+            if verbose:
+                print(f"PMT placement filter skipped: "
+                      f"using all {num_voxels} voxels")
+        else:
+            valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
+            valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
+            num_voxels = len(valid_keys)
 
         # Read centers and layers for valid voxels
         centers = np.empty((num_voxels, 3), dtype=np.float64)
@@ -400,10 +408,12 @@ def load_nc_muon_ids(
 def load_raw_sparse(
     filepath: str,
     verbose: bool = True,
+    skip_validity: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Load raw (unscaled) hit values from HDF5 as sparse COO arrays.
-    Only valid voxels (PMT-placeable) and non-zero entries are kept.
+    By default only valid voxels (PMT-placeable) are kept; pass
+    ``skip_validity=True`` to include all voxels.
 
     Parameters
     ----------
@@ -437,9 +447,16 @@ def load_raw_sparse(
             for c in f["target_columns"][:]
         )
 
-        valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
-        valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
-        num_voxels = len(valid_keys)
+        if skip_validity:
+            valid_keys = voxel_keys
+            num_voxels = len(valid_keys)
+            if verbose:
+                print(f"PMT placement filter skipped: "
+                      f"using all {num_voxels} voxels")
+        else:
+            valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
+            valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
+            num_voxels = len(valid_keys)
 
         centers = np.empty((num_voxels, 3), dtype=np.float64)
         layers = np.empty(num_voxels, dtype=object)

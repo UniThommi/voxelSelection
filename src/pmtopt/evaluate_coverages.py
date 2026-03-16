@@ -109,6 +109,10 @@ class EvalData:
         self.ge77_mask_all: np.ndarray | None = None
         self.nc_is_veto_candidate: np.ndarray | None = None
 
+        # "All voxels" reference coverage (computed from all HDF5 voxels)
+        self.coverage_counts_all: np.ndarray | None = None
+        self.num_all_voxels: int = 0
+
 
 # ===================================================================
 # Loading
@@ -159,13 +163,17 @@ def load_shared_data(
         print("Loading shared simulation data")
         print("=" * 65)
 
-    # Load raw sparse (all valid voxels)
+    # Load raw sparse for ALL voxels (no validity filter)
     (raw_rows, raw_cols, raw_vals,
      full_voxel_ids, centers, layers,
-     num_ncs, num_primaries) = load_raw_sparse(hdf5_path, verbose=verbose)
+     num_ncs, num_primaries) = load_raw_sparse(
+        hdf5_path, verbose=verbose, skip_validity=True,
+    )
 
     ed.num_ncs = num_ncs
     ed.num_primaries = num_primaries
+    num_all_voxels = len(full_voxel_ids)
+    ed.num_all_voxels = num_all_voxels
 
     full_id_to_col = {vid: i for i, vid in enumerate(full_voxel_ids)}
 
@@ -173,39 +181,41 @@ def load_shared_data(
     missing = all_voxel_ids - set(full_id_to_col.keys())
     if missing:
         raise RuntimeError(
-            f"{len(missing)} voxel(s) from configs not found in HDF5 "
-            f"valid voxels. First 5: {list(missing)[:5]}"
+            f"{len(missing)} voxel(s) from configs not found in HDF5. "
+            f"First 5: {list(missing)[:5]}"
         )
 
-    # Subset to needed columns only
-    needed_old_cols = sorted(full_id_to_col[vid] for vid in all_voxel_ids)
-    col_old_to_new = {old: new for new, old in enumerate(needed_old_cols)}
-
-    col_mask = np.isin(raw_cols, needed_old_cols)
-    sub_rows = raw_rows[col_mask]
-    sub_cols = np.array(
-        [col_old_to_new[c] for c in raw_cols[col_mask]], dtype=np.int32
-    )
-    sub_vals = raw_vals[col_mask]
-
-    num_sub_voxels = len(needed_old_cols)
-    sub_voxel_ids = full_voxel_ids[needed_old_cols]
-    sub_layers = layers[needed_old_cols]
-
+    # Binarize ALL voxels once (consistent stochastic rounding seed)
     if verbose:
-        print(f"\nSubset: {num_sub_voxels} voxels needed "
-              f"(of {len(full_voxel_ids)} valid)")
-
-    # Binarize
-    B = binarize_from_raw(
-        sub_rows, sub_cols, sub_vals,
+        print(f"\nBinarizing all {num_all_voxels} voxels for reference ...")
+    B_all = binarize_from_raw(
+        raw_rows, raw_cols, raw_vals,
         num_ncs=num_ncs,
-        num_voxels=num_sub_voxels,
-        layers=sub_layers,
+        num_voxels=num_all_voxels,
+        layers=layers,
         area_ratios=area_ratios,
         m=m,
         seed=seed,
     )
+
+    # Per-NC coverage count with ALL voxels (the reference upper bound)
+    ed.coverage_counts_all = np.asarray(
+        B_all.sum(axis=1)
+    ).ravel().astype(np.int32)
+
+    if verbose:
+        nnz_all = B_all.nnz
+        mem_all = (B_all.data.nbytes + B_all.indices.nbytes
+                   + B_all.indptr.nbytes) / 1e6
+        print(f"All-voxels B: {num_ncs} x {num_all_voxels}, "
+              f"nnz={nnz_all:,}, {mem_all:.1f} MB")
+
+    # Subset B_all to only the columns needed by the JSON configs
+    needed_old_cols = sorted(full_id_to_col[vid] for vid in all_voxel_ids)
+    num_sub_voxels = len(needed_old_cols)
+    sub_voxel_ids = full_voxel_ids[needed_old_cols]
+
+    B = B_all[:, needed_old_cols]  # CSC column slicing — efficient
 
     ed.B = B
     ed.voxel_ids = sub_voxel_ids
@@ -215,7 +225,8 @@ def load_shared_data(
         nnz = B.nnz
         density = nnz / (num_ncs * num_sub_voxels) * 100
         mem_mb = (B.data.nbytes + B.indices.nbytes + B.indptr.nbytes) / 1e6
-        print(f"B matrix: {num_ncs} x {num_sub_voxels}, "
+        print(f"Config B: {num_ncs} x {num_sub_voxels} "
+              f"(of {num_all_voxels} total), "
               f"nnz={nnz:,} ({density:.3f}%), {mem_mb:.1f} MB")
 
     # Load muon data
@@ -789,6 +800,24 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
 
     # ------------------------------------------------------------------
+    # Build "All voxels" reference config from pre-computed coverage
+    # ------------------------------------------------------------------
+    all_voxels_cfg = ConfigResult(
+        name="all_voxels",
+        voxel_ids=[],
+        label=f"All voxels (N={ed.num_all_voxels})",
+    )
+    all_voxels_cfg.coverage_counts = ed.coverage_counts_all
+    all_voxels_cfg.num_ncs = ed.num_ncs
+    all_voxels_cfg.num_visible = int(np.sum(ed.coverage_counts_all >= 1))
+    for M in M_values:
+        all_voxels_cfg.num_detected[M] = int(
+            np.sum(ed.coverage_counts_all >= M)
+        )
+    evaluate_muon(all_voxels_cfg, ed, M_values, W_values)
+    all_configs = [all_voxels_cfg] + all_configs
+
+    # ------------------------------------------------------------------
     # Evaluate all configs
     # ------------------------------------------------------------------
     if verbose:
@@ -798,13 +827,17 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     for cfg in all_configs:
         t0 = time.time()
-        map_voxels_to_columns(cfg, ed)
-        evaluate_nc(cfg, ed, M_values)
-        evaluate_muon(cfg, ed, M_values, W_values)
+        if cfg.coverage_counts is not None:
+            # Pre-computed (e.g. "All voxels") — muon eval already done above
+            pass
+        else:
+            map_voxels_to_columns(cfg, ed)
+            evaluate_nc(cfg, ed, M_values)
+            evaluate_muon(cfg, ed, M_values, W_values)
         dt = time.time() - t0
         if verbose:
             det1 = cfg.num_detected.get(1, 0)
-            print(f"  {cfg.label:<25} | visible={cfg.num_visible:>10,} | "
+            print(f"  {cfg.label:<30} | visible={cfg.num_visible:>10,} | "
                   f"det(M=1)={det1:>10,} | {dt:.1f}s")
 
     # ------------------------------------------------------------------

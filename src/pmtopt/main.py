@@ -296,6 +296,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     B, voxel_ids, centers, layers, num_primaries = load_and_binarize(
         args.hdf5_file, m=args.m, area_ratios=area_ratios,
         seed=args.seed, verbose=verbose,
+        skip_validity=args.no_spacing,
     )
 
     # Load muon data if needed
