@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pmtopt.geometry import (
     R_PIT, R_ZYL_BOT, R_ZYLINDER,
     Z_BASE_GLOBAL, H_ZYLINDER,
+    is_valid_pmt_position,
 )
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,26 @@ def check_mapping(mapping: list[tuple[dict, dict]]) -> None:
             f"voxels in the original selection — the rotation angle may be "
             f"too small or the grid too symmetric for this angle:\n"
             f"  {sorted(overlap)}"
+        )
+
+
+def check_validity(mapping: list[tuple[dict, dict]]) -> None:
+    """Check that every target voxel is a geometrically valid PMT position.
+
+    Raises RuntimeError listing all invalid targets.
+    """
+    invalid: list[str] = []
+    for _, tgt in mapping:
+        center = tgt["center"]
+        layer  = tgt["layer"]
+        if not is_valid_pmt_position(center, layer):
+            invalid.append(
+                f"  '{tgt['index']}' layer={layer} center={center}"
+            )
+    if invalid:
+        raise RuntimeError(
+            f"{len(invalid)} rotated voxel(s) failed the PMT placement "
+            f"validity check:\n" + "\n".join(invalid)
         )
 
 
@@ -584,6 +605,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         help="Save per-layer pairwise-distance histograms",
     )
     parser.add_argument(
+        "--skip-validity", action="store_true",
+        help="Skip the PMT placement validity check on rotated voxels "
+             "(by default the check is run and invalid targets raise an error).",
+    )
+    parser.add_argument(
         "--output-dir", required=True, metavar="PATH",
         help="Directory where the output JSON and all plots are saved",
     )
@@ -616,6 +642,13 @@ def main(argv: Optional[list[str]] = None) -> None:
     print("Validating mapping (collision + self-overlap check) ...")
     check_mapping(mapping)
     print("  OK — no collisions or self-overlaps detected")
+
+    if args.skip_validity:
+        print("PMT placement validity check skipped (--skip-validity).")
+    else:
+        print("Checking PMT placement validity of rotated voxels ...")
+        check_validity(mapping)
+        print(f"  OK — all {len(mapping)} rotated voxels are valid PMT positions")
 
     rotated_voxels = assemble_output_voxels(mapping)
 
