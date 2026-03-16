@@ -623,7 +623,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
 
     parser.add_argument("--hdf5", type=str, required=True,
-                        help="Path to the SSD HDF5 data file.")
+                        help="Path to the raw SSD HDF5 data file. "
+                             "Area ratios are applied here via stochastic "
+                             "rounding (from the baseline JSON or CLI flags). "
+                             "Do NOT pass a ratio-adjusted HDF5 "
+                             "(from main.py --write-hdf5) — that would "
+                             "double-apply the scaling.")
     parser.add_argument("--baseline", type=str, required=True,
                         help="JSON file for the baseline (homogeneous) config. "
                              "This is mandatory.")
@@ -659,17 +664,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     verbose = not args.quiet
 
-    # Area ratios
-    area_ratios = dict(DEFAULT_AREA_RATIOS)
-    if args.pit is not None:
-        area_ratios["pit"] = args.pit
-    if args.bot is not None:
-        area_ratios["bot"] = args.bot
-    if args.top is not None:
-        area_ratios["top"] = args.top
-    if args.wall is not None:
-        area_ratios["wall"] = args.wall
-
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -686,6 +680,46 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Baseline (always labeled "Baseline")
     bl_voxels, bl_data = load_config_json(args.baseline)
+
+    # Area ratios — use baseline JSON ratios if present, else CLI/defaults
+    cli_ratio_flags = {
+        k for k, v in {"pit": args.pit, "bot": args.bot,
+                        "top": args.top, "wall": args.wall}.items()
+        if v is not None
+    }
+    json_ratios = bl_data.get("config", {}).get("area_ratios", {})
+    if json_ratios:
+        if cli_ratio_flags:
+            raise RuntimeError(
+                f"Baseline JSON '{args.baseline}' already contains "
+                f"area_ratios — do not also pass "
+                f"--{'/--'.join(sorted(cli_ratio_flags))}. "
+                f"Remove the CLI ratio flags to use the JSON values."
+            )
+        area_ratios = dict(DEFAULT_AREA_RATIOS)
+        area_ratios.update(json_ratios)
+        if verbose:
+            print(f"  Area ratios from baseline JSON (applied via stochastic "
+                  f"rounding to raw HDF5):")
+            for layer, ratio in area_ratios.items():
+                src = "(from JSON)" if layer in json_ratios else "(default)"
+                print(f"    {layer:>6}: {ratio}  {src}")
+    else:
+        area_ratios = dict(DEFAULT_AREA_RATIOS)
+        if args.pit is not None:
+            area_ratios["pit"] = args.pit
+        if args.bot is not None:
+            area_ratios["bot"] = args.bot
+        if args.top is not None:
+            area_ratios["top"] = args.top
+        if args.wall is not None:
+            area_ratios["wall"] = args.wall
+        if verbose:
+            print(f"  Area ratios (CLI/defaults):")
+            for layer, ratio in area_ratios.items():
+                src = "(CLI)" if layer in cli_ratio_flags else "(default)"
+                print(f"    {layer:>6}: {ratio}  {src}")
+
     baseline = ConfigResult(
         name=Path(args.baseline).stem,
         voxel_ids=bl_voxels,
