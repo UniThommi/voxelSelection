@@ -312,10 +312,10 @@ def _save_spacing_histogram(
     lo = min(pw_b.min(), pw_a.min())
     hi = max(pw_b.max(), pw_a.max())
     bins = np.linspace(lo, hi, 40)
-    ax.hist(pw_b, bins=bins, alpha=0.6, color="red",    label="before", density=True)
-    ax.hist(pw_a, bins=bins, alpha=0.6, color="limegreen", label="after",  density=True)
+    ax.hist(pw_b, bins=bins, alpha=0.6, color="red",    label="before", density=False)
+    ax.hist(pw_a, bins=bins, alpha=0.6, color="limegreen", label="after",  density=False)
     ax.set_xlabel("Pairwise distance (mm)", fontsize=11)
-    ax.set_ylabel("Density", fontsize=11)
+    ax.set_ylabel("Count", fontsize=11)
     ax.set_title(f"Pairwise distance distribution — {layer.upper()}", fontsize=12)
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
@@ -451,6 +451,114 @@ def plot_rotated_voxels(
 
 
 # ---------------------------------------------------------------------------
+# 2D per-layer arrow plot
+# ---------------------------------------------------------------------------
+
+def plot_2d_arrows(
+    mapping: list[tuple[dict, dict]],
+    output_path: Path,
+    phi_frac: float,
+) -> None:
+    """2x2 figure with one subplot per layer showing original→rotated shifts.
+
+    Flat layers (pit, bot, top): x-y plane.
+    Wall layer: unwrapped azimuthal angle φ (deg) vs. z height (mm).
+    Each arrow goes from the original (red dot) to the rotated (green dot).
+    """
+    phi_deg = phi_frac * 360.0
+    layers = ["pit", "bot", "top", "wall"]
+    layer_titles = {
+        "pit":  "Pit  (x-y plane)",
+        "bot":  "Bot  (x-y plane)",
+        "top":  "Top  (x-y plane)",
+        "wall": "Wall  (φ-z unwrapped)",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig.suptitle(
+        f"Per-layer voxel shifts  (phi = {phi_frac:.4f} × 2π = {phi_deg:.1f}°)\n"
+        f"Red = original  |  Green = rotated  |  Arrows = shift",
+        fontsize=13,
+    )
+
+    for ax, layer in zip(axes.flat, layers):
+        pairs = [(orig, tgt) for orig, tgt in mapping if orig["layer"] == layer]
+
+        if not pairs:
+            ax.set_title(layer_titles[layer], fontsize=11)
+            ax.text(0.5, 0.5, "no voxels", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=10, color="gray")
+            continue
+
+        if layer == "wall":
+            # Unwrapped: φ in degrees on x-axis, z on y-axis
+            orig_phi = np.degrees(
+                np.arctan2([o["center"][1] for o, _ in pairs],
+                           [o["center"][0] for o, _ in pairs])
+            )
+            orig_z = np.array([o["center"][2] for o, _ in pairs])
+            rot_phi = np.degrees(
+                np.arctan2([t["center"][1] for _, t in pairs],
+                           [t["center"][0] for _, t in pairs])
+            )
+            rot_z = np.array([t["center"][2] for _, t in pairs])
+
+            # Wrap arrow Δφ to [-180, 180] to avoid long cross-boundary arrows
+            dphi = rot_phi - orig_phi
+            dphi = (dphi + 180.0) % 360.0 - 180.0
+            dz   = rot_z - orig_z
+
+            ax.scatter(orig_phi, orig_z, c="red",       s=25, alpha=0.8,
+                       edgecolors="darkred",   linewidths=0.4, zorder=3,
+                       label=f"Original ({len(pairs)})")
+            ax.scatter(rot_phi,  rot_z,  c="limegreen", s=25, alpha=0.8,
+                       edgecolors="darkgreen", linewidths=0.4, zorder=3,
+                       label=f"Rotated ({len(pairs)})")
+            for px, pz, dx, dz_ in zip(orig_phi, orig_z, dphi, dz):
+                ax.annotate(
+                    "", xy=(px + dx, pz + dz_), xytext=(px, pz),
+                    arrowprops=dict(arrowstyle="-|>", color="steelblue",
+                                   lw=0.8, mutation_scale=8),
+                )
+            ax.set_xlabel("φ (deg)", fontsize=10)
+            ax.set_ylabel("z (mm)", fontsize=10)
+
+        else:
+            # Flat layer: x-y plane
+            orig_x = np.array([o["center"][0] for o, _ in pairs])
+            orig_y = np.array([o["center"][1] for o, _ in pairs])
+            rot_x  = np.array([t["center"][0] for _, t in pairs])
+            rot_y  = np.array([t["center"][1] for _, t in pairs])
+            dx = rot_x - orig_x
+            dy = rot_y - orig_y
+
+            ax.scatter(orig_x, orig_y, c="red",       s=25, alpha=0.8,
+                       edgecolors="darkred",   linewidths=0.4, zorder=3,
+                       label=f"Original ({len(pairs)})")
+            ax.scatter(rot_x,  rot_y,  c="limegreen", s=25, alpha=0.8,
+                       edgecolors="darkgreen", linewidths=0.4, zorder=3,
+                       label=f"Rotated ({len(pairs)})")
+            for px, py, ddx, ddy in zip(orig_x, orig_y, dx, dy):
+                ax.annotate(
+                    "", xy=(px + ddx, py + ddy), xytext=(px, py),
+                    arrowprops=dict(arrowstyle="-|>", color="steelblue",
+                                   lw=0.8, mutation_scale=8),
+                )
+            ax.set_aspect("equal", adjustable="datalim")
+            ax.set_xlabel("x (mm)", fontsize=10)
+            ax.set_ylabel("y (mm)", fontsize=10)
+
+        ax.set_title(layer_titles[layer], fontsize=11)
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"2D arrow plot saved to {output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -523,6 +631,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     # 3D plot (always produced)
     plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
     plot_rotated_voxels(selected, rotated_voxels, plot_3d_path, phi_frac)
+
+    # 2D per-layer arrow plot (always produced)
+    plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
+    plot_2d_arrows(mapping, plot_2d_path, phi_frac)
 
     # Write JSON output
     out_data = {
