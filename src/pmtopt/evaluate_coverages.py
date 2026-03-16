@@ -126,7 +126,9 @@ def load_config_json(json_path: str) -> tuple[list[str], dict]:
         data = json.load(f)
 
     if isinstance(data, list):
-        voxel_ids = data
+        voxel_ids = [
+            v["index"] if isinstance(v, dict) else v for v in data
+        ]
         data = {}
     else:
         voxels = data.get("selected_voxels", [])
