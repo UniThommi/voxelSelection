@@ -384,12 +384,20 @@ def find_valid_angles(
 
     valid_mask_angles = snap_ok.copy()
 
+    original_indices_list = [v["index"] for v in selected]
+
     for j in np.where(snap_ok)[0]:
         targets_local = mapping_matrix[:, j]   # shape (V,)
 
-        # Collision: all target indices must be distinct
         target_keys = [pools[i][targets_local[i]]["index"] for i in range(V)]
+
+        # Collision: all target indices must be distinct
         if len(set(target_keys)) < V:
+            valid_mask_angles[j] = False
+            continue
+
+        # Identity: exclude if every voxel maps to itself
+        if target_keys == original_indices_list:
             valid_mask_angles[j] = False
 
     # Find distinct valid mapping configurations
@@ -1358,7 +1366,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"\nFound {len(valid_fracs)} valid angle(s). Running all ...")
         saved_configs: list[dict] = []
         for phi_frac in valid_fracs:
-            subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
+            subfolder = output_dir / f"phi_{phi_frac:.6f}x2pi"
             result = run_for_angle(
                 selected, all_voxels,
                 phi_frac=phi_frac,
@@ -1396,7 +1404,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     discarded_count = 0
 
     for phi_frac in valid_fracs:
-        subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
+        subfolder = output_dir / f"phi_{phi_frac:.6f}x2pi"
         result = run_bot_split_angle(
             bot_selected, non_bot_selected, all_voxels,
             phi_frac_nominal=phi_frac,
@@ -1420,8 +1428,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"Bot-split explore mode complete")
     print(f"  Saved    : {len(saved_configs)} setup(s)")
     for c in saved_configs:
-        print(f"    {c['phi_frac']:.4f} × 2π = {c['phi_deg']:.2f}°"
-              f"  →  phi_{c['phi_frac']:.4f}x2pi/")
+        print(f"    {c['phi_frac']:.6f} × 2π = {c['phi_deg']:.2f}°"
+              f"  →  phi_{c['phi_frac']:.6f}x2pi/")
     print(f"  Discarded: {discarded_count} setup(s)  (combined collision)")
     print(f"{'=' * 62}")
     print(f"\nAll done. Results in: {output_dir}")
