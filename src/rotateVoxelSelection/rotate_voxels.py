@@ -290,14 +290,23 @@ def find_valid_angles(
     n_samples: int = 3600,
     skip_validity: bool = False,
 ) -> list[float]:
-    """Scan all rotation angles and return those producing collision-free mappings.
+    """Scan all rotation angles and return those producing rigid-grid, collision-free mappings.
 
     Self-overlap is not a discard criterion.
 
     When ``skip_validity=False`` (default) the candidate pool for each source
     voxel is pre-filtered to valid PMT positions via ``build_candidate_pool``.
-    When ``skip_validity=True`` all same-layer voxels are candidates; only the
-    collision check is applied.
+    When ``skip_validity=True`` all same-layer voxels are candidates.
+
+    A snap-error filter enforces that every rotated voxel lands within 50 % of
+    the minimum inter-voxel spacing in its candidate pool.  This ensures only
+    "rigid grid rotations" — where all voxels jump simultaneously to valid grid
+    positions — are accepted, rather than partially-shifted configurations.
+
+    The snap error is derived for free from the scoring coefficients:
+        dist²(θ, c) = −2 × score(θ, c)
+    so no extra computation is required beyond what is already done for
+    nearest-neighbour assignment.
 
     Parameters
     ----------
@@ -327,29 +336,55 @@ def find_valid_angles(
         B_list.append(B)
         K_list.append(K)
 
+    # Per-pool snap-error threshold: (0.5 × min pairwise distance)²
+    # dist²(θ, c) = −2 × score(θ, c), so the threshold on score is −thresh_sq / 2.
+    snap_thresh_sq = np.empty(V)
+    for i, pool in enumerate(pools):
+        centers = np.array([v["center"] for v in pool])   # (C, 3)
+        n_c = len(centers)
+        if n_c < 2:
+            snap_thresh_sq[i] = np.inf
+        else:
+            diffs_sq = np.sum(
+                (centers[:, None, :] - centers[None, :, :]) ** 2, axis=2
+            )                                                          # (C, C)
+            np.fill_diagonal(diffs_sq, np.inf)
+            snap_thresh_sq[i] = 0.25 * float(diffs_sq.min())         # (0.5 × d_min)²
+
     # Sample angles
     theta = np.linspace(0.0, 2.0 * np.pi, n_samples, endpoint=False)
     cos_t = np.cos(theta)   # (n_samples,)
     sin_t = np.sin(theta)   # (n_samples,)
 
     # mapping_matrix[i, j] = local index into pool[i] of nearest candidate
-    # for source voxel i at angle sample j
+    # max_scores[i, j]      = score of that nearest candidate (≤ 0 always)
     mapping_matrix = np.empty((V, n_samples), dtype=np.int32)
+    max_scores     = np.empty((V, n_samples), dtype=np.float64)
 
     print(f"  Scanning {n_samples} angles for {V} voxels ...")
+    arange_j = np.arange(n_samples)
     for i, (A, B, K) in enumerate(zip(A_list, B_list, K_list)):
-        # scores shape: (C, n_samples)
+        # scores shape: (C, n_samples);  dist²(θ,c) = −2 × score(θ,c)
         scores = (A[:, None] * cos_t[None, :]
                   + B[:, None] * sin_t[None, :]
                   - K[:, None] / 2.0)
         mapping_matrix[i] = np.argmax(scores, axis=0)
+        max_scores[i]     = scores[mapping_matrix[i], arange_j]
 
-    # Per-angle collision check only
+    # Snap-error filter (vectorised): require dist²_i(j) < snap_thresh_sq[i] for all i
+    # dist²_i(j) = −2 × max_scores[i, j]
+    snap_err_sq = -2.0 * max_scores                             # (V, n_samples)
+    snap_ok     = np.all(snap_err_sq < snap_thresh_sq[:, None], axis=0)  # (n_samples,)
+    n_snap_pass = int(snap_ok.sum())
+    print(f"  Snap-error filter (≤50 %% of min pool spacing): "
+          f"{n_snap_pass}/{n_samples} angles pass ...")
+
+    # Collision check on snap-passing angles only
     print("  Checking collision ...")
 
-    valid_mask_angles = np.ones(n_samples, dtype=bool)
+    valid_mask_angles = snap_ok.copy()
 
-    for j in range(n_samples):
+    for j in np.where(snap_ok)[0]:
         targets_local = mapping_matrix[:, j]   # shape (V,)
 
         # Collision: all target indices must be distinct
