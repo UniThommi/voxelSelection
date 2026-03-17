@@ -507,6 +507,16 @@ def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
                 (a_stats["nn_mean"] - b_stats["nn_mean"]) / b_stats["nn_mean"]
                 if b_stats["nn_mean"] != 0.0 else 0.0
             )
+        hom_b = compute_nn_homogeneity(b_c, layer)
+        hom_a = compute_nn_homogeneity(a_c, layer)
+        if hom_b is not None and hom_a is not None:
+            entry["cv_before"]     = hom_b["cv"]
+            entry["cv_after"]      = hom_a["cv"]
+            entry["delta_cv_abs"]  = hom_a["cv"] - hom_b["cv"]
+            entry["delta_cv_rel"]  = (
+                (hom_a["cv"] - hom_b["cv"]) / hom_b["cv"]
+                if hom_b["cv"] != 0.0 else 0.0
+            )
         per_layer[layer] = entry
 
     self_overlap_total = sum(
@@ -684,6 +694,108 @@ def plot_comparison_metrics(
     print(f"Comparison plot saved to {out}")
 
 
+def plot_homogeneity_comparison(
+    configs: list[dict],   # each: {"phi_frac", "phi_deg", "metrics"}
+    output_dir: Path,
+) -> None:
+    """Figure comparing NN-homogeneity (CV) across all valid rotation configs.
+
+    Panels
+    ------
+    1. Absolute CV per layer per config — original CV shown as a dashed
+       reference line per layer.
+    2. ΔCV (absolute change, after − before) per layer per config.
+    """
+    if not configs:
+        return
+
+    n = len(configs)
+    angles_deg = [c["phi_deg"] for c in configs]
+    x = np.arange(n)
+    layers = sorted({l for c in configs for l in c["metrics"]["per_layer"]})
+    width_unit = 0.8 / max(len(layers), 1)
+    layer_colors = {
+        "pit": "steelblue", "bot": "coral",
+        "top": "mediumseagreen", "wall": "mediumpurple",
+    }
+    xlabels = [f"{a:.1f}°" for a in angles_deg]
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(14, n * 0.8 + 4), 6))
+    fig.suptitle(
+        f"NN-homogeneity (CV) comparison  ({n} valid angle(s))\n"
+        "CV = std / mean of nearest-neighbour distances  (lower = more uniform)",
+        fontsize=13, fontweight="bold",
+    )
+
+    # --- Panel 1: absolute CV, with before-rotation reference lines ---
+    ax = axes[0]
+    for i, layer in enumerate(layers):
+        cv_after_vals = []
+        xi_list = []
+        for xi, c in zip(x, configs):
+            v = c["metrics"]["per_layer"].get(layer, {}).get("cv_after")
+            if v is not None:
+                cv_after_vals.append(v)
+                xi_list.append(xi)
+        if xi_list:
+            ax.bar(
+                np.array(xi_list) + i * width_unit, cv_after_vals, width_unit,
+                label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
+            )
+        # Reference line: cv_before (same for all configs since original doesn't change)
+        cv_before = next(
+            (c["metrics"]["per_layer"].get(layer, {}).get("cv_before")
+             for c in configs
+             if c["metrics"]["per_layer"].get(layer, {}).get("cv_before") is not None),
+            None,
+        )
+        if cv_before is not None and xi_list:
+            center_offset = i * width_unit + width_unit / 2.0
+            x_min = min(xi_list) + center_offset - width_unit
+            x_max = max(xi_list) + center_offset + width_unit
+            ax.hlines(
+                cv_before, x_min, x_max,
+                colors=layer_colors.get(layer, f"C{i}"),
+                linestyles="--", linewidths=1.5, alpha=0.9,
+            )
+
+    ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("CV after rotation (bars) vs. before (dashed lines)", fontsize=11)
+    ax.set_ylabel("CV  (std / mean NN dist)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 2: ΔCV per layer ---
+    ax = axes[1]
+    for i, layer in enumerate(layers):
+        delta_vals = []
+        xi_list = []
+        for xi, c in zip(x, configs):
+            v = c["metrics"]["per_layer"].get(layer, {}).get("delta_cv_abs")
+            if v is not None:
+                delta_vals.append(v)
+                xi_list.append(xi)
+        if xi_list:
+            ax.bar(
+                np.array(xi_list) + i * width_unit, delta_vals, width_unit,
+                label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
+            )
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("ΔCV  (after − before rotation, per layer)", fontsize=11)
+    ax.set_ylabel("ΔCV")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    out = output_dir / "rotation_homogeneity_comparison.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Homogeneity comparison plot saved to {out}")
+
+
 # ---------------------------------------------------------------------------
 # Single-angle execution
 # ---------------------------------------------------------------------------
@@ -831,6 +943,46 @@ def compute_spacing_stats(centers: np.ndarray) -> Optional[dict]:
         "nn_mean": float(nn.mean()),
         "nn_max":  float(nn.max()),
         "nn_std":  float(nn.std()),
+    }
+
+
+def compute_nn_homogeneity(centers: np.ndarray, layer: str) -> Optional[dict]:
+    """Coefficient of variation (std/mean) of nearest-neighbour distances.
+
+    Wall uses geodesic distance sqrt((R_ZYLINDER × Δφ)² + Δz²);
+    all other layers use 3-D Euclidean distance.
+
+    Returns None if fewer than 2 voxels are provided.
+    """
+    n = len(centers)
+    if n < 2:
+        return None
+
+    if layer == "wall":
+        phi = np.arctan2(centers[:, 1], centers[:, 0])
+        z = centers[:, 2]
+        dphi = phi[:, None] - phi[None, :]
+        dphi = (dphi + np.pi) % (2.0 * np.pi) - np.pi
+        arc = R_ZYLINDER * np.abs(dphi)
+        dz = z[:, None] - z[None, :]
+        dists = np.sqrt(arc ** 2 + dz ** 2)
+    else:
+        diffs = centers[:, None, :] - centers[None, :, :]
+        dists = np.sqrt(np.sum(diffs ** 2, axis=2))
+
+    np.fill_diagonal(dists, np.inf)
+    nn_dists = dists.min(axis=1)
+
+    mean = float(nn_dists.mean())
+    std  = float(nn_dists.std())
+    cv   = std / mean if mean > 0.0 else 0.0
+
+    return {
+        "cv":      cv,
+        "nn_mean": mean,
+        "nn_std":  std,
+        "nn_min":  float(nn_dists.min()),
+        "nn_max":  float(nn_dists.max()),
     }
 
 
@@ -1379,6 +1531,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         if saved_configs:
             output_dir.mkdir(parents=True, exist_ok=True)
             plot_comparison_metrics(saved_configs, output_dir)
+            plot_homogeneity_comparison(saved_configs, output_dir)
         print(f"\nAll done. Results in: {output_dir}")
         return
 
@@ -1422,6 +1575,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     if saved_configs:
         output_dir.mkdir(parents=True, exist_ok=True)
         plot_comparison_metrics(saved_configs, output_dir)
+        plot_homogeneity_comparison(saved_configs, output_dir)
 
     # Final summary
     print(f"\n{'=' * 62}")
