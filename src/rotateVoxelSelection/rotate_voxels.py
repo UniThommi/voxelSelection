@@ -113,25 +113,37 @@ def rotate_point(
     return (x * cos_p - y * sin_p, x * sin_p + y * cos_p, z)
 
 
-def build_candidate_pool(voxel: dict, all_voxels: list[dict]) -> list[dict]:
-    """Return all *valid* voxels on the same layer (and same z for wall).
+def build_candidate_pool(
+    voxel: dict,
+    all_voxels: list[dict],
+    skip_validity: bool = False,
+) -> list[dict]:
+    """Return candidate voxels on the same layer (and same z for wall).
 
-    The pool is pre-filtered to positions that pass ``is_valid_pmt_position``,
-    so the nearest-candidate result is always a geometrically valid PMT slot.
+    When ``skip_validity=False`` (default) the pool is pre-filtered to
+    positions that pass ``is_valid_pmt_position``, guaranteeing the
+    nearest-candidate result is a valid PMT slot.
 
-    Raises ValueError if no valid candidates exist.
+    When ``skip_validity=True`` all same-layer voxels are included regardless
+    of validity; only collision is checked by the caller.
+
+    Raises ValueError if no candidates exist.
     """
     layer = voxel["layer"]
-    pool = [
-        v for v in all_voxels
-        if v["layer"] == layer and is_valid_pmt_position(v["center"], v["layer"])
-    ]
+    if skip_validity:
+        pool = [v for v in all_voxels if v["layer"] == layer]
+    else:
+        pool = [
+            v for v in all_voxels
+            if v["layer"] == layer and is_valid_pmt_position(v["center"], v["layer"])
+        ]
     if layer == "wall":
         z_orig = voxel["center"][2]
         pool = [v for v in pool if abs(v["center"][2] - z_orig) < WALL_Z_TOL]
     if not pool:
+        label = "any" if skip_validity else "valid"
         raise ValueError(
-            f"No valid candidates for voxel '{voxel['index']}' "
+            f"No {label} candidates for voxel '{voxel['index']}' "
             f"(layer={layer}, z={voxel['center'][2]:.1f} mm)"
         )
     return pool
@@ -152,6 +164,7 @@ def compute_voxel_mapping(
     selected: list[dict],
     all_voxels: list[dict],
     phi_frac: float,
+    skip_validity: bool = False,
 ) -> list[tuple[dict, dict]]:
     """Map each selected voxel to its nearest rotated counterpart.
 
@@ -159,6 +172,9 @@ def compute_voxel_mapping(
     ----------
     phi_frac:
         Rotation as a fraction of 2π (e.g. 0.5 → 180°).
+    skip_validity:
+        Passed through to ``build_candidate_pool``; when True, all same-layer
+        voxels are candidates (not just valid PMT positions).
 
     Returns
     -------
@@ -171,7 +187,7 @@ def compute_voxel_mapping(
     for voxel in selected:
         x, y, z = voxel["center"]
         rotated = rotate_point(x, y, z, phi_rad)
-        pool = build_candidate_pool(voxel, all_voxels)
+        pool = build_candidate_pool(voxel, all_voxels, skip_validity=skip_validity)
         target = find_nearest_candidate(rotated, pool)
         mapping.append((voxel, target))
     return mapping
@@ -272,21 +288,23 @@ def find_valid_angles(
     selected: list[dict],
     all_voxels: list[dict],
     n_samples: int = 3600,
-    skip_validity: bool = True,
+    skip_validity: bool = False,
 ) -> list[float]:
     """Scan all rotation angles and return those producing collision-free mappings.
 
-    Self-overlap is no longer a discard criterion.  The candidate pool is
-    pre-filtered to valid positions inside ``build_candidate_pool``, so
-    ``skip_validity=True`` (the default) avoids redundant validity checks.
+    Self-overlap is not a discard criterion.
+
+    When ``skip_validity=False`` (default) the candidate pool for each source
+    voxel is pre-filtered to valid PMT positions via ``build_candidate_pool``.
+    When ``skip_validity=True`` all same-layer voxels are candidates; only the
+    collision check is applied.
 
     Parameters
     ----------
     selected : list of voxel dicts (the selection to rotate).
     all_voxels : the full candidate pool.
     n_samples : number of angle steps (default 3600 → every 0.1°).
-    skip_validity : skip the ``is_valid_pmt_position`` per-candidate check
-        (safe when the pool is already pre-filtered, which is the default).
+    skip_validity : whether to include invalid voxels in the candidate pool.
 
     Returns
     -------
@@ -294,7 +312,6 @@ def find_valid_angles(
     mapping configuration).
     """
     V = len(selected)
-    original_indices: set[str] = {v["index"] for v in selected}
 
     # Build per-source-voxel candidate pools and scoring coefficients
     pools: list[list[dict]] = []
@@ -303,22 +320,12 @@ def find_valid_angles(
     K_list: list[np.ndarray] = []
 
     for voxel in selected:
-        pool = build_candidate_pool(voxel, all_voxels)
+        pool = build_candidate_pool(voxel, all_voxels, skip_validity=skip_validity)
         A, B, K = _precompute_scores(voxel, pool)
         pools.append(pool)
         A_list.append(A)
         B_list.append(B)
         K_list.append(K)
-
-    # Precompute validity mask for every voxel in all_voxels (if needed)
-    if not skip_validity:
-        validity_mask = np.array(
-            [is_valid_pmt_position(v["center"], v["layer"]) for v in all_voxels],
-            dtype=bool,
-        )
-        # Map each pool voxel to its index in all_voxels
-        all_index_map: dict[str, int] = {v["index"]: i
-                                          for i, v in enumerate(all_voxels)}
 
     # Sample angles
     theta = np.linspace(0.0, 2.0 * np.pi, n_samples, endpoint=False)
@@ -337,27 +344,8 @@ def find_valid_angles(
                   - K[:, None] / 2.0)
         mapping_matrix[i] = np.argmax(scores, axis=0)
 
-    # Convert local pool indices → global voxel index strings per angle
-    global_idx_matrix = np.empty((V, n_samples), dtype=np.int32)
-    pool_global_indices: list[np.ndarray] = []
-    for i, pool in enumerate(pools):
-        gi = np.array([all_index_map[v["index"]] if not skip_validity
-                       else 0   # placeholder when not checking
-                       for v in pool], dtype=np.int32)
-        if skip_validity:
-            pool_global_indices.append(None)  # not used
-        else:
-            pool_global_indices.append(gi)
-        if not skip_validity:
-            global_idx_matrix[i] = gi[mapping_matrix[i]]
-
-    # Per-angle checks
-    print(f"  Checking collision"
-          + (", validity" if not skip_validity else "") + " ...")
-
-    if not skip_validity:
-        original_int_set = {all_index_map[v["index"]] for v in selected
-                            if v["index"] in all_index_map}
+    # Per-angle collision check only
+    print("  Checking collision ...")
 
     valid_mask_angles = np.ones(n_samples, dtype=bool)
 
@@ -368,18 +356,8 @@ def find_valid_angles(
         target_keys = [pools[i][targets_local[i]]["index"] for i in range(V)]
         if len(set(target_keys)) < V:
             valid_mask_angles[j] = False
-            continue
 
-        # NOTE: self-overlap is no longer a discard criterion.
-
-        # Validity (only when skip_validity=False)
-        if not skip_validity:
-            gi = global_idx_matrix[:, j]
-            if not validity_mask[gi].all():
-                valid_mask_angles[j] = False
-                continue
-
-    # Find distinct valid mapping configurations via run-length encoding.
+    # Find distinct valid mapping configurations
     valid_indices = np.where(valid_mask_angles)[0]
     if len(valid_indices) == 0:
         return []
@@ -690,8 +668,12 @@ def run_for_angle(
     output_path = output_dir / f"{stem}.json"
 
     # Compute mapping
-    print("Computing rotation mapping ...")
-    mapping = compute_voxel_mapping(selected, all_voxels, phi_frac)
+    if skip_validity:
+        print("Computing rotation mapping (ALL voxels as candidates — validity skipped) ...")
+    else:
+        print("Computing rotation mapping (valid voxels only) ...")
+    mapping = compute_voxel_mapping(selected, all_voxels, phi_frac,
+                                    skip_validity=skip_validity)
 
     # Validation
     print("Validating mapping (collision check) ...")
@@ -699,11 +681,8 @@ def run_for_angle(
     print(f"  OK — no collisions  (self-overlaps: {self_overlap_count})")
 
     if skip_validity:
-        print("PMT placement validity check skipped (--skip-validity).")
-    else:
-        print("Checking PMT placement validity of rotated voxels ...")
-        check_validity(mapping)
-        print(f"  OK — all {len(mapping)} rotated voxels are valid PMT positions")
+        print("WARNING: validity checks skipped — rotated voxels may not be"
+              " valid PMT positions.")
 
     rotated_voxels = assemble_output_voxels(mapping)
 
@@ -727,27 +706,40 @@ def run_for_angle(
     metrics = compute_config_metrics(mapping)
 
     # Summary JSON
-    summary = {
+    summary: dict = {
         "phi_frac":           phi_frac,
         "phi_deg":            phi_deg,
+        "validity_skipped":   skip_validity,
         "self_overlap_total": self_overlap_count,
         "metrics":            metrics,
     }
+    if skip_validity:
+        summary["WARNING"] = (
+            "Validity checks were skipped (--skip-validity). "
+            "Rotated voxels may not be valid PMT positions."
+        )
     with open(output_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary saved to {output_dir / 'summary.json'}")
 
     # Voxels JSON
+    config_block: dict = {
+        "rotation_angle_2pi":     phi_frac,
+        "source_file":            str(selected_path),
+        "all_voxels_file":        "",
+        "n_voxels":               len(rotated_voxels),
+        "validity_skipped":       skip_validity,
+        "self_overlap_total":     self_overlap_count,
+        "self_overlap_per_layer": metrics["self_overlap_per_layer"],
+    }
+    if skip_validity:
+        config_block["WARNING"] = (
+            "Validity checks were skipped (--skip-validity). "
+            "Rotated voxels may not be valid PMT positions."
+        )
     out_data = {
-        "config": {
-            "rotation_angle_2pi":     phi_frac,
-            "source_file":            str(selected_path),
-            "all_voxels_file":        "",
-            "n_voxels":               len(rotated_voxels),
-            "self_overlap_total":     self_overlap_count,
-            "self_overlap_per_layer": metrics["self_overlap_per_layer"],
-        },
-        "selected_voxels": rotated_voxels,
+        "config":           config_block,
+        "selected_voxels":  rotated_voxels,
     }
     with open(output_path, "w") as f:
         json.dump(out_data, f, indent=2)
@@ -1127,8 +1119,12 @@ def run_bot_split_angle(
     print(f"Processing angle: {phi_frac_nominal:.4f} × 2π = {phi_deg_nominal:.1f}°")
     print(f"{'=' * 62}")
 
+    if skip_validity:
+        print("  WARNING: validity checks skipped — all voxels used as candidates.")
+
     # Step 1: bot mapping
-    bot_mapping = compute_voxel_mapping(bot_selected, all_voxels, phi_frac_nominal)
+    bot_mapping = compute_voxel_mapping(bot_selected, all_voxels, phi_frac_nominal,
+                                        skip_validity=skip_validity)
 
     # Step 2: mean actual rotation derived from bot voxel displacements
     mean_phi_rad  = compute_mean_actual_phi(bot_mapping)
@@ -1137,7 +1133,8 @@ def run_bot_split_angle(
     print(f"  Bot mean actual rotation: {mean_phi_frac:.4f} × 2π = {mean_phi_deg:.2f}°")
 
     # Step 3: non-bot mapping using the mean actual bot angle
-    non_bot_mapping = compute_voxel_mapping(non_bot_selected, all_voxels, mean_phi_frac)
+    non_bot_mapping = compute_voxel_mapping(non_bot_selected, all_voxels, mean_phi_frac,
+                                            skip_validity=skip_validity)
 
     # Step 4: combined collision check
     combined_mapping = bot_mapping + non_bot_mapping
@@ -1178,28 +1175,41 @@ def run_bot_split_angle(
     metrics = compute_config_metrics(combined_mapping)
 
     # Summary JSON (per-subfolder)
-    summary = {
-        "phi_frac_nominal":    phi_frac_nominal,
-        "phi_deg_nominal":     phi_deg_nominal,
+    summary: dict = {
+        "phi_frac_nominal":     phi_frac_nominal,
+        "phi_deg_nominal":      phi_deg_nominal,
         "mean_actual_phi_frac": mean_phi_frac,
         "mean_actual_phi_deg":  mean_phi_deg,
+        "validity_skipped":     skip_validity,
         "self_overlap_total":   self_overlap_count,
         "metrics":              metrics,
     }
+    if skip_validity:
+        summary["WARNING"] = (
+            "Validity checks were skipped (--skip-validity). "
+            "Rotated voxels may not be valid PMT positions."
+        )
     with open(output_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary saved to {output_dir / 'summary.json'}")
 
     # Voxels JSON (readable by downstream scripts)
+    config_block: dict = {
+        "rotation_angle_2pi":     phi_frac_nominal,
+        "mean_actual_phi_frac":   mean_phi_frac,
+        "source_file":            str(selected_path),
+        "n_voxels":               len(rotated_voxels),
+        "validity_skipped":       skip_validity,
+        "self_overlap_total":     self_overlap_count,
+        "self_overlap_per_layer": metrics["self_overlap_per_layer"],
+    }
+    if skip_validity:
+        config_block["WARNING"] = (
+            "Validity checks were skipped (--skip-validity). "
+            "Rotated voxels may not be valid PMT positions."
+        )
     out_data = {
-        "config": {
-            "rotation_angle_2pi":     phi_frac_nominal,
-            "mean_actual_phi_frac":   mean_phi_frac,
-            "source_file":            str(selected_path),
-            "n_voxels":               len(rotated_voxels),
-            "self_overlap_total":     self_overlap_count,
-            "self_overlap_per_layer": metrics["self_overlap_per_layer"],
-        },
+        "config":          config_block,
         "selected_voxels": rotated_voxels,
     }
     with open(output_path, "w") as f:
@@ -1252,9 +1262,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     parser.add_argument(
         "--skip-validity", action="store_true",
-        help="Skip the post-hoc PMT placement validity check on rotated voxels "
-             "(the candidate pool is always pre-filtered to valid positions; "
-             "this flag only skips the redundant safety check).",
+        help="Skip all PMT placement validity filtering. When set, rotated "
+             "voxels are assigned to the nearest voxel from the full pool "
+             "(including invalid positions); only the collision check is "
+             "applied. A WARNING is written to all summary and voxel JSON "
+             "files. Use this to explore configurations without geometric "
+             "constraints.",
     )
     parser.add_argument(
         "--output-dir", required=True, metavar="PATH",
@@ -1302,7 +1315,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         valid_fracs = find_valid_angles(
             selected, all_voxels,
             n_samples=args.n_samples,
-            skip_validity=True,
+            skip_validity=args.skip_validity,
         )
         if not valid_fracs:
             print("No collision-free rotation angles found.")
@@ -1327,13 +1340,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     # --- Bot-split explore mode ---
+    validity_note = "ALL voxels as candidates (validity skipped)" if args.skip_validity \
+                    else "valid voxels only"
     print(f"\nBot-split explore mode: scanning {args.n_samples} angles "
-          f"for {len(bot_selected)} bot voxels (collision check, "
-          f"valid-pool pre-filtered, self-overlap counted not enforced) ...")
+          f"for {len(bot_selected)} bot voxels "
+          f"(collision check only, {validity_note}) ...")
     valid_fracs = find_valid_angles(
         bot_selected, all_voxels,
         n_samples=args.n_samples,
-        skip_validity=True,   # pool already pre-filtered in build_candidate_pool
+        skip_validity=args.skip_validity,
     )
 
     if not valid_fracs:
