@@ -4,17 +4,18 @@ Rotate a greedy PMT voxel selection by an azimuthal angle phi.
 
 For each selected voxel:
   1. Rotate its (x, y) coordinates by phi (fraction of 2π, e.g. 0.5 → 180°).
-  2. Find the nearest valid voxel on the same sub-surface from a pool of all
-     available voxels.
+  2. Find the nearest *valid* voxel on the same sub-surface from a pool of all
+     available voxels (candidate pool is pre-filtered to valid PMT positions).
   3. For wall voxels the candidate must share the same z-level (within 1 mm).
 
-After all voxels are mapped, two batch checks are run:
-  - Collision: no two originals map to the same target.
-  - Self-overlap: no target index appears among the original selected indices
-    (same physical PMT placement would remain unchanged).
+After all voxels are mapped, a collision check is run:
+  - Collision: no two originals may map to the same target.
+  - Self-overlap (targets that coincide with original positions) is counted and
+    reported but does NOT cause a discard.
 
-A spacing-distribution test then compares pairwise distances before/after.
+A spacing-distribution test compares pairwise distances before/after.
 A 3D plot of original (red) vs. rotated (green) positions is always produced.
+A 2D per-layer arrow plot shows individual voxel shifts.
 
 Usage — single angle:
     python rotate_voxels.py \\
@@ -23,11 +24,16 @@ Usage — single angle:
         --angle 0.25 \\          # fraction of 2π → 90°
         --output-dir plots/
 
-Usage — explore all valid angles interactively (omit --angle):
+Usage — explore all valid angles (omit --angle):
     python rotate_voxels.py \\
         --all-voxels all_valid.json \\
         --selected greedy_N300.json \\
         --output-dir plots/
+
+    Explore mode (bot-split): scans bot voxels for collision-free angles, then
+    applies the mean actual bot rotation to all other layers.  All valid
+    configurations are saved automatically; no interactive angle selection.
+    A comparison figure is created in --output-dir summarising all configs.
 """
 
 import argparse
@@ -108,18 +114,24 @@ def rotate_point(
 
 
 def build_candidate_pool(voxel: dict, all_voxels: list[dict]) -> list[dict]:
-    """Return all voxels on the same layer (and same z for wall).
+    """Return all *valid* voxels on the same layer (and same z for wall).
 
-    Raises ValueError if no candidates exist.
+    The pool is pre-filtered to positions that pass ``is_valid_pmt_position``,
+    so the nearest-candidate result is always a geometrically valid PMT slot.
+
+    Raises ValueError if no valid candidates exist.
     """
     layer = voxel["layer"]
-    pool = [v for v in all_voxels if v["layer"] == layer]
+    pool = [
+        v for v in all_voxels
+        if v["layer"] == layer and is_valid_pmt_position(v["center"], v["layer"])
+    ]
     if layer == "wall":
         z_orig = voxel["center"][2]
         pool = [v for v in pool if abs(v["center"][2] - z_orig) < WALL_Z_TOL]
     if not pool:
         raise ValueError(
-            f"No candidates for voxel '{voxel['index']}' "
+            f"No valid candidates for voxel '{voxel['index']}' "
             f"(layer={layer}, z={voxel['center'][2]:.1f} mm)"
         )
     return pool
@@ -165,15 +177,18 @@ def compute_voxel_mapping(
     return mapping
 
 
-def check_mapping(mapping: list[tuple[dict, dict]]) -> None:
-    """Validate the full mapping after all voxels have been assigned.
+def check_mapping(mapping: list[tuple[dict, dict]]) -> int:
+    """Check for collisions; count and return self-overlaps.
 
-    Raises RuntimeError for:
+    Raises RuntimeError if two original voxels map to the same target
+    (collision).  Self-overlap (a target that coincides with an original
+    position) is no longer a hard error — the count is returned so the
+    caller can report or filter on it.
 
-    - **Collision**: two original voxels map to the same target index.
-    - **Self-overlap**: the set of target indices intersects the set of
-      original indices, meaning the rotated selection occupies positions
-      that were already selected (rotation angle likely too small).
+    Returns
+    -------
+    self_overlap_count : int
+        Number of target indices that appear in the original selection.
     """
     original_indices: set[str] = {orig["index"] for orig, _ in mapping}
 
@@ -182,7 +197,7 @@ def check_mapping(mapping: list[tuple[dict, dict]]) -> None:
     for orig, tgt in mapping:
         target_map.setdefault(tgt["index"], []).append(orig["index"])
 
-    # Collision check
+    # Collision check (hard error)
     collisions = {t: origs for t, origs in target_map.items() if len(origs) > 1}
     if collisions:
         msgs = [f"  target '{t}' ← {origs}" for t, origs in collisions.items()]
@@ -191,21 +206,16 @@ def check_mapping(mapping: list[tuple[dict, dict]]) -> None:
             + "\n".join(msgs)
         )
 
-    # Self-overlap check
+    # Self-overlap count (soft — returned, not raised)
     overlap = original_indices & set(target_map.keys())
-    if overlap:
-        raise RuntimeError(
-            f"Self-overlap: {len(overlap)} target voxel(s) coincide with "
-            f"voxels in the original selection — the rotation angle may be "
-            f"too small or the grid too symmetric for this angle:\n"
-            f"  {sorted(overlap)}"
-        )
+    return len(overlap)
 
 
 def check_validity(mapping: list[tuple[dict, dict]]) -> None:
     """Check that every target voxel is a geometrically valid PMT position.
 
-    Raises RuntimeError listing all invalid targets.
+    With the pre-filtered candidate pool this should always pass; kept as
+    a safety net.  Raises RuntimeError listing all invalid targets.
     """
     invalid: list[str] = []
     for _, tgt in mapping:
@@ -262,24 +272,21 @@ def find_valid_angles(
     selected: list[dict],
     all_voxels: list[dict],
     n_samples: int = 3600,
-    skip_validity: bool = False,
+    skip_validity: bool = True,
 ) -> list[float]:
-    """Scan all rotation angles and return those producing valid mappings.
+    """Scan all rotation angles and return those producing collision-free mappings.
 
-    Uses dense angular sampling (``n_samples`` evenly-spaced steps from 0
-    to 2π exclusive).  Since adjacent distinct voxel-assignment regions are
-    separated by >2° on this detector, the default of 3600 steps (0.1°) is
-    effectively exact.
-
-    Each source voxel's nearest-candidate assignment is computed via
-    vectorised numpy operations over all sample angles at once.
+    Self-overlap is no longer a discard criterion.  The candidate pool is
+    pre-filtered to valid positions inside ``build_candidate_pool``, so
+    ``skip_validity=True`` (the default) avoids redundant validity checks.
 
     Parameters
     ----------
     selected : list of voxel dicts (the selection to rotate).
     all_voxels : the full candidate pool.
     n_samples : number of angle steps (default 3600 → every 0.1°).
-    skip_validity : if True, skip the ``is_valid_pmt_position`` check.
+    skip_validity : skip the ``is_valid_pmt_position`` per-candidate check
+        (safe when the pool is already pre-filtered, which is the default).
 
     Returns
     -------
@@ -331,8 +338,6 @@ def find_valid_angles(
         mapping_matrix[i] = np.argmax(scores, axis=0)
 
     # Convert local pool indices → global voxel index strings per angle
-    # We work with integer IDs to avoid slow Python string operations.
-    # Build a (V, n_samples) array of global all_voxels indices.
     global_idx_matrix = np.empty((V, n_samples), dtype=np.int32)
     pool_global_indices: list[np.ndarray] = []
     for i, pool in enumerate(pools):
@@ -340,18 +345,16 @@ def find_valid_angles(
                        else 0   # placeholder when not checking
                        for v in pool], dtype=np.int32)
         if skip_validity:
-            # Just store pool-local indices as strings via the pool list
             pool_global_indices.append(None)  # not used
         else:
             pool_global_indices.append(gi)
         if not skip_validity:
             global_idx_matrix[i] = gi[mapping_matrix[i]]
 
-    # Per-angle checks — vectorised where possible
-    print(f"  Checking collision, self-overlap"
-          + ("" if skip_validity else ", validity") + " ...")
+    # Per-angle checks
+    print(f"  Checking collision"
+          + (", validity" if not skip_validity else "") + " ...")
 
-    # original_int_indices: set of all_voxels positions of original voxels
     if not skip_validity:
         original_int_set = {all_index_map[v["index"]] for v in selected
                             if v["index"] in all_index_map}
@@ -361,22 +364,15 @@ def find_valid_angles(
     for j in range(n_samples):
         targets_local = mapping_matrix[:, j]   # shape (V,)
 
-        # Collision: all target local indices must be distinct
-        # (we check per-source-voxel within its own pool, so we need the
-        # actual global pool-voxel identity — use the pool object index)
-        # Two source voxels can collide only if they share a pool (same layer),
-        # so use the pool voxel index tuple as the collision key.
+        # Collision: all target indices must be distinct
         target_keys = [pools[i][targets_local[i]]["index"] for i in range(V)]
         if len(set(target_keys)) < V:
             valid_mask_angles[j] = False
             continue
 
-        # Self-overlap: no target should be in original selection
-        if original_indices & set(target_keys):
-            valid_mask_angles[j] = False
-            continue
+        # NOTE: self-overlap is no longer a discard criterion.
 
-        # Validity
+        # Validity (only when skip_validity=False)
         if not skip_validity:
             gi = global_idx_matrix[:, j]
             if not validity_mask[gi].all():
@@ -384,14 +380,12 @@ def find_valid_angles(
                 continue
 
     # Find distinct valid mapping configurations via run-length encoding.
-    # Two angle samples with identical target_keys arrays are the same config.
-    # Build a compact hash per angle (use frozenset of target strings).
     valid_indices = np.where(valid_mask_angles)[0]
     if len(valid_indices) == 0:
         return []
 
-    # Group consecutive valid angles that share the same full mapping tuple
-    seen_configs: dict[tuple, float] = {}   # config → representative phi_frac
+    # Group by unique full mapping tuple — one representative phi_frac per config
+    seen_configs: dict[tuple, float] = {}
     for j in valid_indices:
         config_key = tuple(
             pools[i][mapping_matrix[i, j]]["index"] for i in range(V)
@@ -403,55 +397,274 @@ def find_valid_angles(
     return valid_fracs
 
 
-def prompt_angle_selection(valid_fracs: list[float]) -> list[float]:
-    """Display valid angles and prompt the user to select which to run.
+# ---------------------------------------------------------------------------
+# New helpers: mean actual rotation, per-config metrics, comparison plots
+# ---------------------------------------------------------------------------
 
-    Accepts:
-      - Space- or comma-separated indices: ``0 2 4`` or ``0,2,4``
-      - Ranges: ``1-3`` (inclusive)
-      - The keyword ``all``
+def compute_mean_actual_phi(mapping: list[tuple[dict, dict]]) -> float:
+    """Circular mean of per-voxel azimuthal displacements (radians).
+
+    For each (original, target) pair, computes
+        Δφ = atan2(y_target, x_target) − atan2(y_orig, x_orig)
+    and returns the circular mean angle.
     """
-    print(f"\n{'=' * 50}")
-    print(f"Found {len(valid_fracs)} valid rotation angle(s):")
-    print(f"{'=' * 50}")
-    print(f"  {'#':>4}  {'phi_frac':>10}  {'phi_deg':>9}")
-    print(f"  {'-'*4}  {'-'*10}  {'-'*9}")
-    for idx, frac in enumerate(valid_fracs):
-        deg = frac * 360.0
-        print(f"  {idx:>4}  {frac:>10.4f}  {deg:>8.2f}°")
-    print(f"{'=' * 50}")
+    deltas = np.array([
+        math.atan2(tgt["center"][1], tgt["center"][0])
+        - math.atan2(orig["center"][1], orig["center"][0])
+        for orig, tgt in mapping
+    ])
+    return float(np.angle(np.mean(np.exp(1j * deltas))))
 
-    while True:
-        raw = input(
-            'Select angles to run (e.g. "0 2 4", "1-3", or "all"): '
-        ).strip()
-        if not raw:
-            print("  No input — please enter at least one index.")
-            continue
-        if raw.lower() == "all":
-            return list(valid_fracs)
-        try:
-            selected_indices: list[int] = []
-            for token in raw.replace(",", " ").split():
-                if "-" in token:
-                    lo, hi = token.split("-", 1)
-                    selected_indices.extend(range(int(lo), int(hi) + 1))
-                else:
-                    selected_indices.append(int(token))
-            # Validate
-            out_of_range = [i for i in selected_indices
-                            if i < 0 or i >= len(valid_fracs)]
-            if out_of_range:
-                print(f"  Invalid indices: {out_of_range}. "
-                      f"Valid range: 0–{len(valid_fracs) - 1}.")
-                continue
-            return [valid_fracs[i] for i in selected_indices]
-        except ValueError:
-            print("  Could not parse input. Try e.g. '0 2', '1-3', or 'all'.")
+
+def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
+    """Compute quality metrics for one rotation configuration.
+
+    Metrics
+    -------
+    Global:
+      self_overlap_total        — targets that coincide with original positions
+      mean_delta_phi_deg        — mean |Δφ| per voxel (absolute angular shift)
+      std_delta_phi_deg         — std of |Δφ| (uniformity of rotation)
+      mean_radial_disp_mm       — mean 3-D Euclidean displacement per voxel
+
+    Per layer (in ``per_layer[layer]``):
+      count, self_overlap_count,
+      mean_delta_phi_deg, std_delta_phi_deg, mean_radial_disp_mm,
+      delta_pw_mean_rel         — relative change in mean pairwise distance
+      delta_nn_mean_rel         — relative change in mean nearest-neighbour dist
+    """
+    original_indices = {orig["index"] for orig, _ in mapping}
+    layers = sorted({orig["layer"] for orig, _ in mapping})
+
+    # Global per-voxel quantities
+    delta_phi_abs: list[float] = []
+    radial_disp:   list[float] = []
+    for orig, tgt in mapping:
+        phi_o = math.atan2(orig["center"][1], orig["center"][0])
+        phi_t = math.atan2(tgt["center"][1],  tgt["center"][0])
+        d = (phi_t - phi_o + math.pi) % (2.0 * math.pi) - math.pi
+        delta_phi_abs.append(abs(d))
+        radial_disp.append(float(np.linalg.norm(
+            np.array(tgt["center"]) - np.array(orig["center"])
+        )))
+
+    per_layer: dict = {}
+    for layer in layers:
+        pairs = [(o, t) for o, t in mapping if o["layer"] == layer]
+        tgt_ids = [t["index"] for _, t in pairs]
+        overlap = sum(1 for ti in tgt_ids if ti in original_indices)
+
+        b_c = np.array([o["center"] for o, _ in pairs])
+        a_c = np.array([t["center"] for _, t in pairs])
+        b_stats = compute_spacing_stats(b_c) if len(b_c) >= 2 else None
+        a_stats = compute_spacing_stats(a_c) if len(a_c) >= 2 else None
+
+        ld: list[float] = []
+        lr: list[float] = []
+        for orig, tgt in pairs:
+            phi_o = math.atan2(orig["center"][1], orig["center"][0])
+            phi_t = math.atan2(tgt["center"][1],  tgt["center"][0])
+            d = (phi_t - phi_o + math.pi) % (2.0 * math.pi) - math.pi
+            ld.append(abs(d))
+            lr.append(float(np.linalg.norm(
+                np.array(tgt["center"]) - np.array(orig["center"])
+            )))
+
+        entry: dict = {
+            "count":               len(pairs),
+            "self_overlap_count":  overlap,
+            "mean_delta_phi_deg":  float(np.degrees(np.mean(ld))) if ld else None,
+            "std_delta_phi_deg":   float(np.degrees(np.std(ld)))  if ld else None,
+            "mean_radial_disp_mm": float(np.mean(lr))             if lr else None,
+        }
+        if b_stats and a_stats:
+            entry["delta_pw_mean_rel"] = (
+                (a_stats["pw_mean"] - b_stats["pw_mean"]) / b_stats["pw_mean"]
+                if b_stats["pw_mean"] != 0.0 else 0.0
+            )
+            entry["delta_nn_mean_rel"] = (
+                (a_stats["nn_mean"] - b_stats["nn_mean"]) / b_stats["nn_mean"]
+                if b_stats["nn_mean"] != 0.0 else 0.0
+            )
+        per_layer[layer] = entry
+
+    self_overlap_total = sum(
+        1 for _, tgt in mapping if tgt["index"] in original_indices
+    )
+
+    return {
+        "self_overlap_total":     self_overlap_total,
+        "self_overlap_per_layer": {l: per_layer[l]["self_overlap_count"] for l in layers},
+        "mean_delta_phi_deg":     float(np.degrees(np.mean(delta_phi_abs))),
+        "std_delta_phi_deg":      float(np.degrees(np.std(delta_phi_abs))),
+        "mean_radial_disp_mm":    float(np.mean(radial_disp)),
+        "per_layer":              per_layer,
+    }
+
+
+def plot_comparison_metrics(
+    configs: list[dict],   # each: {"phi_frac", "phi_deg", "metrics"}
+    output_dir: Path,
+) -> None:
+    """Multi-panel figure comparing all valid configs saved in output_dir.
+
+    Panels
+    ------
+    1. Self-overlap count per layer (grouped bar chart)
+    2. Mean angular displacement ± std per config
+    3. Mean radial displacement per config
+    4. Relative change in mean pairwise distance, per layer
+    5. Relative change in mean nearest-neighbour distance, per layer
+    6. Summary table (angle, self-overlaps, mean Δφ, mean displacement)
+    """
+    if not configs:
+        return
+
+    n = len(configs)
+    angles_deg = [c["phi_deg"] for c in configs]
+    x = np.arange(n)
+    layers = sorted({l for c in configs for l in c["metrics"]["per_layer"]})
+    width_unit = 0.8 / max(len(layers), 1)
+    layer_colors = {"pit": "steelblue", "bot": "coral", "top": "mediumseagreen", "wall": "mediumpurple"}
+
+    fig, axes = plt.subplots(3, 2, figsize=(max(16, n * 0.8 + 4), 16))
+    fig.suptitle(
+        f"Rotation configs comparison  ({n} valid angle(s))",
+        fontsize=14, fontweight="bold",
+    )
+
+    xlabels = [f"{a:.1f}°" for a in angles_deg]
+
+    # --- Panel 1: self-overlap per layer ---
+    ax = axes[0, 0]
+    for i, layer in enumerate(layers):
+        counts = [c["metrics"]["self_overlap_per_layer"].get(layer, 0) for c in configs]
+        bars = ax.bar(
+            x + i * width_unit, counts, width_unit,
+            label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
+        )
+        for bar, cnt in zip(bars, counts):
+            if cnt > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+                    str(cnt), ha="center", va="bottom", fontsize=7,
+                )
+    ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("Self-overlap count per layer", fontsize=11)
+    ax.set_ylabel("Count")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 2: mean angular displacement ± std ---
+    ax = axes[0, 1]
+    vals = [c["metrics"]["mean_delta_phi_deg"] for c in configs]
+    errs = [c["metrics"]["std_delta_phi_deg"]  for c in configs]
+    bars = ax.bar(x, vals, yerr=errs, capsize=4, color="steelblue", alpha=0.8)
+    for bar, v in zip(bars, vals):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height() + max(errs) * 0.05,
+            f"{v:.1f}", ha="center", va="bottom", fontsize=7,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("Mean angular displacement ± std  (all voxels)", fontsize=11)
+    ax.set_ylabel("Δφ (deg)")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 3: mean radial displacement ---
+    ax = axes[1, 0]
+    vals = [c["metrics"]["mean_radial_disp_mm"] for c in configs]
+    bars = ax.bar(x, vals, color="coral", alpha=0.8)
+    for bar, v in zip(bars, vals):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height() * 1.01,
+            f"{v:.0f}", ha="center", va="bottom", fontsize=7,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("Mean 3-D radial displacement  (all voxels)", fontsize=11)
+    ax.set_ylabel("Displacement (mm)")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 4: Δ pairwise mean distance per layer ---
+    ax = axes[1, 1]
+    for i, layer in enumerate(layers):
+        vals_pct = []
+        xi_list  = []
+        for xi, c in zip(x, configs):
+            v = c["metrics"]["per_layer"].get(layer, {}).get("delta_pw_mean_rel")
+            if v is not None:
+                vals_pct.append(v * 100.0)
+                xi_list.append(xi)
+        if xi_list:
+            ax.bar(
+                np.array(xi_list) + i * width_unit, vals_pct, width_unit,
+                label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
+            )
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("Δ mean pairwise distance (relative, per layer)", fontsize=11)
+    ax.set_ylabel("Δ (%)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 5: Δ nearest-neighbour mean per layer ---
+    ax = axes[2, 0]
+    for i, layer in enumerate(layers):
+        vals_pct = []
+        xi_list  = []
+        for xi, c in zip(x, configs):
+            v = c["metrics"]["per_layer"].get(layer, {}).get("delta_nn_mean_rel")
+            if v is not None:
+                vals_pct.append(v * 100.0)
+                xi_list.append(xi)
+        if xi_list:
+            ax.bar(
+                np.array(xi_list) + i * width_unit, vals_pct, width_unit,
+                label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
+            )
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
+    ax.set_title("Δ mean nearest-neighbour distance (relative, per layer)", fontsize=11)
+    ax.set_ylabel("Δ (%)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # --- Panel 6: summary table ---
+    ax = axes[2, 1]
+    ax.axis("off")
+    col_labels = ["Angle (°)", "Self-\noverlaps", "Mean Δφ\n(deg)", "Std Δφ\n(deg)", "Mean disp\n(mm)"]
+    rows = []
+    for c in configs:
+        m = c["metrics"]
+        rows.append([
+            f"{c['phi_deg']:.2f}",
+            str(m["self_overlap_total"]),
+            f"{m['mean_delta_phi_deg']:.2f}",
+            f"{m['std_delta_phi_deg']:.2f}",
+            f"{m['mean_radial_disp_mm']:.1f}",
+        ])
+    table = ax.table(
+        cellText=rows, colLabels=col_labels,
+        loc="center", cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.auto_set_column_width(col=list(range(len(col_labels))))
+    ax.set_title("Summary table", fontsize=11)
+
+    plt.tight_layout()
+    out = output_dir / "rotation_configs_comparison.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Comparison plot saved to {out}")
 
 
 # ---------------------------------------------------------------------------
-# Single-angle execution (extracted so both modes can call it)
+# Single-angle execution
 # ---------------------------------------------------------------------------
 
 def run_for_angle(
@@ -462,11 +675,10 @@ def run_for_angle(
     selected_path: str,
     skip_validity: bool,
     plot: bool,
-) -> None:
+) -> dict:
     """Run the full rotation pipeline for one angle and save outputs.
 
-    In explore mode ``output_dir`` is a subfolder per angle; in single-angle
-    mode it is the directory passed directly by the user.
+    Returns a metrics dict suitable for ``plot_comparison_metrics``.
     """
     phi_deg = phi_frac * 360.0
     print(f"\n{'=' * 62}")
@@ -482,9 +694,9 @@ def run_for_angle(
     mapping = compute_voxel_mapping(selected, all_voxels, phi_frac)
 
     # Validation
-    print("Validating mapping (collision + self-overlap check) ...")
-    check_mapping(mapping)
-    print("  OK — no collisions or self-overlaps detected")
+    print("Validating mapping (collision check) ...")
+    self_overlap_count = check_mapping(mapping)
+    print(f"  OK — no collisions  (self-overlaps: {self_overlap_count})")
 
     if skip_validity:
         print("PMT placement validity check skipped (--skip-validity).")
@@ -504,27 +716,44 @@ def run_for_angle(
     )
     print_spacing_report(spacing_results, phi_frac, mapping)
 
-    # 3D plot
+    # Plots
     plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
     plot_rotated_voxels(selected, rotated_voxels, plot_3d_path, phi_frac)
 
-    # 2D per-layer arrow plot
     plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
     plot_2d_arrows(mapping, plot_2d_path, phi_frac)
 
-    # JSON output
+    # Metrics
+    metrics = compute_config_metrics(mapping)
+
+    # Summary JSON
+    summary = {
+        "phi_frac":           phi_frac,
+        "phi_deg":            phi_deg,
+        "self_overlap_total": self_overlap_count,
+        "metrics":            metrics,
+    }
+    with open(output_dir / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary saved to {output_dir / 'summary.json'}")
+
+    # Voxels JSON
     out_data = {
         "config": {
-            "rotation_angle_2pi": phi_frac,
-            "source_file": str(selected_path),
-            "all_voxels_file": "",   # filled by caller if available
-            "n_voxels": len(rotated_voxels),
+            "rotation_angle_2pi":     phi_frac,
+            "source_file":            str(selected_path),
+            "all_voxels_file":        "",
+            "n_voxels":               len(rotated_voxels),
+            "self_overlap_total":     self_overlap_count,
+            "self_overlap_per_layer": metrics["self_overlap_per_layer"],
         },
         "selected_voxels": rotated_voxels,
     }
     with open(output_path, "w") as f:
         json.dump(out_data, f, indent=2)
     print(f"Output written to {output_path}")
+
+    return {"phi_frac": phi_frac, "phi_deg": phi_deg, "metrics": metrics}
 
 
 # ---------------------------------------------------------------------------
@@ -863,76 +1092,69 @@ def plot_2d_arrows(
 
 
 # ---------------------------------------------------------------------------
-# Bot-split explore mode: rotate bot with full checks, others validity-only
+# Bot-split explore mode: rotate bot with full checks, apply mean angle
+# to all other layers, then check combined collision
 # ---------------------------------------------------------------------------
 
 def run_bot_split_angle(
     bot_selected: list[dict],
     non_bot_selected: list[dict],
     all_voxels: list[dict],
-    phi_frac: float,
+    phi_frac_nominal: float,
     output_dir: Path,
     selected_path: str,
     skip_validity: bool,
     plot: bool,
-) -> bool:
-    """Rotation pipeline for bot-split explore mode.
+) -> Optional[dict]:
+    """Run the bot-split rotation pipeline for one nominal bot angle.
 
-    Bot voxels are already confirmed valid by the angle scan (collision,
-    self-overlap, and validity all passed).  Non-bot voxels are checked
-    for validity only; any invalid target causes the whole setup to be
-    discarded.  Collisions and self-overlaps in non-bot layers are counted
-    and reported in the summary but do not cause a discard.
+    Steps
+    -----
+    1. Rotate bot voxels using ``phi_frac_nominal``; compute their mapping.
+    2. Compute the circular mean of the actual per-voxel angular displacements
+       (the voxels may snap to grid neighbours, so the effective rotation
+       differs slightly from the nominal angle).
+    3. Apply that mean actual angle to all non-bot voxels.
+    4. Check collision across the combined (bot + non-bot) mapping.
+    5. Count self-overlaps per layer (not a discard criterion).
+    6. Save all outputs to ``output_dir``.
 
-    Returns True if the setup was saved, False if discarded.
+    Returns a metrics dict on success, or None if the combined mapping has a
+    collision.
     """
-    phi_deg = phi_frac * 360.0
+    phi_deg_nominal = phi_frac_nominal * 360.0
     print(f"\n{'=' * 62}")
-    print(f"Trying angle: {phi_frac:.4f} × 2π = {phi_deg:.1f}°")
+    print(f"Processing angle: {phi_frac_nominal:.4f} × 2π = {phi_deg_nominal:.1f}°")
     print(f"{'=' * 62}")
 
-    # Compute mappings for both groups
-    bot_mapping     = compute_voxel_mapping(bot_selected,     all_voxels, phi_frac)
-    non_bot_mapping = compute_voxel_mapping(non_bot_selected, all_voxels, phi_frac)
+    # Step 1: bot mapping
+    bot_mapping = compute_voxel_mapping(bot_selected, all_voxels, phi_frac_nominal)
 
-    # Validity check for non-bot — discard entire setup if any target invalid
-    if not skip_validity:
-        invalid: list[str] = []
-        for _, tgt in non_bot_mapping:
-            if not is_valid_pmt_position(tgt["center"], tgt["layer"]):
-                invalid.append(
-                    f"  '{tgt['index']}' layer={tgt['layer']} center={tgt['center']}"
-                )
-        if invalid:
-            print(f"  Discarding angle {phi_deg:.1f}° — "
-                  f"{len(invalid)} invalid non-bot voxel(s):")
-            for msg in invalid[:5]:
-                print(msg)
-            if len(invalid) > 5:
-                print(f"  ... and {len(invalid) - 5} more")
-            return False
+    # Step 2: mean actual rotation derived from bot voxel displacements
+    mean_phi_rad  = compute_mean_actual_phi(bot_mapping)
+    mean_phi_frac = mean_phi_rad / (2.0 * math.pi) % 1.0
+    mean_phi_deg  = mean_phi_rad * 180.0 / math.pi
+    print(f"  Bot mean actual rotation: {mean_phi_frac:.4f} × 2π = {mean_phi_deg:.2f}°")
 
-    # Count collisions / self-overlaps for non-bot (report only, not a discard reason)
-    target_map: dict[str, list[str]] = {}
-    for orig, tgt in non_bot_mapping:
-        target_map.setdefault(tgt["index"], []).append(orig["index"])
-    non_bot_collision_count = sum(1 for origs in target_map.values() if len(origs) > 1)
+    # Step 3: non-bot mapping using the mean actual bot angle
+    non_bot_mapping = compute_voxel_mapping(non_bot_selected, all_voxels, mean_phi_frac)
 
-    non_bot_orig_indices   = {orig["index"] for orig, _ in non_bot_mapping}
-    non_bot_target_indices = {tgt["index"]  for _, tgt  in non_bot_mapping}
-    non_bot_overlap_count  = len(non_bot_orig_indices & non_bot_target_indices)
-
-    print(f"  Non-bot collisions  : {non_bot_collision_count}")
-    print(f"  Non-bot self-overlaps: {non_bot_overlap_count}")
-
-    # Combine bot + non-bot
+    # Step 4: combined collision check
     combined_mapping = bot_mapping + non_bot_mapping
-    all_selected     = bot_selected + non_bot_selected
-    rotated_voxels   = assemble_output_voxels(combined_mapping)
+    try:
+        self_overlap_count = check_mapping(combined_mapping)
+    except RuntimeError as exc:
+        print(f"  Discarding — collision in combined mapping:\n  {exc}")
+        return None
 
-    # Create output directory
+    print(f"  No collisions.  Total self-overlaps: {self_overlap_count}")
+
+    # Step 5: assemble outputs
+    all_selected   = bot_selected + non_bot_selected
+    rotated_voxels = assemble_output_voxels(combined_mapping)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem        = derive_output_stem(selected_path, phi_frac)
+    stem        = derive_output_stem(selected_path, phi_frac_nominal)
     output_path = output_dir / f"{stem}.json"
 
     # Spacing distribution test
@@ -942,31 +1164,49 @@ def run_bot_split_angle(
         plot=plot,
         output_dir=output_dir if plot else None,
     )
-    print_spacing_report(spacing_results, phi_frac, combined_mapping)
+    print_spacing_report(spacing_results, phi_frac_nominal, combined_mapping)
 
     # 3D plot
     plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
-    plot_rotated_voxels(all_selected, rotated_voxels, plot_3d_path, phi_frac)
+    plot_rotated_voxels(all_selected, rotated_voxels, plot_3d_path, phi_frac_nominal)
 
     # 2D per-layer arrow plot
     plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
-    plot_2d_arrows(combined_mapping, plot_2d_path, phi_frac)
+    plot_2d_arrows(combined_mapping, plot_2d_path, phi_frac_nominal)
 
-    # JSON output (combined, readable by downstream scripts)
+    # Config metrics
+    metrics = compute_config_metrics(combined_mapping)
+
+    # Summary JSON (per-subfolder)
+    summary = {
+        "phi_frac_nominal":    phi_frac_nominal,
+        "phi_deg_nominal":     phi_deg_nominal,
+        "mean_actual_phi_frac": mean_phi_frac,
+        "mean_actual_phi_deg":  mean_phi_deg,
+        "self_overlap_total":   self_overlap_count,
+        "metrics":              metrics,
+    }
+    with open(output_dir / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary saved to {output_dir / 'summary.json'}")
+
+    # Voxels JSON (readable by downstream scripts)
     out_data = {
         "config": {
-            "rotation_angle_2pi":    phi_frac,
-            "source_file":           str(selected_path),
-            "n_voxels":              len(rotated_voxels),
-            "non_bot_collisions":    non_bot_collision_count,
-            "non_bot_self_overlaps": non_bot_overlap_count,
+            "rotation_angle_2pi":     phi_frac_nominal,
+            "mean_actual_phi_frac":   mean_phi_frac,
+            "source_file":            str(selected_path),
+            "n_voxels":               len(rotated_voxels),
+            "self_overlap_total":     self_overlap_count,
+            "self_overlap_per_layer": metrics["self_overlap_per_layer"],
         },
         "selected_voxels": rotated_voxels,
     }
     with open(output_path, "w") as f:
         json.dump(out_data, f, indent=2)
     print(f"Output written to {output_path}")
-    return True
+
+    return {"phi_frac": phi_frac_nominal, "phi_deg": phi_deg_nominal, "metrics": metrics}
 
 
 # ---------------------------------------------------------------------------
@@ -979,9 +1219,11 @@ def main(argv: Optional[list[str]] = None) -> None:
             "Rotate a greedy PMT voxel selection by a fraction of 2π.\n\n"
             "Single-angle mode (--angle provided): run immediately and save "
             "outputs to --output-dir.\n"
-            "Explore mode (--angle omitted): scan all valid angles, display "
-            "them, prompt for selection, then run each chosen angle in its "
-            "own subfolder inside --output-dir."
+            "Explore mode (--angle omitted): scan all collision-free angles "
+            "automatically (bot-split: bot voxels drive the scan; mean actual "
+            "bot rotation is applied to all other layers), save every valid "
+            "config in its own subfolder, and write a comparison figure to "
+            "--output-dir."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1002,9 +1244,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument(
         "--n-samples", type=int, default=3600, metavar="N",
         help="Angular sampling resolution for explore mode: number of steps "
-             "from 0 to 2π (default 3600 = every 0.1°). Increase for finer "
-             "resolution; the default is sufficient for all practical voxel "
-             "grid spacings on this detector.",
+             "from 0 to 2π (default 3600 = every 0.1°).",
     )
     parser.add_argument(
         "--plot", action="store_true",
@@ -1012,14 +1252,15 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     parser.add_argument(
         "--skip-validity", action="store_true",
-        help="Skip the PMT placement validity check on rotated voxels "
-             "(by default the check is run and invalid targets raise an error).",
+        help="Skip the post-hoc PMT placement validity check on rotated voxels "
+             "(the candidate pool is always pre-filtered to valid positions; "
+             "this flag only skips the redundant safety check).",
     )
     parser.add_argument(
         "--output-dir", required=True, metavar="PATH",
         help="Output directory. In single-angle mode files go directly here; "
              "in explore mode a subfolder phi_{frac:.4f}x2pi/ is created per "
-             "selected angle.",
+             "angle, and a comparison figure is written here.",
     )
     args = parser.parse_args(argv)
 
@@ -1050,28 +1291,27 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     # -----------------------------------------------------------------------
-    # Explore mode: bot-split — scan bot angles with full checks, then apply
-    # the chosen angle(s) to all other layers (validity check only).
-    # Falls back to original full-selection scan when no bot voxels exist.
+    # Explore mode
     # -----------------------------------------------------------------------
     bot_selected     = [v for v in selected if v["layer"] == "bot"]
     non_bot_selected = [v for v in selected if v["layer"] != "bot"]
 
+    # --- Fallback: no bot voxels — scan full selection ---
     if not bot_selected:
-        # No bot voxels — use original behaviour (scan full selection)
         print(f"\nExplore mode (no bot voxels): scanning {args.n_samples} angles ...")
         valid_fracs = find_valid_angles(
             selected, all_voxels,
             n_samples=args.n_samples,
-            skip_validity=args.skip_validity,
+            skip_validity=True,
         )
         if not valid_fracs:
-            print("No valid rotation angles found.")
+            print("No collision-free rotation angles found.")
             return
-        chosen_fracs = prompt_angle_selection(valid_fracs)
-        for phi_frac in chosen_fracs:
+        print(f"\nFound {len(valid_fracs)} valid angle(s). Running all ...")
+        saved_configs: list[dict] = []
+        for phi_frac in valid_fracs:
             subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
-            run_for_angle(
+            result = run_for_angle(
                 selected, all_voxels,
                 phi_frac=phi_frac,
                 output_dir=subfolder,
@@ -1079,49 +1319,60 @@ def main(argv: Optional[list[str]] = None) -> None:
                 skip_validity=args.skip_validity,
                 plot=args.plot,
             )
+            saved_configs.append(result)
+        if saved_configs:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            plot_comparison_metrics(saved_configs, output_dir)
         print(f"\nAll done. Results in: {output_dir}")
         return
 
-    # Bot-split explore mode
+    # --- Bot-split explore mode ---
     print(f"\nBot-split explore mode: scanning {args.n_samples} angles "
-          f"for {len(bot_selected)} bot voxels "
-          f"(collision + self-overlap + validity checks) ...")
+          f"for {len(bot_selected)} bot voxels (collision check, "
+          f"valid-pool pre-filtered, self-overlap counted not enforced) ...")
     valid_fracs = find_valid_angles(
         bot_selected, all_voxels,
         n_samples=args.n_samples,
-        skip_validity=args.skip_validity,
+        skip_validity=True,   # pool already pre-filtered in build_candidate_pool
     )
 
     if not valid_fracs:
-        print("No valid bot rotation angles found.")
+        print("No collision-free bot rotation angles found.")
         return
 
-    chosen_fracs = prompt_angle_selection(valid_fracs)
+    print(f"\nFound {len(valid_fracs)} valid bot angle configuration(s). Running all ...")
 
-    saved:     list[float] = []
-    discarded: list[float] = []
+    saved_configs = []
+    discarded_count = 0
 
-    for phi_frac in chosen_fracs:
+    for phi_frac in valid_fracs:
         subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
-        ok = run_bot_split_angle(
+        result = run_bot_split_angle(
             bot_selected, non_bot_selected, all_voxels,
-            phi_frac=phi_frac,
+            phi_frac_nominal=phi_frac,
             output_dir=subfolder,
             selected_path=args.selected,
             skip_validity=args.skip_validity,
             plot=args.plot,
         )
-        (saved if ok else discarded).append(phi_frac)
+        if result is not None:
+            saved_configs.append(result)
+        else:
+            discarded_count += 1
+
+    # Comparison plots in parent output directory
+    if saved_configs:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plot_comparison_metrics(saved_configs, output_dir)
 
     # Final summary
     print(f"\n{'=' * 62}")
     print(f"Bot-split explore mode complete")
-    print(f"  Saved    : {len(saved)} setup(s)")
-    for f in saved:
-        print(f"    {f:.4f} × 2π = {f * 360:.2f}°  →  phi_{f:.4f}x2pi/")
-    print(f"  Discarded: {len(discarded)} setup(s)  (invalid non-bot voxels)")
-    for f in discarded:
-        print(f"    {f:.4f} × 2π = {f * 360:.2f}°")
+    print(f"  Saved    : {len(saved_configs)} setup(s)")
+    for c in saved_configs:
+        print(f"    {c['phi_frac']:.4f} × 2π = {c['phi_deg']:.2f}°"
+              f"  →  phi_{c['phi_frac']:.4f}x2pi/")
+    print(f"  Discarded: {discarded_count} setup(s)  (combined collision)")
     print(f"{'=' * 62}")
     print(f"\nAll done. Results in: {output_dir}")
 

@@ -5,3 +5,4 @@ selected/
 __pycache__/
 *.pyc
 *.md
+settings*
