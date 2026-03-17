@@ -863,6 +863,113 @@ def plot_2d_arrows(
 
 
 # ---------------------------------------------------------------------------
+# Bot-split explore mode: rotate bot with full checks, others validity-only
+# ---------------------------------------------------------------------------
+
+def run_bot_split_angle(
+    bot_selected: list[dict],
+    non_bot_selected: list[dict],
+    all_voxels: list[dict],
+    phi_frac: float,
+    output_dir: Path,
+    selected_path: str,
+    skip_validity: bool,
+    plot: bool,
+) -> bool:
+    """Rotation pipeline for bot-split explore mode.
+
+    Bot voxels are already confirmed valid by the angle scan (collision,
+    self-overlap, and validity all passed).  Non-bot voxels are checked
+    for validity only; any invalid target causes the whole setup to be
+    discarded.  Collisions and self-overlaps in non-bot layers are counted
+    and reported in the summary but do not cause a discard.
+
+    Returns True if the setup was saved, False if discarded.
+    """
+    phi_deg = phi_frac * 360.0
+    print(f"\n{'=' * 62}")
+    print(f"Trying angle: {phi_frac:.4f} × 2π = {phi_deg:.1f}°")
+    print(f"{'=' * 62}")
+
+    # Compute mappings for both groups
+    bot_mapping     = compute_voxel_mapping(bot_selected,     all_voxels, phi_frac)
+    non_bot_mapping = compute_voxel_mapping(non_bot_selected, all_voxels, phi_frac)
+
+    # Validity check for non-bot — discard entire setup if any target invalid
+    if not skip_validity:
+        invalid: list[str] = []
+        for _, tgt in non_bot_mapping:
+            if not is_valid_pmt_position(tgt["center"], tgt["layer"]):
+                invalid.append(
+                    f"  '{tgt['index']}' layer={tgt['layer']} center={tgt['center']}"
+                )
+        if invalid:
+            print(f"  Discarding angle {phi_deg:.1f}° — "
+                  f"{len(invalid)} invalid non-bot voxel(s):")
+            for msg in invalid[:5]:
+                print(msg)
+            if len(invalid) > 5:
+                print(f"  ... and {len(invalid) - 5} more")
+            return False
+
+    # Count collisions / self-overlaps for non-bot (report only, not a discard reason)
+    target_map: dict[str, list[str]] = {}
+    for orig, tgt in non_bot_mapping:
+        target_map.setdefault(tgt["index"], []).append(orig["index"])
+    non_bot_collision_count = sum(1 for origs in target_map.values() if len(origs) > 1)
+
+    non_bot_orig_indices   = {orig["index"] for orig, _ in non_bot_mapping}
+    non_bot_target_indices = {tgt["index"]  for _, tgt  in non_bot_mapping}
+    non_bot_overlap_count  = len(non_bot_orig_indices & non_bot_target_indices)
+
+    print(f"  Non-bot collisions  : {non_bot_collision_count}")
+    print(f"  Non-bot self-overlaps: {non_bot_overlap_count}")
+
+    # Combine bot + non-bot
+    combined_mapping = bot_mapping + non_bot_mapping
+    all_selected     = bot_selected + non_bot_selected
+    rotated_voxels   = assemble_output_voxels(combined_mapping)
+
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem        = derive_output_stem(selected_path, phi_frac)
+    output_path = output_dir / f"{stem}.json"
+
+    # Spacing distribution test
+    print("\nRunning spacing distribution test ...")
+    spacing_results = run_spacing_test(
+        all_selected, rotated_voxels,
+        plot=plot,
+        output_dir=output_dir if plot else None,
+    )
+    print_spacing_report(spacing_results, phi_frac, combined_mapping)
+
+    # 3D plot
+    plot_3d_path = output_path.with_name(output_path.stem + "_3d.png")
+    plot_rotated_voxels(all_selected, rotated_voxels, plot_3d_path, phi_frac)
+
+    # 2D per-layer arrow plot
+    plot_2d_path = output_path.with_name(output_path.stem + "_2d_arrows.png")
+    plot_2d_arrows(combined_mapping, plot_2d_path, phi_frac)
+
+    # JSON output (combined, readable by downstream scripts)
+    out_data = {
+        "config": {
+            "rotation_angle_2pi":    phi_frac,
+            "source_file":           str(selected_path),
+            "n_voxels":              len(rotated_voxels),
+            "non_bot_collisions":    non_bot_collision_count,
+            "non_bot_self_overlaps": non_bot_overlap_count,
+        },
+        "selected_voxels": rotated_voxels,
+    }
+    with open(output_path, "w") as f:
+        json.dump(out_data, f, indent=2)
+    print(f"Output written to {output_path}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -943,32 +1050,79 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     # -----------------------------------------------------------------------
-    # Explore mode: find all valid angles, let user pick
+    # Explore mode: bot-split — scan bot angles with full checks, then apply
+    # the chosen angle(s) to all other layers (validity check only).
+    # Falls back to original full-selection scan when no bot voxels exist.
     # -----------------------------------------------------------------------
-    print(f"\nExplore mode: scanning {args.n_samples} angles ...")
+    bot_selected     = [v for v in selected if v["layer"] == "bot"]
+    non_bot_selected = [v for v in selected if v["layer"] != "bot"]
+
+    if not bot_selected:
+        # No bot voxels — use original behaviour (scan full selection)
+        print(f"\nExplore mode (no bot voxels): scanning {args.n_samples} angles ...")
+        valid_fracs = find_valid_angles(
+            selected, all_voxels,
+            n_samples=args.n_samples,
+            skip_validity=args.skip_validity,
+        )
+        if not valid_fracs:
+            print("No valid rotation angles found.")
+            return
+        chosen_fracs = prompt_angle_selection(valid_fracs)
+        for phi_frac in chosen_fracs:
+            subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
+            run_for_angle(
+                selected, all_voxels,
+                phi_frac=phi_frac,
+                output_dir=subfolder,
+                selected_path=args.selected,
+                skip_validity=args.skip_validity,
+                plot=args.plot,
+            )
+        print(f"\nAll done. Results in: {output_dir}")
+        return
+
+    # Bot-split explore mode
+    print(f"\nBot-split explore mode: scanning {args.n_samples} angles "
+          f"for {len(bot_selected)} bot voxels "
+          f"(collision + self-overlap + validity checks) ...")
     valid_fracs = find_valid_angles(
-        selected, all_voxels,
+        bot_selected, all_voxels,
         n_samples=args.n_samples,
         skip_validity=args.skip_validity,
     )
 
     if not valid_fracs:
-        print("No valid rotation angles found.")
+        print("No valid bot rotation angles found.")
         return
 
     chosen_fracs = prompt_angle_selection(valid_fracs)
 
+    saved:     list[float] = []
+    discarded: list[float] = []
+
     for phi_frac in chosen_fracs:
         subfolder = output_dir / f"phi_{phi_frac:.4f}x2pi"
-        run_for_angle(
-            selected, all_voxels,
+        ok = run_bot_split_angle(
+            bot_selected, non_bot_selected, all_voxels,
             phi_frac=phi_frac,
             output_dir=subfolder,
             selected_path=args.selected,
             skip_validity=args.skip_validity,
             plot=args.plot,
         )
+        (saved if ok else discarded).append(phi_frac)
 
+    # Final summary
+    print(f"\n{'=' * 62}")
+    print(f"Bot-split explore mode complete")
+    print(f"  Saved    : {len(saved)} setup(s)")
+    for f in saved:
+        print(f"    {f:.4f} × 2π = {f * 360:.2f}°  →  phi_{f:.4f}x2pi/")
+    print(f"  Discarded: {len(discarded)} setup(s)  (invalid non-bot voxels)")
+    for f in discarded:
+        print(f"    {f:.4f} × 2π = {f * 360:.2f}°")
+    print(f"{'=' * 62}")
     print(f"\nAll done. Results in: {output_dir}")
 
 
