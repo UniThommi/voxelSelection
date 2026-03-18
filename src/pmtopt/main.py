@@ -198,6 +198,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         if args.muon_weight is not None and args.per_area:
             parser.error("--muon-weight and --per-area cannot be combined.")
 
+        if args.muon_weight is not None and args.worst:
+            parser.error("--muon-weight and --worst cannot be combined.")
+
         if args.muon_weight is not None and args.muon_weight <= 0:
             parser.error("--muon-weight must be a positive float.")
 
