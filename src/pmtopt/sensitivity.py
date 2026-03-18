@@ -178,7 +178,7 @@ def run_single_greedy_from_raw(
                     B_area, N=n_area, M=M,
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing, dynamic=dynamic,
-                    verbose=False,
+                    worst=worst, verbose=False,
                 )
                 all_selected.extend(int(area_indices[i]) for i in sel_local)
             elif optimize == "muon-ge77":
@@ -191,7 +191,7 @@ def run_single_greedy_from_raw(
                     centers=centers_area, layers=layers_area,
                     min_spacing=min_spacing,
                     muon_weight_k=muon_weight_k,
-                    dynamic=dynamic, verbose=False,
+                    dynamic=dynamic, worst=worst, verbose=False,
                 )
                 all_selected.extend(int(area_indices[i]) for i in sel_local)
                 shared_nc_detected |= nc_det
@@ -221,7 +221,7 @@ def run_single_greedy_from_raw(
                 B, N=N, M=M,
                 centers=centers, layers=layers,
                 min_spacing=min_spacing, dynamic=dynamic,
-                verbose=False, **mw_kwargs,
+                worst=worst, verbose=False, **mw_kwargs,
             )
             final_eff = effs[-1] if effs else 0.0
         elif optimize == "muon-ge77":
@@ -234,7 +234,7 @@ def run_single_greedy_from_raw(
                 centers=centers, layers=layers,
                 min_spacing=min_spacing,
                 muon_weight_k=muon_weight_k,
-                dynamic=dynamic, verbose=False,
+                dynamic=dynamic, worst=worst, verbose=False,
             )
             final_eff = effs[-1] if effs else 0.0
 
@@ -302,7 +302,7 @@ def run_sensitivity(
         deltas = [-0.20, -0.10, -0.05, +0.05, +0.10, +0.20]
 
     k_values = list(range(25, N + 1, 25))
-    if k_values[-1] != N:
+    if not k_values or k_values[-1] != N:
         k_values.append(N)
 
     out_dir = Path(output_dir)

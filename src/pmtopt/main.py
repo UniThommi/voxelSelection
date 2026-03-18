@@ -456,6 +456,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 )
             )
             final_eff = efficiencies[-1]
+            coverage_counts = None
 
     t_greedy = time.time() - t_greedy_start
     selected_voxel_ids = voxel_ids[selected_cols]
