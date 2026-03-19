@@ -236,16 +236,17 @@ def main(argv: Optional[list[str]] = None) -> None:
         spacing_tag = ("nospacing" if args.no_spacing
                        else f"spacing{int(min_spacing)}mm")
         perarea_tag = "_perarea" if args.per_area else ""
+        worst_tag = "_worst" if args.worst else ""
         mw_tag = (f"_mw{args.muon_weight:.2f}"
                   if args.muon_weight is not None else "")
         ratio_tag = f"_ratios_{fmt_ratio_filename(area_ratios)}"
 
         if args.optimize == "nc":
             base_name = (f"greedy_N{args.N}_M{args.M}_m{args.m}_"
-                         f"{spacing_tag}{ratio_tag}{perarea_tag}{mw_tag}")
+                         f"{spacing_tag}{ratio_tag}{perarea_tag}{worst_tag}{mw_tag}")
         else:
             base_name = (f"greedy_muon_N{args.N}_W{args.W}_m{args.m}_"
-                         f"{spacing_tag}{ratio_tag}{perarea_tag}{mw_tag}")
+                         f"{spacing_tag}{ratio_tag}{perarea_tag}{worst_tag}{mw_tag}")
 
     # =====================================================================
     # PHASE 1: Write ratio-adjusted HDF5 (optional)
@@ -509,9 +510,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         npz_data["num_ge77_muons"] = num_ge77_muons
     if args.per_area:
         npz_data["per_area"] = True
-        npz_data["allocation"] = json.dumps(
-            compute_per_area_N(args.N, verbose=False)
-        )
+        npz_data["allocation"] = json.dumps(allocation)
 
     np.savez(npz_path, **npz_data)
     if verbose:
