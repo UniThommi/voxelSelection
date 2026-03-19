@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
-PMT Position Optimization for Neutron Capture Detection
-========================================================
+PMT Position Optimization — unified entry point
+================================================
 
-Unified entry point for:
-  1. Greedy voxel selection with stochastic ratio scaling (default)
-  2. HDF5 file writing with ratio-adjusted hits (--write-hdf5)
-  3. Sensitivity analysis for ratio perturbation (--sensitivity)
-
-All modes use stochastic rounding: floor(hits/ratio) + Bernoulli(frac).
+Subcommands:
+  greedy       Greedy voxel selection from HDF5 simulation data (NC / muon-Ge77 modes)
+  homogeneous  Generate all voxels or select N homogeneously distributed voxels
+  rotate       Rotate an existing voxel selection by an azimuthal angle
 
 Usage examples:
-    # Standard greedy (NC mode, M=1)
-    python main.py data.hdf5 -N 300 --optimize nc -M 1 -m 1
+    # Greedy: NC mode
+    python main.py greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1
 
-    # With custom ratios
-    python main.py data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
-        --pit 2.07 --bot 2.38 --top 2.20 --wall 1.88
+    # Greedy: muon-Ge77 mode
+    python main.py greedy data.hdf5 -N 300 --optimize muon-ge77 -W 6 -m 1
 
-    # Write ratio-adjusted HDF5 + run greedy + sensitivity
-    python main.py data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
+    # Greedy: write ratio-adjusted HDF5 + sensitivity
+    python main.py greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
         --write-hdf5 --sensitivity --output-dir results/
 
-    # Muon-Ge77 mode with muon weighting
-    python main.py data.hdf5 -N 300 --optimize muon-ge77 -W 1 -m 1 \\
-        --muon-weight 4.34
+    # Homogeneous: generate all voxels
+    python main.py homogeneous --mode generate --output-dir ./output
 
-    # No ratio scaling (equivalent to ratio=1 for all areas)
-    python main.py data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
-        --pit 1 --bot 1 --top 1 --wall 1
+    # Homogeneous: select 300 PMTs across all areas
+    python main.py homogeneous --mode select -N 300 --output-dir ./output
+
+    # Rotate: single angle
+    python main.py rotate --all-voxels all.json --selected greedy.json --angle 0.25 \\
+        --output-dir ./output
+
+    # Rotate: explore all valid angles
+    python main.py rotate --all-voxels all.json --selected greedy.json \\
+        --output-dir ./output
 
 Author: Thomas Buerger (University of Tübingen)
 """
@@ -57,10 +60,9 @@ from pmtopt.ratio_scaling import write_ratio_hdf5, fmt_ratio_filename
 from pmtopt.sensitivity import run_sensitivity
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def run_greedy(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="PMT position optimization via greedy voxel selection "
-                    "with stochastic ratio scaling.",
+        description="Greedy PMT voxel selection with stochastic ratio scaling.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -636,6 +638,34 @@ def main(argv: Optional[list[str]] = None) -> None:
             baseline_eff=final_eff,
             verbose=verbose,
         )
+
+
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate")
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    """Top-level dispatcher: routes to greedy / homogeneous / rotate."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv or argv[0] not in _SUBCOMMANDS:
+        print(
+            "usage: main.py <subcommand> [args ...]\n"
+            f"subcommands: {', '.join(_SUBCOMMANDS)}\n\n"
+            "Run 'main.py <subcommand> --help' for subcommand-specific help."
+        )
+        sys.exit(1 if argv else 0)
+
+    mode, rest = argv[0], argv[1:]
+
+    if mode == "greedy":
+        run_greedy(rest)
+    elif mode == "homogeneous":
+        from pmtopt.homogeneous import main as hom_main
+        hom_main(rest)
+    elif mode == "rotate":
+        from pmtopt.rotate import main as rot_main
+        rot_main(rest)
 
 
 if __name__ == "__main__":

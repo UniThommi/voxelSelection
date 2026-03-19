@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for rotate_voxels.py — no file I/O, no HDF5.
+Unit tests for pmtopt.rotate — no file I/O, no HDF5.
 """
 
 import math
@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
-import rotate_voxels as rv
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import pmtopt.rotate as rv
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

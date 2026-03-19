@@ -17,15 +17,15 @@ A spacing-distribution test compares pairwise distances before/after.
 A 3D plot of original (red) vs. rotated (green) positions is always produced.
 A 2D per-layer arrow plot shows individual voxel shifts.
 
-Usage — single angle:
-    python rotate_voxels.py \\
+Usage — single angle (via unified CLI):
+    python src/pmtopt/main.py rotate \\
         --all-voxels all_valid.json \\
         --selected greedy_N300.json \\
         --angle 0.25 \\          # fraction of 2π → 90°
         --output-dir plots/
 
 Usage — explore all valid angles (omit --angle):
-    python rotate_voxels.py \\
+    python src/pmtopt/main.py rotate \\
         --all-voxels all_valid.json \\
         --selected greedy_N300.json \\
         --output-dir plots/
@@ -49,7 +49,6 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from pmtopt.geometry import (
     R_PIT, R_ZYL_BOT, R_ZYLINDER,
     Z_BASE_GLOBAL, H_ZYLINDER,

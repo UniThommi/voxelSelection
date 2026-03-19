@@ -1,16 +1,14 @@
 """
-voxelSelection.py — CLI tool for voxel generation and homogeneous PMT selection
+homogeneous.py — CLI tool for voxel generation and homogeneous PMT selection
 on the cylindrical SSD detector.
 
-Usage:
-    # Generate all voxels + 2D/3D plots + JSON
-    python voxelSelection.py --mode generate [--geometry currentDist] [--output-dir ./output]
+Usage (via unified CLI):
+    python src/pmtopt/main.py homogeneous --mode generate [--output-dir ./output]
+    python src/pmtopt/main.py homogeneous --mode select -N 300 [--output-dir ./output]
+    python src/pmtopt/main.py homogeneous --mode select -N 100 --areas pit wall
 
-    # Select N voxels homogeneously across all areas
-    python voxelSelection.py --mode select -N 300 [--geometry currentDist] [--output-dir ./output]
-
-    # Select N voxels on specific areas only
-    python voxelSelection.py --mode select -N 100 --areas pit wall [--output-dir ./output]
+Direct invocation also works:
+    python src/pmtopt/homogeneous.py --mode select -N 300
 """
 import argparse
 import json
@@ -26,10 +24,9 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from scipy.spatial import KDTree
 
 # ---------------------------------------------------------------------------
-# Import geometry constants from sibling pmtopt package
+# Import geometry constants from pmtopt package
 # ---------------------------------------------------------------------------
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pmtopt.geometry import (  # noqa: E402
+from pmtopt.geometry import (
     PMT_RADIUS,
     R_PIT,
     R_ZYL_BOT,
@@ -764,7 +761,7 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str) -> None:
 
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Voxel generation and homogeneous PMT selection for the SSD detector.\n"
@@ -772,15 +769,10 @@ def main() -> None:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Generate all voxels + 2D/3D plots + JSON
-  python voxelSelection.py --mode generate --output-dir ./output
-
-  # Select 300 PMTs across all areas
-  python voxelSelection.py --mode select -N 300 --output-dir ./output
-
-  # Select 100 PMTs on pit and wall only
-  python voxelSelection.py --mode select -N 100 --areas pit wall --output-dir ./output
+Examples (via unified CLI):
+  python main.py homogeneous --mode generate --output-dir ./output
+  python main.py homogeneous --mode select -N 300 --output-dir ./output
+  python main.py homogeneous --mode select -N 100 --areas pit wall --output-dir ./output
         """,
     )
     parser.add_argument(
@@ -812,7 +804,7 @@ Examples:
         help="Directory to write output files to. Created if it does not exist. Default: '.'",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.mode == "select":
         if args.num_voxels < 1:
