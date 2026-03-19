@@ -194,7 +194,7 @@ def greedy_select_nc(
 
             # Select minimum gain among available
             best_voxel = int(np.argmin(gains_m1))
-            best_gain = int(B.T.dot(at_m1.astype(np.int32))[best_voxel])
+            best_gain = int(gains_m1[best_voxel])
             phase_tag = " [WORST]"
 
         elif use_priority_M:
