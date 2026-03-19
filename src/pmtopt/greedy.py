@@ -395,15 +395,15 @@ def greedy_select_muon(
 
     use_muon_weight = (muon_weight_k is not None)
     use_priority = (not dynamic) and (not worst) and ((M > 1) or (W > 1))
-    use_dynamic_W = dynamic and (W > 1) and not use_muon_weight
+    use_dynamic = dynamic and (W > 1) and not use_muon_weight
 
     if verbose:
         spacing_str = f", min_spacing={min_spacing:.0f}mm" if enforce_spacing else ""
         weight_str = f", muon_weight_k={muon_weight_k:.2f}" if use_muon_weight else ""
         if worst:
             mode_str = " (WORST: minimal gain, avoids M/W promotion)"
-        elif use_dynamic_W:
-            mode_str = " (dynamic W: fallback when no muons at W-1)"
+        elif use_dynamic:
+            mode_str = (f" (dynamic: W={W}→1 at each M={M}→1)")
         elif use_priority:
             mode_str = f" (priority: M=1 baseline, M-trigger, W-trigger; M={M}, W={W})"
         else:
@@ -633,96 +633,108 @@ def greedy_select_muon(
                         best_gain = best_w_gain
                         phase_tag = " [W]"
 
-        elif use_dynamic_W:
+        elif use_dynamic:
             # ============================================================
-            # DYNAMIC MODE (original behavior, M=1 enforced)
+            # DYNAMIC MODE: 2D sweep W (high→low) at each M level (high→low)
+            # Outer loop: M from M down to 1
+            # Inner loop: W from W down to 1
+            # Stops at the first (M_eff, W_eff) where a voxel with gain>0
+            # is found. Cheap np.any() gates avoid the SpMV when a level
+            # has no candidates.
             # ============================================================
-            if np.any(muon_detected_counts == (W - 1)):
-                effective_W = W
-            else:
-                max_d = 0
-                for d_level in range(W - 2, -1, -1):
-                    if np.any(muon_detected_counts == d_level):
-                        max_d = d_level + 1
-                        break
-                effective_W = max(max_d, 1)
-            muon_at_threshold = (muon_detected_counts == (effective_W - 1))
-
-            eligible_undetected = eligible_nc_mask & (~nc_detected)
-            eligible_idx = np.where(eligible_undetected)[0]
-
-            if use_muon_weight:
-                w = np.zeros(num_ncs, dtype=np.float32)
-                if len(eligible_idx) > 0:
-                    muon_lids = nc_to_muon_local[eligible_idx]
-                    d_vals = muon_detected_counts[muon_lids]
-                    w[eligible_idx] = muon_weight_delta(d_vals, muon_weight_k)
-            else:
-                w = np.zeros(num_ncs, dtype=np.int32)
-                if len(eligible_idx) > 0:
-                    muon_lids = nc_to_muon_local[eligible_idx]
-                    at_thresh = muon_at_threshold[muon_lids]
-                    w[eligible_idx[at_thresh]] = 1
-
-            all_gains_upper = B.T.dot(w)
-            all_gains_upper[~available] = -1
-
-            top_k_indices = np.argsort(all_gains_upper)[-TOP_K:][::-1]
-            top_k_indices = top_k_indices[all_gains_upper[top_k_indices] > 0]
-
-            best_gain = 0.0 if use_muon_weight else 0
+            found = False
             best_voxel = -1
+            best_gain = 0
 
-            if len(top_k_indices) == 0:
+            for M_eff in range(M, 0, -1):
+                at_m_thresh = (coverage_counts == M_eff - 1) & eligible_nc_mask
+                if not np.any(at_m_thresh):
+                    continue  # no NCs at this M threshold — skip all W
+
+                for W_eff in range(W, 0, -1):
+                    if W_eff == 1:
+                        # Pure M-level gain: maximize NCs crossing M_eff
+                        gains = B.T.dot(at_m_thresh.astype(np.int32))
+                        gains[~available] = -1
+                        best_v = int(np.argmax(gains))
+                        if gains[best_v] > 0:
+                            best_voxel = best_v
+                            best_gain = int(gains[best_v])
+                            phase_tag = f" [W=1/M={M_eff}]"
+                            found = True
+                            break
+                    else:
+                        muon_at_w_thresh = (muon_detected_counts == W_eff - 1)
+                        if not np.any(muon_at_w_thresh):
+                            continue
+
+                        # NCs at M_eff-1 whose muon is at W_eff-1
+                        at_m_idx = np.where(at_m_thresh)[0]
+                        muon_lids = nc_to_muon_local[at_m_idx]
+                        at_w = muon_at_w_thresh[muon_lids]
+                        if not np.any(at_w):
+                            continue
+
+                        w_weight = np.zeros(num_ncs, dtype=np.int32)
+                        w_weight[at_m_idx[at_w]] = 1
+
+                        gains_upper = B.T.dot(w_weight)
+                        gains_upper[~available] = -1
+
+                        top_k_indices = np.argsort(gains_upper)[-TOP_K:][::-1]
+                        top_k_indices = top_k_indices[
+                            gains_upper[top_k_indices] > 0
+                        ]
+                        if len(top_k_indices) == 0:
+                            continue
+
+                        # Exact muon-crossing count per candidate voxel
+                        best_local_gain = 0
+                        best_local_voxel = -1
+                        for v in top_k_indices:
+                            cs = B.indptr[v]
+                            ce = B.indptr[v + 1]
+                            v_ncs = B.indices[cs:ce]
+
+                            promoted = v_ncs[
+                                (coverage_counts[v_ncs] == M_eff - 1)
+                                & eligible_nc_mask[v_ncs]
+                            ]
+                            if len(promoted) == 0:
+                                continue
+
+                            muon_lids_p = nc_to_muon_local[promoted]
+                            unique_muons = np.unique(muon_lids_p)
+                            crosses_W = (
+                                muon_detected_counts[unique_muons] == W_eff - 1
+                            )
+                            gain = int(crosses_W.sum())
+
+                            if gain > best_local_gain:
+                                best_local_gain = gain
+                                best_local_voxel = int(v)
+
+                        if best_local_voxel >= 0 and best_local_gain > 0:
+                            best_voxel = best_local_voxel
+                            best_gain = best_local_gain
+                            phase_tag = f" [W={W_eff}/M={M_eff}]"
+                            found = True
+                            break
+
+                if found:
+                    break
+
+            if not found:
                 avail_idx = np.where(available)[0]
                 if len(avail_idx) > 0:
                     best_voxel = int(avail_idx[0])
+                    best_gain = 0
+                    phase_tag = " [no gain]"
                 else:
                     raise RuntimeError(
                         f"No available voxels left at step {step+1}/{N}. "
                         f"Spacing constraint may be too tight."
                     )
-            else:
-                for v in top_k_indices:
-                    cs = B.indptr[v]
-                    ce = B.indptr[v + 1]
-                    v_ncs = B.indices[cs:ce]
-
-                    mask_elig = eligible_nc_mask[v_ncs] & (~nc_detected[v_ncs])
-                    newly = v_ncs[mask_elig]
-                    if len(newly) == 0:
-                        continue
-
-                    muon_lids_v = nc_to_muon_local[newly]
-
-                    if use_muon_weight:
-                        unique_muons, counts = np.unique(
-                            muon_lids_v, return_counts=True
-                        )
-                        d_vals = muon_detected_counts[unique_muons]
-                        gain = 0.0
-                        for um_idx in range(len(unique_muons)):
-                            d_cur = d_vals[um_idx]
-                            n_new = counts[um_idx]
-                            for j in range(n_new):
-                                gain += float(
-                                    muon_weight_delta(
-                                        np.array([d_cur + j]), muon_weight_k
-                                    )[0]
-                                )
-                    else:
-                        at_thresh_mask = muon_at_threshold[muon_lids_v]
-                        gain = len(np.unique(muon_lids_v[at_thresh_mask]))
-
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_voxel = int(v)
-
-                if best_voxel == -1:
-                    best_voxel = int(top_k_indices[0])
-                    best_gain = 0
-
-            phase_tag = f" [W=1]" if effective_W == 1 else ""
 
         else:
             # ============================================================

@@ -108,9 +108,9 @@ def main(argv: Optional[list[str]] = None) -> None:
                         help="Muon-level diminishing-returns weighting "
                              "with saturation constant k.")
     parser.add_argument("--dynamic", action="store_true",
-                        help="Use dynamic M/W fallback instead of priority "
-                             "logic. Cannot be used with M>1 and W>1 "
-                             "simultaneously.")
+                        help="Use dynamic fallback instead of priority logic. "
+                             "muon-ge77: sweeps W high→low at each M level "
+                             "(high→low). nc: sweeps M high→low.")
     parser.add_argument("--worst", action="store_true",
                         help="Worst-case benchmark: select voxels with "
                              "minimal gain, avoiding M/W promotions. "
@@ -204,10 +204,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         if args.muon_weight is not None and args.muon_weight <= 0:
             parser.error("--muon-weight must be a positive float.")
 
-        if args.dynamic and args.M > 1 and args.W is not None and args.W > 1:
-            parser.error("--dynamic does not support M>1 and W>1 "
-                            "simultaneously. Use priority mode (without "
-                            "--dynamic) instead.")
         if args.dynamic and args.worst:
             parser.error("--dynamic and --worst cannot be combined.")
 
