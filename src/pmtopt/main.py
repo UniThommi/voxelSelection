@@ -10,27 +10,27 @@ Subcommands:
 
 Usage examples:
     # Greedy: NC mode
-    python main.py greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1
+    python -m pmtopt.main greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1
 
     # Greedy: muon-Ge77 mode
-    python main.py greedy data.hdf5 -N 300 --optimize muon-ge77 -W 6 -m 1
+    python -m pmtopt.main greedy data.hdf5 -N 300 --optimize muon-ge77 -W 6 -m 1
 
     # Greedy: write ratio-adjusted HDF5 + sensitivity
-    python main.py greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
+    python -m pmtopt.main greedy data.hdf5 -N 300 --optimize nc -M 1 -m 1 \\
         --write-hdf5 --sensitivity --output-dir results/
 
     # Homogeneous: generate all voxels
-    python main.py homogeneous --mode generate --output-dir ./output
+    python -m pmtopt.main homogeneous --mode generate --output-dir ./output
 
     # Homogeneous: select 300 PMTs across all areas
-    python main.py homogeneous --mode select -N 300 --output-dir ./output
+    python -m pmtopt.main homogeneous --mode select -N 300 --output-dir ./output
 
     # Rotate: single angle
-    python main.py rotate --all-voxels all.json --selected greedy.json --angle 0.25 \\
+    python -m pmtopt.main rotate --all-voxels all.json --selected greedy.json --angle 0.25 \\
         --output-dir ./output
 
     # Rotate: explore all valid angles
-    python main.py rotate --all-voxels all.json --selected greedy.json \\
+    python -m pmtopt.main rotate --all-voxels all.json --selected greedy.json \\
         --output-dir ./output
 
 Author: Thomas Buerger (University of Tübingen)
