@@ -50,6 +50,7 @@ AREA_SURFACES: dict[str, float] = {
 
 def compute_per_area_N(
     N: int,
+    areas: list[str] | None = None,
     verbose: bool = True,
 ) -> dict[str, int]:
     """
@@ -61,31 +62,47 @@ def compute_per_area_N(
     ----------
     N : int
         Total number of PMTs to distribute.
+    areas : list of str or None
+        Subset of areas to distribute across (e.g. ["pit", "wall"]).
+        If None, all four areas are used.
     verbose : bool
         Print allocation table.
 
     Returns
     -------
     allocation : dict[str, int]
-        Number of PMTs per area.
+        Number of PMTs per area. Areas not in ``areas`` receive 0.
     """
-    total_area = sum(AREA_SURFACES.values())
-    fractions = {area: N * a / total_area for area, a in AREA_SURFACES.items()}
-    floors = {area: int(np.floor(f)) for area, f in fractions.items()}
-    remainders = {area: fractions[area] - floors[area] for area in fractions}
+    _all_areas = ["pit", "bot", "top", "wall"]
+    areas_to_use = (
+        [a for a in _all_areas if a in areas]
+        if areas is not None
+        else _all_areas
+    )
+
+    selected_surfaces = {a: AREA_SURFACES[a] for a in areas_to_use}
+    total_area = sum(selected_surfaces.values())
+    fractions = {a: N * s / total_area for a, s in selected_surfaces.items()}
+    floors = {a: int(np.floor(f)) for a, f in fractions.items()}
+    remainders = {a: fractions[a] - floors[a] for a in fractions}
     leftover = N - sum(floors.values())
     sorted_areas = sorted(remainders, key=lambda a: remainders[a], reverse=True)
     allocation = dict(floors)
     for i in range(leftover):
         allocation[sorted_areas[i]] += 1
 
+    # Fill zeros for areas that were excluded
+    for a in _all_areas:
+        if a not in allocation:
+            allocation[a] = 0
+
     if verbose:
-        print(f"\nPer-area PMT allocation (N={N}):")
+        print(f"\nPer-area PMT allocation (N={N}, areas={areas_to_use}):")
         print(f"  {'Area':<6} {'N_PMTs':>7} {'Fläche (M mm²)':>16} "
               f"{'Dichte':>14} {'Abw. von Ziel':>14}")
         print(f"  {'-' * 58}")
         target_density = N / total_area
-        for area in ["pit", "bot", "top", "wall"]:
+        for area in areas_to_use:
             n_a = allocation[area]
             a_mm2 = AREA_SURFACES[area]
             density = n_a / a_mm2 if a_mm2 > 0 else 0.0

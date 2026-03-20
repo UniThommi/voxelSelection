@@ -101,6 +101,14 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                         help=f"SSD/PMT ratio for WALL "
                              f"(default: {DEFAULT_AREA_RATIOS['wall']}).")
 
+    # --- Area filter ---
+    parser.add_argument("--areas", nargs="+", default=None,
+                        choices=["pit", "bot", "top", "wall"], metavar="AREA",
+                        help="Restrict PMT placement to these areas. "
+                             "Choices: pit bot top wall. Default: all four. "
+                             "With --per-area, N is redistributed proportionally "
+                             "over the selected surfaces only.")
+
     # --- Greedy options ---
     parser.add_argument("--no-spacing", action="store_true",
                         help="Disable minimum spacing constraint.")
@@ -163,6 +171,8 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             greedy_only_errors.append("-m")
         if args.W is not None:
             greedy_only_errors.append("-W")
+        if args.areas is not None:
+            greedy_only_errors.append("--areas")
         if args.no_spacing:
             greedy_only_errors.append("--no-spacing")
         if args.per_area:
@@ -228,6 +238,13 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Normalise selected areas ---
+    _area_order = ["pit", "bot", "top", "wall"]
+    selected_areas: list[str] | None = (
+        sorted(set(args.areas), key=_area_order.index)
+        if args.areas is not None else None
+    )
+
     # --- Auto-generate output filename (only for greedy mode) ---
     base_name = None
     if run_greedy:
@@ -238,13 +255,19 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         mw_tag = (f"_mw{args.muon_weight:.2f}"
                   if args.muon_weight is not None else "")
         ratio_tag = f"_ratios_{fmt_ratio_filename(area_ratios)}"
+        areas_tag = (
+            "_areas_" + "".join(a[0] for a in selected_areas)
+            if selected_areas is not None else ""
+        )
 
         if args.optimize == "nc":
             base_name = (f"greedy_N{args.N}_M{args.M}_m{args.m}_"
-                         f"{spacing_tag}{ratio_tag}{perarea_tag}{worst_tag}{mw_tag}")
+                         f"{spacing_tag}{ratio_tag}{perarea_tag}"
+                         f"{areas_tag}{worst_tag}{mw_tag}")
         else:
             base_name = (f"greedy_muon_N{args.N}_W{args.W}_m{args.m}_"
-                         f"{spacing_tag}{ratio_tag}{perarea_tag}{worst_tag}{mw_tag}")
+                         f"{spacing_tag}{ratio_tag}{perarea_tag}"
+                         f"{areas_tag}{worst_tag}{mw_tag}")
 
     # =====================================================================
     # PHASE 1: Write ratio-adjusted HDF5 (optional)
@@ -290,6 +313,8 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         print(f"  Seed:     {args.seed}")
         print(f"  Spacing:  {min_spacing:.0f} mm")
         print(f"  Per-area: {args.per_area}")
+        if selected_areas is not None:
+            print(f"  Areas:    {selected_areas}")
         if args.muon_weight is not None:
             print(f"  Muon weight: k = {args.muon_weight:.4f}")
 
@@ -300,6 +325,19 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         seed=args.seed, verbose=verbose,
         skip_validity=args.no_spacing,
     )
+
+    # Filter voxels to selected areas (if --areas was given)
+    if selected_areas is not None:
+        _area_mask = np.isin(layers, selected_areas)
+        _area_indices = np.where(_area_mask)[0]
+        B = B[:, _area_indices]
+        voxel_ids = voxel_ids[_area_indices]
+        centers = centers[_area_indices]
+        layers = layers[_area_indices]
+        if verbose:
+            print(f"  Areas filter: kept {len(_area_indices)} / "
+                  f"{len(_area_mask)} voxels "
+                  f"(areas: {selected_areas})")
 
     # Load muon data if needed
     nc_muon_weight_data = None
@@ -335,7 +373,9 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
 
     # --- Run greedy ---
     if args.per_area:
-        allocation = compute_per_area_N(args.N, verbose=verbose)
+        allocation = compute_per_area_N(
+            args.N, areas=selected_areas, verbose=verbose,
+        )
         all_selected_cols: list[int] = []
 
         if args.optimize == "muon-ge77":
@@ -543,6 +583,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             "N": args.N, "M": args.M, "m": args.m,
             "W": args.W,
             "area_ratios": area_ratios,
+            "areas": selected_areas,
             "seed": args.seed,
             "min_spacing": min_spacing,
             "per_area": args.per_area,
@@ -628,6 +669,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             W=args.W if args.W is not None else 1,
             min_spacing=min_spacing,
             per_area=args.per_area,
+            areas=selected_areas,
             muon_weight_k=args.muon_weight,
             seed=args.seed,
             deltas=deltas,

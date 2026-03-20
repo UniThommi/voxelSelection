@@ -94,6 +94,7 @@ def run_single_greedy_from_raw(
     W: int = 1,
     min_spacing: float = 0.0,
     per_area: bool = False,
+    areas: list[str] | None = None,
     muon_weight_k: float | None = None,
     seed: int = 42,
     dynamic: bool = False,
@@ -117,6 +118,18 @@ def run_single_greedy_from_raw(
         nnz = B.nnz
         density = nnz / (num_ncs * num_voxels) * 100 if num_ncs * num_voxels > 0 else 0
         print(f"  B: nnz={nnz:,} ({density:.4f}%)")
+
+    # Filter columns to requested areas.
+    # global_idx maps filtered column indices → original column indices so that
+    # returned selected_cols are always in the original (full) column space.
+    if areas is not None:
+        _area_mask = np.isin(layers, areas)
+        global_idx = np.where(_area_mask)[0]
+        B = B[:, global_idx]
+        centers = centers[global_idx]
+        layers = layers[global_idx]
+    else:
+        global_idx = np.arange(num_voxels)
 
     # Use cached muon data if available, otherwise load
     nc_muon_weight_data = None
@@ -153,8 +166,8 @@ def run_single_greedy_from_raw(
             )
 
     if per_area:
-        allocation = compute_per_area_N(N, verbose=False)
-        all_selected: list[int] = []
+        allocation = compute_per_area_N(N, areas=areas, verbose=False)
+        all_selected_filtered: list[int] = []
 
         if optimize == "muon-ge77":
             shared_nc_detected = np.zeros(B.shape[0], dtype=bool)
@@ -180,7 +193,7 @@ def run_single_greedy_from_raw(
                     min_spacing=min_spacing, dynamic=dynamic,
                     worst=worst, verbose=False,
                 )
-                all_selected.extend(int(area_indices[i]) for i in sel_local)
+                all_selected_filtered.extend(int(area_indices[i]) for i in sel_local)
             elif optimize == "muon-ge77":
                 sel_local, _, nc_det, muon_det, _ = greedy_select_muon(
                     B_area, N=n_area, W=W,
@@ -193,21 +206,23 @@ def run_single_greedy_from_raw(
                     muon_weight_k=muon_weight_k,
                     dynamic=dynamic, worst=worst, verbose=False,
                 )
-                all_selected.extend(int(area_indices[i]) for i in sel_local)
+                all_selected_filtered.extend(int(area_indices[i]) for i in sel_local)
                 shared_nc_detected |= nc_det
                 shared_muon_counts += muon_det
             del B_area
 
-        selected_cols = all_selected
+        # Map filtered-column indices back to original global column indices
+        selected_cols_filtered = all_selected_filtered
         if optimize == "nc":
             coverage_counts = np.zeros(B.shape[0], dtype=np.int16)
-            for col in selected_cols:
+            for col in selected_cols_filtered:
                 s, e = B.indptr[col], B.indptr[col + 1]
                 coverage_counts[B.indices[s:e]] += 1
             final_eff = int(np.sum(coverage_counts >= M)) / B.shape[0]
         else:
             n_det = int(np.sum(shared_muon_counts >= W))
             final_eff = n_det / num_ge77_muons if num_ge77_muons > 0 else 0.0
+        selected_cols = [int(global_idx[i]) for i in selected_cols_filtered]
     else:
         if optimize == "nc":
             mw_kwargs = {}
@@ -217,7 +232,7 @@ def run_single_greedy_from_raw(
                     "nc_to_muon_local": nc_muon_weight_data["nc_to_muon_local"],
                     "num_muons": nc_muon_weight_data["num_muons"],
                 }
-            selected_cols, effs, _, _ = greedy_select_nc(
+            selected_cols_filtered, effs, _, _ = greedy_select_nc(
                 B, N=N, M=M,
                 centers=centers, layers=layers,
                 min_spacing=min_spacing, dynamic=dynamic,
@@ -225,7 +240,7 @@ def run_single_greedy_from_raw(
             )
             final_eff = effs[-1] if effs else 0.0
         elif optimize == "muon-ge77":
-            selected_cols, effs, _, _, _ = greedy_select_muon(
+            selected_cols_filtered, effs, _, _, _ = greedy_select_muon(
                 B, N=N, W=W,
                 nc_to_muon_local=nc_to_muon_local,
                 eligible_nc_mask=eligible_nc_mask,
@@ -237,6 +252,8 @@ def run_single_greedy_from_raw(
                 dynamic=dynamic, worst=worst, verbose=False,
             )
             final_eff = effs[-1] if effs else 0.0
+        # Map filtered-column indices back to original global column indices
+        selected_cols = [int(global_idx[i]) for i in selected_cols_filtered]
 
     del B
     return selected_cols, final_eff
@@ -256,6 +273,7 @@ def run_sensitivity(
     W: int = 1,
     min_spacing: float = 0.0,
     per_area: bool = False,
+    areas: list[str] | None = None,
     muon_weight_k: float | None = None,
     seed: int = 42,
     deltas: list[float] | None = None,
@@ -317,6 +335,8 @@ def run_sensitivity(
     if optimize == "muon-ge77":
         print(f"  W:           {W}")
     print(f"  Per-area:    {per_area}")
+    if areas is not None:
+        print(f"  Areas:       {areas}")
     print(f"  Spacing:     {min_spacing:.0f} mm")
     print(f"  Deltas:      {deltas}")
     print(f"  Nominal ratios: {area_ratios}")
@@ -375,7 +395,7 @@ def run_sensitivity(
             filepath=filepath,
             N=N, m=m, optimize=optimize,
             M=M, W=W, min_spacing=min_spacing,
-            per_area=per_area, muon_weight_k=muon_weight_k,
+            per_area=per_area, areas=areas, muon_weight_k=muon_weight_k,
             seed=seed, dynamic=dynamic, worst=worst,
             muon_cache=muon_cache, verbose=True,
         )
@@ -404,7 +424,7 @@ def run_sensitivity(
             filepath=filepath,
             N=N, m=m, optimize=optimize,
             M=M, W=W, min_spacing=min_spacing,
-            per_area=per_area, muon_weight_k=muon_weight_k,
+            per_area=per_area, areas=areas, muon_weight_k=muon_weight_k,
             seed=seed, dynamic=dynamic, worst=worst,
             muon_cache=muon_cache, verbose=True,
         )
@@ -445,7 +465,7 @@ def run_sensitivity(
     json_data = {
         "config": {
             "optimize": optimize, "N": N, "M": M, "m": m, "W": W,
-            "per_area": per_area, "min_spacing": min_spacing,
+            "per_area": per_area, "areas": areas, "min_spacing": min_spacing,
             "nominal_ratios": area_ratios,
             "muon_weight_k": muon_weight_k,
             "seed": seed, "deltas": deltas, "k_values": k_values,
