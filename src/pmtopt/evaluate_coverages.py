@@ -7,7 +7,7 @@ Evaluates multiple PMT configurations (given as JSON voxel lists)
 against a common SSD dataset. Produces:
 
   - NC coverage histograms (cumulative, M=0..8) per config
-  - Ge77 muon heatmaps (Accuracy, Precision, Recall) for W x Config, per M
+  - Ge77 muon heatmaps (Accuracy, Precision) for W x Config, per M
   - Confusion matrix text file for all (config, M, W) combinations
   - Summary text file with NC statistics
 
@@ -471,7 +471,7 @@ def plot_muon_heatmaps(
     verbose: bool = True,
 ) -> None:
     """
-    Per M: one figure with 3 heatmaps (Accuracy, Precision, Recall).
+    Per M: one figure with 3 heatmaps (Accuracy, Precision).
     Axes: W (y) x Config (x). Cell text = value.
     """
     config_labels = [c.label for c in configs]
@@ -479,12 +479,12 @@ def plot_muon_heatmaps(
 
     for M in M_values:
         fig, axes = plt.subplots(
-            1, 3, figsize=(max(6, num_configs * 1.8 + 2), len(W_values) * 0.8 + 3),
+            1, 2, figsize=(max(6, num_configs * 1.8 + 2), len(W_values) * 0.8 + 3),
             sharey=True,
         )
 
-        metric_names = ["Accuracy", "Precision", "Recall"]
-        cmaps = ["YlGn", "YlOrRd", "PuBu"]
+        metric_names = ["Accuracy", "Precision"]
+        cmaps = ["YlOrRd", "PuBu"]
 
         for mi, (metric_name, cmap) in enumerate(
             zip(metric_names, cmaps)
@@ -505,9 +505,6 @@ def plot_muon_heatmaps(
                         val = (TP + TN) / denom if denom > 0 else 0.0
                     elif metric_name == "Precision":
                         denom = TP + FP
-                        val = TP / denom if denom > 0 else 0.0
-                    elif metric_name == "Recall":
-                        denom = TP + FN
                         val = TP / denom if denom > 0 else 0.0
                     else:
                         val = 0.0
@@ -581,7 +578,7 @@ def write_confusion_txt(
 
         header = (f"{'Config':<25} {'M':>3} {'W':>3} "
                   f"{'TP':>8} {'FP':>8} {'TN':>10} {'FN':>8} "
-                  f"{'Acc':>8} {'Prec':>8} {'Rec':>8}\n")
+                  f"{'Acc':>8} {'Prec':>8}\n")
         f.write(header)
         f.write("-" * len(header) + "\n")
 
@@ -595,11 +592,10 @@ def write_confusion_txt(
                     total = TP + FP + TN + FN
                     acc = (TP + TN) / total if total > 0 else 0
                     prec = TP / (TP + FP) if (TP + FP) > 0 else 0
-                    rec = TP / (TP + FN) if (TP + FN) > 0 else 0
                     f.write(
                         f"{cfg.label:<25} {M:>3} {W:>3} "
                         f"{TP:>8} {FP:>8} {TN:>10} {FN:>8} "
-                        f"{acc:>8.4f} {prec:>8.4f} {rec:>8.4f}\n"
+                        f"{acc:>8.4f} {prec:>8.4f}\n"
                     )
             f.write("\n")
 
