@@ -282,6 +282,14 @@ def run_sensitivity(
     worst: bool = False,
     baseline_selected: list[int] | None = None,
     baseline_eff: float | None = None,
+    raw_rows: np.ndarray | None = None,
+    raw_cols: np.ndarray | None = None,
+    raw_vals: np.ndarray | None = None,
+    voxel_ids: np.ndarray | None = None,
+    centers: np.ndarray | None = None,
+    layers: np.ndarray | None = None,
+    num_ncs: int | None = None,
+    num_primaries: int | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -313,6 +321,14 @@ def run_sensitivity(
         Perturbation values. Default: [-0.20, -0.10, -0.05, +0.05, +0.10, +0.20].
     output_dir : str
         Directory for output files.
+    raw_rows, raw_cols, raw_vals : np.ndarray or None
+        Pre-loaded raw sparse data. If all provided together with voxel_ids,
+        centers, layers, num_ncs, and num_primaries, the internal
+        ``load_raw_sparse`` call is skipped.
+    voxel_ids, centers, layers : np.ndarray or None
+        Pre-loaded voxel metadata (required when raw arrays are provided).
+    num_ncs, num_primaries : int or None
+        Pre-loaded counts (required when raw arrays are provided).
     verbose : bool
         Print progress.
     """
@@ -346,11 +362,21 @@ def run_sensitivity(
     print(f"  Output dir:  {out_dir}")
     print()
 
-    # ---- Load raw data ONCE ----
-    print("Loading raw sparse data (one-time I/O)...")
-    (raw_rows, raw_cols, raw_vals,
-     voxel_ids, centers, layers_all,
-     num_ncs, num_primaries) = load_raw_sparse(filepath, verbose=True)
+    # ---- Load raw data ONCE (skip if pre-loaded data was supplied) ----
+    _preloaded = (
+        raw_rows is not None and raw_cols is not None and raw_vals is not None
+        and voxel_ids is not None and centers is not None and layers is not None
+        and num_ncs is not None and num_primaries is not None
+    )
+    if _preloaded:
+        layers_all = layers
+        if verbose:
+            print("Using pre-loaded raw sparse data (skipping HDF5 read).")
+    else:
+        print("Loading raw sparse data (one-time I/O)...")
+        (raw_rows, raw_cols, raw_vals,
+         voxel_ids, centers, layers_all,
+         num_ncs, num_primaries) = load_raw_sparse(filepath, verbose=True)
     num_voxels = len(voxel_ids)
 
     # ---- Pre-load muon data ONCE (avoids re-reading per perturbation) ----

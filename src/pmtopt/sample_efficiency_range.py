@@ -42,6 +42,7 @@ from scipy import sparse
 from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
 from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS
 from pmtopt.greedy import _apply_spacing, greedy_select_nc
+from pmtopt.sensitivity import run_sensitivity
 
 
 # ===================================================================
@@ -275,6 +276,8 @@ def sample_efficiency_range(
     min_spacing: float,
     tol: float,
     output_dir: Path,
+    sensitivity: bool,
+    deltas: list[float] | None,
     verbose: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -410,6 +413,7 @@ def sample_efficiency_range(
             "target": target,
             "achieved": achieved,
             "info": info,
+            "selected": final_selected,
         })
 
         if verbose:
@@ -437,6 +441,43 @@ def sample_efficiency_range(
 
     if verbose:
         print(f"\nSummary written to {summary_path}")
+
+    # ------------------------------------------------------------------
+    # Optional: sensitivity analysis on the best-case (greedy) config
+    # ------------------------------------------------------------------
+    if sensitivity:
+        if verbose:
+            print("\n" + "=" * 65)
+            print("Running sensitivity analysis for all setups")
+            print("=" * 65)
+        for r in results:
+            if verbose:
+                print(f"\n  -- {r['name']} (eff={r['achieved']:.4%}) --")
+            run_sensitivity(
+                filepath=hdf5_path,
+                N=N,
+                m=m,
+                area_ratios=area_ratios,
+                optimize="nc",
+                M=M,
+                min_spacing=min_spacing,
+                seed=seed,
+                deltas=deltas,
+                output_dir=str(output_dir / "sensitivity" / r["name"]),
+                baseline_selected=r["selected"],
+                baseline_eff=r["achieved"],
+                raw_rows=raw_rows,
+                raw_cols=raw_cols,
+                raw_vals=raw_vals,
+                voxel_ids=voxel_ids,
+                centers=centers,
+                layers=layers,
+                num_ncs=num_ncs,
+                num_primaries=num_primaries,
+                verbose=verbose,
+            )
+
+    if verbose:
         print("\nDone.")
 
 
@@ -477,6 +518,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--bot", type=float, default=None)
     parser.add_argument("--top", type=float, default=None)
     parser.add_argument("--wall", type=float, default=None)
+    parser.add_argument("--sensitivity", action="store_true",
+                        help="Run sensitivity analysis on the best-case "
+                             "(greedy) config after generating setups.")
+    parser.add_argument("--deltas", type=str, default=None,
+                        help="Comma-separated area-ratio perturbation values "
+                             "for sensitivity analysis (e.g. '-0.1,0.1'). "
+                             "Default: -0.20,-0.10,-0.05,+0.05,+0.10,+0.20.")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args(argv)
 
@@ -495,6 +543,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.wall is not None:
         area_ratios["wall"] = args.wall
 
+    deltas = None
+    if args.deltas is not None:
+        deltas = [float(d) for d in args.deltas.split(",")]
+
     sample_efficiency_range(
         hdf5_path=args.hdf5,
         N=args.N,
@@ -507,6 +559,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         min_spacing=args.min_spacing,
         tol=args.tol,
         output_dir=Path(args.output_dir),
+        sensitivity=args.sensitivity,
+        deltas=deltas,
         verbose=verbose,
     )
 
