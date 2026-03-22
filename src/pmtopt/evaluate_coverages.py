@@ -54,8 +54,8 @@ from pmtopt.data_loading import (
 # Constants
 # ===================================================================
 
-M_VALUES = list(range(1, 9))  # M = 1..8
-W_VALUES = list(range(1, 9))  # W = 1..8
+M_VALUES = list(range(1, 21))  # M = 1..20
+W_VALUES = list(range(1, 21))  # W = 1..20
 
 
 # ===================================================================
@@ -365,12 +365,12 @@ def plot_nc_coverage(
     verbose: bool = True,
 ) -> None:
     """
-    Bar chart: for each M (0..M_max), number of NCs with coverage >= M.
-    M=0 shows total NCs (= all NCs). Grouped bars per config.
+    Overview bar chart: for each M (1..M_max), number of NCs with
+    coverage >= M. Grouped bars per config.
 
     Annotations below: total NCs, visible, detected (M=1).
     """
-    M_range = list(range(0, M_max + 1))
+    M_range = list(range(1, M_max + 1))
     num_configs = len(configs)
     num_bars = len(M_range)
 
@@ -380,12 +380,7 @@ def plot_nc_coverage(
     colors = plt.cm.tab10.colors
 
     for ci, cfg in enumerate(configs):
-        counts = []
-        for M in M_range:
-            if M == 0:
-                counts.append(cfg.num_ncs)
-            else:
-                counts.append(cfg.num_detected.get(M, 0))
+        counts = [cfg.num_detected.get(M, 0) for M in M_range]
 
         x_pos = np.arange(num_bars) + ci * bar_width
         bars = ax.bar(
@@ -399,14 +394,10 @@ def plot_nc_coverage(
         for bi, (bar, count) in enumerate(zip(bars, counts)):
             if count == 0:
                 continue
-            M_val = M_range[bi]
             pct_total = count / cfg.num_ncs * 100
-            if M_val == 0:
-                txt = f"{count:,}"
-            else:
-                pct_vis = (count / cfg.num_visible * 100
-                           if cfg.num_visible > 0 else 0)
-                txt = f"{pct_total:.1f}%\n({pct_vis:.1f}%)"
+            pct_vis = (count / cfg.num_visible * 100
+                       if cfg.num_visible > 0 else 0)
+            txt = f"{pct_total:.1f}%\n({pct_vis:.1f}%)"
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height(),
@@ -418,7 +409,7 @@ def plot_nc_coverage(
     # X-axis
     ax.set_xticks(np.arange(num_bars) + bar_width * (num_configs - 1) / 2)
     ax.set_xticklabels(
-        ["All NCs"] + [f"M ≥ {M}" for M in M_range[1:]],
+        [f"M ≥ {M}" for M in M_range],
         fontsize=10,
     )
     ax.set_ylabel("Number of NCs", fontsize=12)
@@ -457,6 +448,60 @@ def plot_nc_coverage(
         print(f"  Saved: {out_path}")
 
 
+def plot_nc_coverage_per_m(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Per-M bar chart: for each M, one bar per config showing the number
+    of NCs with coverage >= M. Annotated with % of total and % of visible.
+    """
+    num_configs = len(configs)
+    colors = plt.cm.tab10.colors
+    bar_width = 0.8 / num_configs
+
+    for M in M_values:
+        fig, ax = plt.subplots(figsize=(max(6, num_configs * 1.2 + 2), 5))
+
+        for ci, cfg in enumerate(configs):
+            count = cfg.num_detected.get(M, 0)
+            bar = ax.bar(
+                ci * bar_width,
+                count,
+                bar_width,
+                label=cfg.label,
+                color=colors[ci % len(colors)],
+                edgecolor="white", linewidth=0.5,
+            )
+            if count > 0:
+                pct_total = count / cfg.num_ncs * 100
+                pct_vis = (count / cfg.num_visible * 100
+                           if cfg.num_visible > 0 else 0)
+                ax.text(
+                    ci * bar_width + bar_width / 2,
+                    count,
+                    f"{count:,}\n{pct_total:.1f}%\n({pct_vis:.1f}%)",
+                    ha="center", va="bottom",
+                    fontsize=8,
+                )
+
+        ax.set_xticks(np.arange(num_configs) * bar_width + bar_width / 2)
+        ax.set_xticklabels([cfg.label for cfg in configs],
+                           rotation=30, ha="right", fontsize=9)
+        ax.set_ylabel("Number of NCs", fontsize=11)
+        ax.set_title(f"NC Detection Coverage  M ≥ {M}", fontsize=12)
+        ax.grid(axis="y", alpha=0.3)
+        plt.tight_layout()
+
+        out_path = output_dir / f"nc_coverage_M{M}.png"
+        plt.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        if verbose:
+            print(f"  Saved: {out_path}")
+
+
 # ===================================================================
 # Plotting: Muon Ge77 heatmaps
 # ===================================================================
@@ -479,12 +524,12 @@ def plot_muon_heatmaps(
 
     for M in M_values:
         fig, axes = plt.subplots(
-            1, 2, figsize=(max(6, num_configs * 1.8 + 2), len(W_values) * 0.8 + 3),
+            1, 3, figsize=(max(9, num_configs * 2.4 + 2), len(W_values) * 0.8 + 3),
             sharey=True,
         )
 
-        metric_names = ["Accuracy", "Precision"]
-        cmaps = ["YlOrRd", "PuBu"]
+        metric_names = ["Accuracy", "Precision", "Specificity"]
+        cmaps = ["YlOrRd", "PuBu", "Greens"]
 
         for mi, (metric_name, cmap) in enumerate(
             zip(metric_names, cmaps)
@@ -506,6 +551,9 @@ def plot_muon_heatmaps(
                     elif metric_name == "Precision":
                         denom = TP + FP
                         val = TP / denom if denom > 0 else 0.0
+                    elif metric_name == "Specificity":
+                        denom = TN + FP
+                        val = TN / denom if denom > 0 else 0.0
                     else:
                         val = 0.0
 
@@ -662,9 +710,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Hit threshold per voxel for binarization.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for stochastic rounding.")
-    parser.add_argument("--M-max", type=int, default=8,
+    parser.add_argument("--M-max", type=int, default=20,
                         help="Maximum M value to evaluate.")
-    parser.add_argument("--W-max", type=int, default=8,
+    parser.add_argument("--W-max", type=int, default=20,
                         help="Maximum W value to evaluate.")
 
     # Area ratios
@@ -844,8 +892,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("Generating output")
         print("=" * 65)
 
-    # NC histogram
+    # NC histogram (overview)
     plot_nc_coverage(all_configs, args.M_max, output_dir, verbose=verbose)
+
+    # NC histogram per M
+    plot_nc_coverage_per_m(all_configs, M_values, output_dir, verbose=verbose)
 
     # Muon heatmaps
     plot_muon_heatmaps(
