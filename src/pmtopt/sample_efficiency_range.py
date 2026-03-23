@@ -64,7 +64,8 @@ def stochastic_greedy_nc_m1(
     At each step:
     - With probability (1 - f): pick the voxel with highest marginal gain
       (standard greedy choice).
-    - With probability f: pick a uniformly random available voxel.
+    - With probability f: pick the voxel with lowest marginal gain
+      (anti-greedy choice), interpolating toward worst-case behaviour.
 
     Parameters
     ----------
@@ -102,14 +103,14 @@ def stochastic_greedy_nc_m1(
     min_spacing_sq = min_spacing ** 2
 
     for _ in range(N):
+        at_m1 = (coverage_counts == 0)
+        gains = B.T.dot(at_m1.astype(np.int32))
         if rng.random() < f:
-            # Random pick among available voxels
-            avail_idx = np.where(available)[0]
-            best_voxel = int(rng.choice(avail_idx))
+            # Anti-greedy pick: voxel with fewest undetected NCs
+            gains[~available] = gains.max() + 1
+            best_voxel = int(np.argmin(gains))
         else:
             # Greedy pick: voxel with most undetected NCs
-            at_m1 = (coverage_counts == 0)
-            gains = B.T.dot(at_m1.astype(np.int32))
             gains[~available] = -1
             best_voxel = int(np.argmax(gains))
 

@@ -689,17 +689,33 @@ def run_generate(geometry: str, output_dir: str) -> None:
     print("Done.")
 
 
-def run_select(geometry: str, N: int, areas: list, output_dir: str) -> None:
+def load_all_voxels_json(path: str) -> list[dict]:
+    """Load voxels from JSON (bare list or greedy/homogeneous wrapper)."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "selected_voxels" in data:
+        return data["selected_voxels"]
+    raise ValueError(
+        f"{path}: expected a list or a dict with 'selected_voxels', "
+        f"got {type(data).__name__}"
+    )
+
+
+def run_select(geometry: str, N: int, areas: list, output_dir: str,
+               all_voxels_path: str) -> None:
     print(f"Mode: select | geometry: {geometry} | N={N} | areas={areas}")
+    print(f"  All-voxels file: {all_voxels_path}")
     os.makedirs(output_dir, exist_ok=True)
     stem = build_output_stem("select", geometry, N, areas)
 
-    # Generate voxels only for requested areas
+    # Load candidate pool from the provided JSON, grouped by area
+    all_voxels_list = load_all_voxels_json(all_voxels_path)
     voxels_by_area: dict = {}
     for area in areas:
-        print(f"  Generating {area} voxels...", end="", flush=True)
-        voxels_by_area[area] = generate_voxels_for_area(area)
-        print(f" {len(voxels_by_area[area])} voxels")
+        voxels_by_area[area] = [v for v in all_voxels_list if v.get("layer") == area]
+        print(f"  Loaded {len(voxels_by_area[area])} {area} voxels from file")
 
     # Area-proportional allocation
     allocation = allocate_N_per_area(N, areas)
@@ -803,14 +819,27 @@ Examples (via unified CLI):
         "--output-dir", default=".",
         help="Directory to write output files to. Created if it does not exist. Default: '.'",
     )
+    parser.add_argument(
+        "--all-voxels", default=None,
+        help=(
+            "Path to the all-voxels JSON file used as the candidate pool "
+            "(required for select mode). Voxels are grouped by their 'layer' "
+            "field; for each area the Fibonacci ideal positions are snapped to "
+            "the nearest voxel center from this file. Use 'generate' mode first "
+            "to create this file, or supply the HDF5-derived voxel list."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
     if args.mode == "select":
         if args.num_voxels < 1:
             parser.error("-N must be a positive integer.")
+        if args.all_voxels is None:
+            parser.error("--all-voxels is required for select mode.")
         areas = sorted(set(args.areas), key=VALID_AREAS.index)
-        run_select(args.geometry, args.num_voxels, areas, args.output_dir)
+        run_select(args.geometry, args.num_voxels, areas, args.output_dir,
+                   args.all_voxels)
     else:
         run_generate(args.geometry, args.output_dir)
 
