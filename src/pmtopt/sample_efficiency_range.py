@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Sample 12 NC configurations spanning [eff_min, eff_max] evenly.
-============================================================
+Sample N_CONFIGS NC configurations spanning the efficiency range.
+=================================================================
 
-Generates N_CONFIGS PMT configurations (default: 12) with ncM1m1 settings
-whose NC detection efficiencies are as evenly spaced as possible between
-the worst-case (``--worst`` greedy) and best-case (greedy) outcomes.
+Generates N_CONFIGS PMT configurations with ncM1m1 settings spanning
+the full range from worst-case to best-case NC detection efficiency.
 
 Algorithm
 ---------
-1. Greedy run  → eff_max  (setup_09)
-2. Worst-case greedy run → eff_min  (setup_00)
-3. 8 intermediate target efficiencies, linearly spaced in (eff_min, eff_max)
-4. For each target: binary search on ``random_fraction`` f ∈ [0, 1] where
-   the greedy step picks the best voxel with probability (1-f) and a random
-   valid voxel with probability f.  Average over ``--avg-seeds`` runs per f
-   for stability.
+1. Greedy run        → eff_max  (setup_00, best)
+2. Worst-case greedy → eff_min  (setup_01, worst)
+3. n-2 intermediate configs with f = linspace(0, 1, n)[1:-1], where
+   f is the per-step probability of picking the best voxel. An exponential
+   correction keeps the running greedy-pick count close to f * N.
 
 Usage
 -----
@@ -30,12 +27,13 @@ Author: Thomas Buerger (University of Tübingen)
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 from typing import Optional
-import matplotlib.pyplot as plt
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import h5py
 import numpy as np
 from scipy import sparse
@@ -311,7 +309,7 @@ def sample_efficiency_range(
 
     # Best case: greedy
     t0 = time.time()
-    sel_best, effs_best, cov_best, _ = greedy_select_nc(
+    sel_best, effs_best, _, _ = greedy_select_nc(
         B, N, M,
         centers=centers, layers=layers, min_spacing=min_spacing,
         verbose=verbose,
@@ -322,7 +320,7 @@ def sample_efficiency_range(
 
     # Worst case
     t0 = time.time()
-    sel_worst, effs_worst, cov_worst, _ = greedy_select_nc(
+    sel_worst, effs_worst, _, _ = greedy_select_nc(
         B, N, M,
         centers=centers, layers=layers, min_spacing=min_spacing,
         worst=True, verbose=verbose,
