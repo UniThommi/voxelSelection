@@ -62,10 +62,10 @@ def stochastic_greedy_nc_m1(
     Run a stochastic greedy selection for M=1 NC coverage.
 
     At each step:
-    - With probability (1 - f): pick the voxel with highest marginal gain
-      (standard greedy choice).
-    - With probability f: pick the voxel with lowest marginal gain
-      (anti-greedy choice), interpolating toward worst-case behaviour.
+    - With probability f: pick the voxel with highest marginal gain
+      (greedy choice).
+    - With probability (1 - f): pick the voxel with lowest marginal gain
+      (anti-greedy choice).
 
     Parameters
     ----------
@@ -74,7 +74,8 @@ def stochastic_greedy_nc_m1(
     N : int
         Number of voxels to select.
     f : float
-        Random fraction in [0, 1]. f=0 → pure greedy, f=1 → pure random.
+        Probability of greedy (best) pick in [0, 1].
+        f=1 → pure greedy, f=0 → pure anti-greedy.
     rng : np.random.Generator
         Random number generator.
     centers : np.ndarray, shape (num_voxels, 3)
@@ -106,13 +107,13 @@ def stochastic_greedy_nc_m1(
         at_m1 = (coverage_counts == 0)
         gains = B.T.dot(at_m1.astype(np.int32))
         if rng.random() < f:
-            # Anti-greedy pick: voxel with fewest undetected NCs
-            gains[~available] = gains.max() + 1
-            best_voxel = int(np.argmin(gains))
-        else:
             # Greedy pick: voxel with most undetected NCs
             gains[~available] = -1
             best_voxel = int(np.argmax(gains))
+        else:
+            # Anti-greedy pick: voxel with fewest undetected NCs
+            gains[~available] = gains.max() + 1
+            best_voxel = int(np.argmin(gains))
 
         # Update coverage
         s, e = B.indptr[best_voxel], B.indptr[best_voxel + 1]
@@ -127,75 +128,6 @@ def stochastic_greedy_nc_m1(
     efficiency = float(np.sum(coverage_counts >= 1)) / num_ncs
     return selected, coverage_counts, efficiency
 
-
-def eval_fraction(
-    f: float,
-    B: sparse.csc_matrix,
-    N: int,
-    centers: np.ndarray,
-    layers: np.ndarray,
-    min_spacing: float,
-    seeds: list[int],
-) -> float:
-    """
-    Average efficiency over multiple random seeds for a given fraction f.
-    """
-    effs = []
-    for seed in seeds:
-        rng = np.random.default_rng(seed)
-        _, _, eff = stochastic_greedy_nc_m1(
-            B, N, f, rng, centers, layers, min_spacing
-        )
-        effs.append(eff)
-    return float(np.mean(effs))
-
-
-def find_fraction_for_target(
-    target: float,
-    B: sparse.csc_matrix,
-    N: int,
-    centers: np.ndarray,
-    layers: np.ndarray,
-    min_spacing: float,
-    seeds: list[int],
-    tol: float = 0.002,
-    max_iter: int = 20,
-) -> tuple[float, float]:
-    """
-    Binary search for the random fraction f that achieves ``target`` efficiency.
-
-    Returns
-    -------
-    best_f : float
-        The fraction closest to producing ``target`` efficiency.
-    achieved_eff : float
-        Average efficiency at ``best_f``.
-    """
-    lo, hi = 0.0, 1.0
-    eff_lo = eval_fraction(lo, B, N, centers, layers, min_spacing, seeds)
-    eff_hi = eval_fraction(hi, B, N, centers, layers, min_spacing, seeds)
-
-    # f=0 → high eff, f=1 → lower eff; target should be in [eff_hi, eff_lo]
-    if target >= eff_lo:
-        return lo, eff_lo
-    if target <= eff_hi:
-        return hi, eff_hi
-
-    best_f, best_diff = lo, abs(eff_lo - target)
-    for _ in range(max_iter):
-        mid = (lo + hi) / 2.0
-        eff_mid = eval_fraction(mid, B, N, centers, layers, min_spacing, seeds)
-        diff = abs(eff_mid - target)
-        if diff < best_diff:
-            best_f, best_diff = mid, diff
-        if best_diff <= tol:
-            break
-        if eff_mid > target:
-            lo = mid
-        else:
-            hi = mid
-
-    return best_f, eval_fraction(best_f, B, N, centers, layers, min_spacing, seeds)
 
 
 # ===================================================================
@@ -272,10 +204,8 @@ def sample_efficiency_range(
     m: int,
     n_configs: int,
     seed: int,
-    avg_seeds: int,
     area_ratios: dict,
     min_spacing: float,
-    tol: float,
     output_dir: Path,
     sensitivity: bool,
     deltas: list[float] | None,
@@ -341,59 +271,28 @@ def sample_efficiency_range(
         print(f"  Worst-case:     eff_min = {eff_min:.4%}  ({time.time()-t0:.1f}s)")
 
     # ------------------------------------------------------------------
-    # Step 2: define target efficiencies
+    # Step 2: f values for intermediate configs
     # ------------------------------------------------------------------
-    targets = [
-        eff_min + i * (eff_max - eff_min) / (n_configs - 1)
-        for i in range(n_configs)
-    ]
+    # n_configs total: setup_00 (best), setup_01 (worst), then n-2 intermediate.
+    # f[k] = probability of picking the best voxel at each greedy step.
+    # f = linspace(0, 1, n_configs)[1:-1] → n-2 values strictly in (0, 1).
+    f_values = np.linspace(0, 1, n_configs)[1:-1]
 
     if verbose:
-        print(f"\nTarget efficiencies ({n_configs} configs, "
-              f"step = {(eff_max - eff_min) / (n_configs - 1):.4%}):")
-        for i, t in enumerate(targets):
-            print(f"  setup_{i:02d}  target = {t:.4%}")
+        print(f"\nIntermediate f values ({len(f_values)} configs):")
+        print(f"  {np.array2string(f_values, precision=4)}")
 
     # ------------------------------------------------------------------
     # Step 3: generate configurations
     # ------------------------------------------------------------------
     if verbose:
         print("\n" + "=" * 65)
-        print("Step 3: generating intermediate configurations")
+        print("Step 3: generating configurations")
         print("=" * 65)
-
-    eval_seeds = [seed + 1000 + k for k in range(avg_seeds)]
 
     results: list[dict] = []
 
-    for i in range(n_configs):
-        target = targets[i]
-        t0 = time.time()
-
-        if i == 0:
-            # Worst-case config (deterministic)
-            final_selected = sel_worst
-            achieved = eff_min
-            info = "worst-case greedy (deterministic)"
-        elif i == n_configs - 1:
-            # Best-case config (deterministic)
-            final_selected = sel_best
-            achieved = eff_max
-            info = "greedy optimum (deterministic)"
-        else:
-            # Binary search on random_fraction
-            best_f, achieved = find_fraction_for_target(
-                target, B, N, centers, layers, min_spacing,
-                seeds=eval_seeds, tol=tol,
-            )
-            # Generate one final config at best_f with the main seed
-            rng = np.random.default_rng(seed + i)
-            final_selected, _, achieved_single = stochastic_greedy_nc_m1(
-                B, N, best_f, rng, centers, layers, min_spacing
-            )
-            achieved = achieved_single
-            info = f"stochastic f={best_f:.4f}"
-
+    def _add_result(i, final_selected, achieved, info):
         out_path = output_dir / f"setup_{i:02d}.json"
         write_setup_json(
             hdf5_path=hdf5_path,
@@ -408,19 +307,39 @@ def sample_efficiency_range(
             min_spacing=min_spacing,
             output_path=out_path,
         )
-
         results.append({
             "name": f"setup_{i:02d}",
-            "target": target,
             "achieved": achieved,
             "info": info,
             "selected": final_selected,
         })
-
         if verbose:
-            print(f"  setup_{i:02d}  target={target:.4%}  "
-                  f"achieved={achieved:.4%}  [{info}]  "
-                  f"({time.time()-t0:.1f}s)  -> {out_path.name}")
+            print(f"  setup_{i:02d}  achieved={achieved:.4%}  [{info}]"
+                  f"  -> {out_path.name}")
+
+    # setup_00: best (greedy, deterministic)
+    t0 = time.time()
+    _add_result(0, sel_best, eff_max, "greedy optimum (deterministic)")
+    if verbose:
+        print(f"    ({time.time()-t0:.1f}s)")
+
+    # setup_01: worst (anti-greedy, deterministic)
+    t0 = time.time()
+    _add_result(1, sel_worst, eff_min, "worst-case greedy (deterministic)")
+    if verbose:
+        print(f"    ({time.time()-t0:.1f}s)")
+
+    # setup_02 .. setup_{n-1}: intermediate, one run per f value
+    for k, f in enumerate(f_values):
+        i = k + 2
+        t0 = time.time()
+        rng = np.random.default_rng(seed + i)
+        final_selected, _, achieved = stochastic_greedy_nc_m1(
+            B, N, f, rng, centers, layers, min_spacing
+        )
+        _add_result(i, final_selected, achieved, f"stochastic f={f:.4f}")
+        if verbose:
+            print(f"    ({time.time()-t0:.1f}s)")
 
     # ------------------------------------------------------------------
     # Summary
@@ -431,14 +350,10 @@ def sample_efficiency_range(
         sf.write(f"# N={N}, M={M}, m={m}, seed={seed}\n")
         sf.write(f"# eff_min={eff_min:.6f}, eff_max={eff_max:.6f}\n")
         sf.write(f"# range={eff_max - eff_min:.6f}\n\n")
-        sf.write(f"{'Setup':<12} {'Target':>12} {'Achieved':>12} "
-                 f"{'Error':>8}  Notes\n")
-        sf.write("-" * 75 + "\n")
+        sf.write(f"{'Setup':<12} {'Achieved':>12}  Notes\n")
+        sf.write("-" * 60 + "\n")
         for r in results:
-            err = r["achieved"] - r["target"]
-            sf.write(f"{r['name']:<12} {r['target']:>10.4%} "
-                     f"{r['achieved']:>10.4%} {err:>+8.4%}  "
-                     f"{r['info']}\n")
+            sf.write(f"{r['name']:<12} {r['achieved']:>10.4%}  {r['info']}\n")
 
     if verbose:
         print(f"\nSummary written to {summary_path}")
@@ -506,11 +421,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Number of configurations to generate.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Base random seed.")
-    parser.add_argument("--avg-seeds", type=int, default=3,
-                        help="Number of seeds to average over per binary "
-                             "search evaluation (higher = more stable).")
-    parser.add_argument("--tol", type=float, default=0.002,
-                        help="Efficiency tolerance for binary search.")
     parser.add_argument("--min-spacing", type=float, default=2 * PMT_RADIUS,
                         help="Minimum voxel spacing on the same layer (mm).")
     parser.add_argument("--output-dir", type=str, default="setups",
@@ -555,10 +465,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         m=args.m,
         n_configs=args.n_configs,
         seed=args.seed,
-        avg_seeds=args.avg_seeds,
         area_ratios=area_ratios,
         min_spacing=args.min_spacing,
-        tol=args.tol,
         output_dir=Path(args.output_dir),
         sensitivity=args.sensitivity,
         deltas=deltas,
