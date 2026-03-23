@@ -34,6 +34,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+import matplotlib.pyplot as plt
 
 import h5py
 import numpy as np
@@ -57,15 +58,23 @@ def stochastic_greedy_nc_m1(
     centers: np.ndarray,
     layers: np.ndarray,
     min_spacing: float,
+    correction_strength: float = 2.0,
 ) -> tuple[list[int], np.ndarray, float]:
     """
     Run a stochastic greedy selection for M=1 NC coverage.
 
     At each step:
-    - With probability f: pick the voxel with highest marginal gain
+    - With adaptive probability p: pick the voxel with highest marginal gain
       (greedy choice).
-    - With probability (1 - f): pick the voxel with lowest marginal gain
+    - With probability (1 - p): pick the voxel with lowest marginal gain
       (anti-greedy choice).
+
+    The base probability is f, corrected exponentially by the running deficit
+    between expected and actual greedy picks:
+        deficit = f * step - greedy_count_so_far
+        p = clamp(f * exp(correction_strength * deficit / N), 0, 1)
+    A positive deficit (too few greedy picks so far) raises p; a negative
+    deficit lowers it, keeping the total greedy pick count close to f * N.
 
     Parameters
     ----------
@@ -74,7 +83,7 @@ def stochastic_greedy_nc_m1(
     N : int
         Number of voxels to select.
     f : float
-        Probability of greedy (best) pick in [0, 1].
+        Target probability of greedy (best) pick in [0, 1].
         f=1 → pure greedy, f=0 → pure anti-greedy.
     rng : np.random.Generator
         Random number generator.
@@ -84,6 +93,9 @@ def stochastic_greedy_nc_m1(
         Layer label per voxel.
     min_spacing : float
         Minimum distance between voxels on the same layer (mm).
+    correction_strength : float
+        Exponent scale for the adaptive correction. Higher values make the
+        probability react more aggressively to deficits. Default: 2.0.
 
     Returns
     -------
@@ -102,14 +114,21 @@ def stochastic_greedy_nc_m1(
     enforce_spacing = (min_spacing > 0 and centers is not None
                        and layers is not None)
     min_spacing_sq = min_spacing ** 2
+    greedy_count = 0
 
-    for _ in range(N):
+    for step in range(N):
         at_m1 = (coverage_counts == 0)
         gains = B.T.dot(at_m1.astype(np.int32))
-        if rng.random() < f:
+
+        # Adaptive probability: correct for running deficit vs target f * N
+        deficit = f * step - greedy_count
+        p = float(np.clip(f * np.exp(correction_strength * deficit / N), 0.0, 1.0))
+
+        if rng.random() < p:
             # Greedy pick: voxel with most undetected NCs
             gains[~available] = -1
             best_voxel = int(np.argmax(gains))
+            greedy_count += 1
         else:
             # Anti-greedy pick: voxel with fewest undetected NCs
             gains[~available] = gains.max() + 1
@@ -194,6 +213,47 @@ def write_setup_json(
 
 
 # ===================================================================
+# Plotting
+# ===================================================================
+
+def plot_coverage_vs_f(
+    results: list[dict],
+    f_values: np.ndarray,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot achieved NC detection efficiency vs greedy fraction f for all setups.
+
+    setup_00 (best) is plotted at f=1, setup_01 (worst) at f=0,
+    intermediate setups at their respective f values. Points are sorted by f.
+    """
+    # Assign f values: index 0 → best (f=1), index 1 → worst (f=0), rest → f_values
+    f_per_result = [1.0, 0.0] + list(f_values)
+    pairs = sorted(
+        zip(f_per_result, [r["achieved"] for r in results]),
+        key=lambda x: x[0],
+    )
+    fs, effs = zip(*pairs)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(fs, effs, "o-", color="steelblue", markersize=6, linewidth=1.5)
+    ax.set_xlabel("f  (probability of greedy pick)")
+    ax.set_ylabel("NC detection efficiency")
+    ax.set_title("NC coverage vs greedy fraction f")
+    ax.set_xlim(-0.05, 1.05)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    out_path = output_dir / "coverage_vs_f.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+    if verbose:
+        print(f"Coverage plot saved to {out_path}")
+
+
+# ===================================================================
 # Main sampling logic
 # ===================================================================
 
@@ -209,6 +269,7 @@ def sample_efficiency_range(
     output_dir: Path,
     sensitivity: bool,
     deltas: list[float] | None,
+    correction_strength: float,
     verbose: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -335,7 +396,7 @@ def sample_efficiency_range(
         t0 = time.time()
         rng = np.random.default_rng(seed + i)
         final_selected, _, achieved = stochastic_greedy_nc_m1(
-            B, N, f, rng, centers, layers, min_spacing
+            B, N, f, rng, centers, layers, min_spacing, correction_strength
         )
         _add_result(i, final_selected, achieved, f"stochastic f={f:.4f}")
         if verbose:
@@ -357,6 +418,11 @@ def sample_efficiency_range(
 
     if verbose:
         print(f"\nSummary written to {summary_path}")
+
+    # ------------------------------------------------------------------
+    # Coverage plot
+    # ------------------------------------------------------------------
+    plot_coverage_vs_f(results, f_values, output_dir, verbose=verbose)
 
     # ------------------------------------------------------------------
     # Optional: sensitivity analysis on the best-case (greedy) config
@@ -423,6 +489,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Base random seed.")
     parser.add_argument("--min-spacing", type=float, default=2 * PMT_RADIUS,
                         help="Minimum voxel spacing on the same layer (mm).")
+    parser.add_argument("--correction-strength", type=float, default=2.0,
+                        help="Exponent scale for the adaptive f-correction. "
+                             "Higher values react more aggressively to "
+                             "greedy-pick deficits. Default: 2.0.")
     parser.add_argument("--output-dir", type=str, default="setups",
                         help="Output directory for setup JSON files.")
     parser.add_argument("--pit", type=float, default=None)
@@ -467,6 +537,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         seed=args.seed,
         area_ratios=area_ratios,
         min_spacing=args.min_spacing,
+        correction_strength=args.correction_strength,
         output_dir=Path(args.output_dir),
         sensitivity=args.sensitivity,
         deltas=deltas,
