@@ -39,9 +39,38 @@ import numpy as np
 from scipy import sparse
 
 from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
-from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS
+from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS, compute_nn_homogeneity
 from pmtopt.greedy import _apply_spacing, greedy_select_nc
 from pmtopt.sensitivity import run_sensitivity
+
+
+# ===================================================================
+# CV helper
+# ===================================================================
+
+_LAYERS_ALL = ["pit", "bot", "top", "wall"]
+
+
+def _aggregate_cv(
+    selected_cols: list[int],
+    centers: np.ndarray,
+    layers: np.ndarray,
+) -> float | None:
+    """N-weighted aggregate CV of NN distances across layers for selected voxels."""
+    sel_centers = centers[selected_cols]
+    sel_layers = layers[selected_cols]
+    total_n = 0
+    weighted_sum = 0.0
+    for layer in _LAYERS_ALL:
+        mask = sel_layers == layer
+        n = int(mask.sum())
+        if n < 2:
+            continue
+        hom = compute_nn_homogeneity(sel_centers[mask], layer)
+        if hom is not None:
+            weighted_sum += hom["cv"] * n
+            total_n += n
+    return weighted_sum / total_n if total_n > 0 else None
 
 
 # ===================================================================
@@ -366,14 +395,28 @@ def sample_efficiency_range(
             min_spacing=min_spacing,
             output_path=out_path,
         )
+        cv = _aggregate_cv(final_selected, centers, layers)
+        sel_centers = centers[final_selected]
+        sel_layers = layers[final_selected]
+        cv_layers: dict[str, float | None] = {}
+        for layer in _LAYERS_ALL:
+            mask = sel_layers == layer
+            if mask.sum() < 2:
+                cv_layers[layer] = None
+                continue
+            hom = compute_nn_homogeneity(sel_centers[mask], layer)
+            cv_layers[layer] = hom["cv"] if hom is not None else None
         results.append({
             "name": f"setup_{i:02d}",
             "achieved": achieved,
+            "cv": cv,
+            "cv_layers": cv_layers,
             "info": info,
             "selected": final_selected,
         })
+        cv_str = f"{cv:.4f}" if cv is not None else "N/A"
         if verbose:
-            print(f"  setup_{i:02d}  achieved={achieved:.4%}  [{info}]"
+            print(f"  setup_{i:02d}  achieved={achieved:.4%}  CV={cv_str}  [{info}]"
                   f"  -> {out_path.name}")
 
     # setup_00: best (greedy, deterministic)
@@ -409,10 +452,23 @@ def sample_efficiency_range(
         sf.write(f"# N={N}, M={M}, m={m}, seed={seed}\n")
         sf.write(f"# eff_min={eff_min:.6f}, eff_max={eff_max:.6f}\n")
         sf.write(f"# range={eff_max - eff_min:.6f}\n\n")
-        sf.write(f"{'Setup':<12} {'Achieved':>12}  Notes\n")
-        sf.write("-" * 60 + "\n")
+        sf.write(
+            f"{'Setup':<12} {'Achieved':>12} {'CV (agg)':>10}"
+            f" {'CV pit':>8} {'CV bot':>8} {'CV top':>8} {'CV wall':>8}  Notes\n"
+        )
+        sf.write("-" * 90 + "\n")
         for r in results:
-            sf.write(f"{r['name']:<12} {r['achieved']:>10.4%}  {r['info']}\n")
+            cv_str = f"{r['cv']:.4f}" if r["cv"] is not None else "N/A"
+            layer_strs = {
+                layer: (f"{r['cv_layers'][layer]:.4f}"
+                        if r["cv_layers"].get(layer) is not None else "N/A")
+                for layer in _LAYERS_ALL
+            }
+            sf.write(
+                f"{r['name']:<12} {r['achieved']:>10.4%} {cv_str:>10}"
+                f" {layer_strs['pit']:>8} {layer_strs['bot']:>8}"
+                f" {layer_strs['top']:>8} {layer_strs['wall']:>8}  {r['info']}\n"
+            )
 
     if verbose:
         print(f"\nSummary written to {summary_path}")
