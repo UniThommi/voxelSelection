@@ -257,19 +257,36 @@ def plot_coverage_vs_f(
     """
     # Assign f values: index 0 → best (f=1), index 1 → worst (f=0), rest → f_values
     f_per_result = [1.0, 0.0] + list(f_values)
-    pairs = sorted(
+    pairs_eff = sorted(
         zip(f_per_result, [r["achieved"] for r in results]),
         key=lambda x: x[0],
     )
-    fs, effs = zip(*pairs)
+    pairs_cv = sorted(
+        [(f, r["cv"]) for f, r in zip(f_per_result, results) if r["cv"] is not None],
+        key=lambda x: x[0],
+    )
+    fs, effs = zip(*pairs_eff)
+
+    cv_color = "darkorange"
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(fs, effs, "o-", color="steelblue", markersize=6, linewidth=1.5)
+    ax.plot(fs, effs, "o-", color="steelblue", markersize=6, linewidth=1.5,
+            label="NC efficiency")
     ax.set_xlabel("f  (probability of greedy pick)")
-    ax.set_ylabel("NC detection efficiency")
-    ax.set_title("NC coverage vs greedy fraction f")
+    ax.set_ylabel("NC detection efficiency", color="steelblue")
+    ax.tick_params(axis="y", labelcolor="steelblue")
+    ax.set_title("NC coverage and NN-spacing CV vs greedy fraction f")
     ax.set_xlim(-0.05, 1.05)
     ax.grid(True, alpha=0.3)
+
+    if pairs_cv:
+        fs_cv, cvs = zip(*pairs_cv)
+        ax2 = ax.twinx()
+        ax2.plot(fs_cv, cvs, "s--", color=cv_color, markersize=5, linewidth=1.5,
+                 label="CV (agg)")
+        ax2.set_ylabel("Aggregate CV (NN homogeneity)", color=cv_color)
+        ax2.tick_params(axis="y", labelcolor=cv_color)
+        ax2.set_ylim(bottom=0)
     fig.tight_layout()
 
     out_path = output_dir / "coverage_vs_f.png"
