@@ -151,3 +151,43 @@ def is_valid_pmt_position(
         return z_min_allowed <= z <= z_max_allowed
 
     return False
+
+
+def compute_nn_homogeneity(centers: np.ndarray, layer: str) -> dict | None:
+    """Coefficient of variation (std/mean) of nearest-neighbour distances.
+
+    Wall uses geodesic distance sqrt((R_ZYLINDER × Δφ)² + Δz²);
+    all other layers use 3-D Euclidean distance.
+
+    Returns None if fewer than 2 voxels are provided.
+    """
+    n = len(centers)
+    if n < 2:
+        return None
+
+    if layer == "wall":
+        phi = np.arctan2(centers[:, 1], centers[:, 0])
+        z = centers[:, 2]
+        dphi = phi[:, None] - phi[None, :]
+        dphi = (dphi + np.pi) % (2.0 * np.pi) - np.pi
+        arc = R_ZYLINDER * np.abs(dphi)
+        dz = z[:, None] - z[None, :]
+        dists = np.sqrt(arc ** 2 + dz ** 2)
+    else:
+        diffs = centers[:, None, :] - centers[None, :, :]
+        dists = np.sqrt(np.sum(diffs ** 2, axis=2))
+
+    np.fill_diagonal(dists, np.inf)
+    nn_dists = dists.min(axis=1)
+
+    mean = float(nn_dists.mean())
+    std  = float(nn_dists.std())
+    cv   = std / mean if mean > 0.0 else 0.0
+
+    return {
+        "cv":      cv,
+        "nn_mean": mean,
+        "nn_std":  std,
+        "nn_min":  float(nn_dists.min()),
+        "nn_max":  float(nn_dists.max()),
+    }

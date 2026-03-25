@@ -41,6 +41,7 @@ from pmtopt.geometry import (
     DEFAULT_AREA_RATIOS,
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
+    compute_nn_homogeneity,
 )
 from pmtopt.data_loading import (
     load_raw_sparse,
@@ -57,6 +58,11 @@ from pmtopt.data_loading import (
 M_VALUES = list(range(1, 21))  # M = 1..20
 W_VALUES = list(range(1, 21))  # W = 1..20
 
+# CV plot helpers
+_LAYERS_ORDERED = ["pit", "bot", "top", "wall"]
+_LAYER_COLORS = {"pit": "#4C72B0", "bot": "#DD8452", "top": "#55A868", "wall": "#C44E52"}
+_SCATTER_M_VALUES = [1, 2, 4, 6, 8, 10, 12, 15, 20]
+
 
 # ===================================================================
 # Data structures
@@ -69,6 +75,8 @@ class ConfigResult:
         self.name = name
         self.label = label
         self.voxel_ids = voxel_ids
+        self.voxel_dicts: list[dict] = []          # full voxel objects from JSON (center, layer, …)
+        self.cv_per_layer: dict[str, float | None] = {}  # CV of NN spacing per layer
         self.col_indices: np.ndarray | None = None
 
         # NC coverage: coverage_counts[nc] = #selected voxels seeing NC
@@ -118,30 +126,32 @@ class EvalData:
 # Loading
 # ===================================================================
 
-def load_config_json(json_path: str) -> tuple[list[str], dict]:
-    """Load voxel IDs and full config from a greedy result JSON.
+def load_config_json(json_path: str) -> tuple[list[str], list[dict], dict]:
+    """Load voxel IDs, voxel dicts, and config metadata from a JSON file.
 
     Supports two formats:
     - Greedy result: dict with ``selected_voxels`` list of objects with
-      ``index`` keys, and optional ``config`` metadata.
-    - Plain list: a JSON array of voxel ID strings.
+      ``index``, ``center``, ``layer`` keys, and optional ``config`` metadata.
+    - Plain list: a JSON array of voxel dicts with ``index``, ``center``,
+      ``layer`` (e.g. homogeneous output).
+    Returns (voxel_ids, voxel_dicts, metadata_dict).
     """
     with open(json_path, "r") as f:
         data = json.load(f)
 
     if isinstance(data, list):
-        voxel_ids = [
-            v["index"] if isinstance(v, dict) else v for v in data
-        ]
+        raw_list = data
+        voxel_ids = [v["index"] if isinstance(v, dict) else v for v in raw_list]
+        voxel_dicts = [v for v in raw_list if isinstance(v, dict)]
         data = {}
     else:
-        voxels = data.get("selected_voxels", [])
-        voxel_ids = [v["index"] for v in voxels]
+        voxel_dicts = data.get("selected_voxels", [])
+        voxel_ids = [v["index"] for v in voxel_dicts]
 
     if len(voxel_ids) == 0:
         raise ValueError(f"No voxels found in {json_path}")
 
-    return voxel_ids, data
+    return voxel_ids, voxel_dicts, data
 
 
 def load_shared_data(
@@ -262,6 +272,39 @@ def load_shared_data(
         print(f"Ge77 muons: {ed.num_ge77_muons:,}")
 
     return ed
+
+
+# ===================================================================
+# CV computation
+# ===================================================================
+
+def compute_config_cv(voxel_dicts: list[dict]) -> dict[str, float | None]:
+    """CV of NN distances per layer from voxel dicts (need 'center' and 'layer')."""
+    result: dict[str, float | None] = {}
+    for layer in _LAYERS_ORDERED:
+        layer_voxels = [v for v in voxel_dicts if v.get("layer") == layer]
+        if len(layer_voxels) < 2:
+            result[layer] = None
+            continue
+        centers = np.array([v["center"] for v in layer_voxels], dtype=float)
+        hom = compute_nn_homogeneity(centers, layer)
+        result[layer] = hom["cv"] if hom is not None else None
+    return result
+
+
+def _aggregate_cv(cfg: "ConfigResult") -> float | None:
+    """N-weighted mean CV across layers. Returns None if no CV data."""
+    if not cfg.cv_per_layer or not cfg.voxel_dicts:
+        return None
+    total_n = 0
+    weighted_sum = 0.0
+    for layer, cv in cfg.cv_per_layer.items():
+        if cv is None:
+            continue
+        n = sum(1 for v in cfg.voxel_dicts if v.get("layer") == layer)
+        weighted_sum += cv * n
+        total_n += n
+    return weighted_sum / total_n if total_n > 0 else None
 
 
 # ===================================================================
@@ -680,6 +723,288 @@ def write_nc_summary_txt(
 
 
 # ===================================================================
+# Plotting: CV vs coverage (Options 1 / 1b / 2 / 3)
+# ===================================================================
+
+def plot_coverage_cv_overview(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Option 1: Two-panel — coverage(M) line curves (top) + CV grouped bars per layer (bottom)."""
+    tab_colors = plt.cm.tab10.colors
+    cv_configs = [(ci, cfg) for ci, cfg in enumerate(configs) if cfg.cv_per_layer]
+
+    fig, (ax_cov, ax_cv) = plt.subplots(
+        2, 1, figsize=(14, 10),
+        gridspec_kw={"height_ratios": [2, 1]},
+    )
+
+    # --- Top panel: coverage curves ---
+    for ci, cfg in enumerate(configs):
+        ys = [cfg.num_detected.get(M, 0) for M in M_values]
+        agg_cv = _aggregate_cv(cfg)
+        lbl = cfg.label + (f" (CV={agg_cv:.3f})" if agg_cv is not None else "")
+        ax_cov.plot(
+            M_values, ys, marker="o", markersize=3, linewidth=1.5,
+            color=tab_colors[ci % len(tab_colors)], label=lbl,
+        )
+    ax_cov.set_yscale("log")
+    ax_cov.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax_cov.set_ylabel("Detected NCs", fontsize=11)
+    ax_cov.set_title("NC Detection Coverage vs Multiplicity Threshold", fontsize=12)
+    ax_cov.set_xticks(M_values)
+    ax_cov.legend(fontsize=8, loc="upper right")
+    ax_cov.grid(axis="y", alpha=0.3)
+    ax_cov.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+
+    # --- Bottom panel: CV grouped bars per layer ---
+    if not cv_configs:
+        ax_cv.text(0.5, 0.5, "No CV data available", transform=ax_cv.transAxes, ha="center")
+    else:
+        n_cfg = len(cv_configs)
+        n_lay = len(_LAYERS_ORDERED)
+        bar_width = 0.8 / n_lay
+        x_pos = np.arange(n_cfg)
+
+        for li, layer in enumerate(_LAYERS_ORDERED):
+            cv_vals = [
+                cfg.cv_per_layer.get(layer) or 0.0
+                for _, cfg in cv_configs
+            ]
+            ax_cv.bar(
+                x_pos + li * bar_width - (n_lay - 1) * bar_width / 2,
+                cv_vals, bar_width,
+                label=layer, color=_LAYER_COLORS[layer],
+                edgecolor="white", linewidth=0.5, alpha=0.85,
+            )
+
+        ax_cv.set_xticks(x_pos)
+        ax_cv.set_xticklabels(
+            [cfg.label for _, cfg in cv_configs], rotation=20, ha="right", fontsize=9,
+        )
+        ax_cv.set_ylabel("CV (NN homogeneity)", fontsize=10)
+        ax_cv.set_title("Nearest-Neighbour Spacing CV per Layer", fontsize=11)
+        ax_cv.legend(title="Layer", fontsize=8, loc="upper right")
+        ax_cv.grid(axis="y", alpha=0.3)
+        ax_cv.set_ylim(bottom=0)
+
+    plt.tight_layout()
+    out_path = output_dir / "cv_coverage_overview.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+def plot_coverage_cv_per_layer(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Option 1b: 2×2 subplots, one per layer — coverage curves (left axis, log)
+    with that layer's CV as a horizontal dashed line per config (right axis)."""
+    tab_colors = plt.cm.tab10.colors
+    cv_configs = [(ci, cfg) for ci, cfg in enumerate(configs) if cfg.cv_per_layer]
+
+    if not cv_configs:
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    axes_flat = axes.flatten()
+
+    for li, layer in enumerate(_LAYERS_ORDERED):
+        ax = axes_flat[li]
+        ax2 = ax.twinx()
+
+        # Coverage curves for ALL configs (left axis)
+        for ci, cfg in enumerate(configs):
+            color = tab_colors[ci % len(tab_colors)]
+            ys = [cfg.num_detected.get(M, 0) for M in M_values]
+            ax.plot(
+                M_values, ys, color=color, linewidth=1.5,
+                marker="o", markersize=2,
+                label=cfg.label,
+            )
+
+        # CV horizontal lines — only configs with CV (right axis)
+        cv_vals_layer = []
+        for ci, cfg in cv_configs:
+            cv = cfg.cv_per_layer.get(layer)
+            if cv is None:
+                continue
+            color = tab_colors[ci % len(tab_colors)]
+            ax2.axhline(cv, color=color, linestyle="--", linewidth=1.4, alpha=0.85)
+            cv_vals_layer.append(cv)
+
+        ax.set_yscale("log")
+        ax.set_xlabel("M", fontsize=9)
+        ax.set_ylabel("Detected NCs (log)", fontsize=9)
+        ax.set_title(f"Layer: {layer.upper()}", fontsize=11)
+        ax.set_xticks(M_values[::2])
+        ax.tick_params(axis="x", labelsize=7)
+        ax.grid(axis="y", alpha=0.25)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+
+        ax2.set_ylabel("CV (NN spacing)  — dashed", color="gray", fontsize=9)
+        ax2.tick_params(axis="y", labelcolor="gray")
+        ax2.set_ylim(bottom=0, top=(max(cv_vals_layer) * 1.6 + 0.02) if cv_vals_layer else 1.0)
+
+    # Shared legend from first subplot
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="upper center", ncol=min(len(configs), 5),
+        fontsize=8, bbox_to_anchor=(0.5, 1.01),
+    )
+    fig.suptitle(
+        "NC Coverage vs M per Layer  "
+        "(solid lines = detected NCs [left axis];  dashed lines = CV [right axis])",
+        fontsize=11, y=1.04,
+    )
+    plt.tight_layout()
+    out_path = output_dir / "cv_coverage_per_layer.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+def plot_coverage_ratio_by_cv(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Option 2: Coverage retention ratio detected(M)/detected(M=1) vs M,
+    lines colored by aggregate N-weighted CV."""
+    cv_configs = [(ci, cfg) for ci, cfg in enumerate(configs) if cfg.cv_per_layer]
+    valid_cvs = [c for c in (_aggregate_cv(cfg) for _, cfg in cv_configs) if c is not None]
+
+    if not valid_cvs:
+        return
+
+    cv_min, cv_max = min(valid_cvs), max(valid_cvs)
+    norm = plt.Normalize(vmin=cv_min, vmax=cv_max if cv_max > cv_min else cv_min + 1e-6)
+    cmap = plt.cm.viridis
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+
+    # Configs without CV in light gray (e.g. all_voxels reference)
+    for ci, cfg in enumerate(configs):
+        if cfg.cv_per_layer:
+            continue
+        det1 = cfg.num_detected.get(1, 1) or 1
+        ratios = [cfg.num_detected.get(M, 0) / det1 for M in M_values]
+        ax.plot(M_values, ratios, color="lightgray", linewidth=1.0,
+                linestyle=":", label=cfg.label, zorder=1)
+
+    for ci, cfg in cv_configs:
+        agg_cv = _aggregate_cv(cfg)
+        if agg_cv is None:
+            continue
+        det1 = cfg.num_detected.get(1, 1) or 1
+        ratios = [cfg.num_detected.get(M, 0) / det1 for M in M_values]
+        color = cmap(norm(agg_cv))
+        ax.plot(
+            M_values, ratios, color=color, linewidth=2.0,
+            marker="o", markersize=3,
+            label=f"{cfg.label}  (CV={agg_cv:.3f})",
+            zorder=2,
+        )
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("Coverage retention  detected(M) / detected(M=1)", fontsize=11)
+    ax.set_title(
+        "NC Coverage Retention vs M — colored by Aggregate NN-Spacing CV\n"
+        "(CV = N-weighted mean of per-layer std/mean of nearest-neighbour distances)",
+        fontsize=11,
+    )
+    ax.set_xticks(M_values)
+    ax.set_ylim(0, 1.05)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right")
+    fig.colorbar(sm, ax=ax, label="Aggregate CV (N-weighted)")
+
+    plt.tight_layout()
+    out_path = output_dir / "cv_coverage_ratio_by_cv.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+def plot_cv_coverage_scatter(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Option 3: One subplot per selected M — aggregate CV (x) vs detected NCs (y).
+    Each setup shown as a vertical stem (line from 0 up to coverage) + labelled dot."""
+    tab_colors = plt.cm.tab10.colors
+    cv_cfg_pairs = [
+        (ci, cfg) for ci, cfg in enumerate(configs)
+        if cfg.cv_per_layer and _aggregate_cv(cfg) is not None
+    ]
+
+    if len(cv_cfg_pairs) < 2:
+        return
+
+    scatter_ms = [M for M in _SCATTER_M_VALUES if M in set(M_values)]
+    if not scatter_ms:
+        scatter_ms = M_values[:9]
+
+    ncols = 3
+    nrows = (len(scatter_ms) + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 4.5))
+    axes_flat = np.array(axes).flatten()
+
+    for pi, M in enumerate(scatter_ms):
+        ax = axes_flat[pi]
+
+        for ci, cfg in cv_cfg_pairs:
+            color = tab_colors[ci % len(tab_colors)]
+            cv = _aggregate_cv(cfg)
+            count = cfg.num_detected.get(M, 0)
+            # Vertical stem from y=0 to coverage
+            ax.plot([cv, cv], [0, count], color=color, linewidth=1.8, alpha=0.7)
+            ax.scatter([cv], [count], color=color, s=50, zorder=3)
+            ax.annotate(
+                cfg.label, (cv, count),
+                textcoords="offset points", xytext=(0, 6),
+                ha="center", fontsize=7, color=color,
+            )
+
+        ax.set_xlabel("Aggregate CV", fontsize=9)
+        ax.set_ylabel("Detected NCs", fontsize=9)
+        ax.set_title(f"M ≥ {M}", fontsize=10)
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.3)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+
+    for pi in range(len(scatter_ms), len(axes_flat)):
+        axes_flat[pi].set_visible(False)
+
+    fig.suptitle(
+        "NC Coverage vs Aggregate NN-Spacing CV  "
+        "(vertical stem per setup, one panel per M threshold)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    out_path = output_dir / "cv_coverage_scatter.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
@@ -746,7 +1071,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("=" * 65)
 
     # Baseline (always labeled "Baseline")
-    bl_voxels, bl_data = load_config_json(args.baseline)
+    bl_voxels, bl_voxel_dicts, bl_data = load_config_json(args.baseline)
 
     # Area ratios — use baseline JSON ratios if present, else CLI/defaults
     cli_ratio_flags = {
@@ -792,6 +1117,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         voxel_ids=bl_voxels,
         label="Baseline",
     )
+    baseline.voxel_dicts = bl_voxel_dicts
+    baseline.cv_per_layer = compute_config_cv(bl_voxel_dicts)
     if verbose:
         print(f"  Baseline: {args.baseline} ({len(bl_voxels)} voxels)")
 
@@ -805,7 +1132,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     configs_extra: list[ConfigResult] = []
     for i, cfg_path in enumerate(args.configs):
-        voxel_ids, cfg_data = load_config_json(cfg_path)
+        voxel_ids, voxel_dicts, cfg_data = load_config_json(cfg_path)
         if args.labels:
             label = args.labels[i]
         else:
@@ -815,6 +1142,8 @@ def main(argv: Optional[list[str]] = None) -> None:
             voxel_ids=voxel_ids,
             label=label,
         )
+        cr.voxel_dicts = voxel_dicts
+        cr.cv_per_layer = compute_config_cv(voxel_dicts)
         configs_extra.append(cr)
         if verbose:
             print(f"  Config {i+1}: {cfg_path} ({len(voxel_ids)} voxels) "
@@ -914,6 +1243,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         verbose=verbose,
     )
     write_nc_summary_txt(all_configs, M_values, output_dir, verbose=verbose)
+
+    # CV vs coverage plots
+    plot_coverage_cv_overview(all_configs, M_values, output_dir, verbose=verbose)
+    plot_coverage_cv_per_layer(all_configs, M_values, output_dir, verbose=verbose)
+    plot_coverage_ratio_by_cv(all_configs, M_values, output_dir, verbose=verbose)
+    plot_cv_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
 
     if verbose:
         print("\nDone.")
