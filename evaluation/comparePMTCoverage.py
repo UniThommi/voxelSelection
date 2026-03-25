@@ -685,14 +685,20 @@ def plot_multiplicity_histogram(
     """Plot 2: PMT multiplicity histogram per NC."""
     fig, ax = plt.subplots(figsize=FIGSIZE)
 
+    # Separate zero-multiplicity NCs (no PMT fired) — shown as text, not as bars
+    hom_zeros = sum(1 for v in hom.multiplicity_counts if v == 0)
+    opt_zeros = sum(1 for v in opt.multiplicity_counts if v == 0)
+    hom_nonzero = [v for v in hom.multiplicity_counts if v > 0]
+    opt_nonzero = [v for v in opt.multiplicity_counts if v > 0]
+
     max_mult = max(
-        max(hom.multiplicity_counts) if hom.multiplicity_counts else 0,
-        max(opt.multiplicity_counts) if opt.multiplicity_counts else 0,
+        max(hom_nonzero) if hom_nonzero else 1,
+        max(opt_nonzero) if opt_nonzero else 1,
     )
-    bins = np.arange(0, max_mult + 2) - 0.5
+    bins = np.arange(1, max_mult + 2) - 0.5
 
     ax.hist(
-        hom.multiplicity_counts,
+        hom_nonzero,
         bins=bins,
         alpha=0.6,
         label=hom.label,
@@ -701,7 +707,7 @@ def plot_multiplicity_histogram(
         linewidth=0.5,
     )
     ax.hist(
-        opt.multiplicity_counts,
+        opt_nonzero,
         bins=bins,
         alpha=0.6,
         label=opt.label,
@@ -718,19 +724,20 @@ def plot_multiplicity_histogram(
         "(# distinct PMTs with ≥m hits within 200 ns of NC)"
     )
     ax.legend()
-    ax.set_yscale("log")
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
     # Statistics
     hom_mean = np.mean(hom.multiplicity_counts) if hom.multiplicity_counts else 0
     opt_mean = np.mean(opt.multiplicity_counts) if opt.multiplicity_counts else 0
     stats_text = (
-        f"Mean multiplicity — {hom.label}: {hom_mean:.2f}, "
-        f"{opt.label}: {opt_mean:.2f}"
+        f"Mean multiplicity (all NCs) — {hom.label}: {hom_mean:.2f}, "
+        f"{opt.label}: {opt_mean:.2f}\n"
+        f"Not shown (multiplicity = 0, all NCs): "
+        f"{hom.label}: {hom_zeros:,},  {opt.label}: {opt_zeros:,}"
     )
     ax.text(
         0.5,
-        -0.1,
+        -0.12,
         stats_text,
         transform=ax.transAxes,
         ha="center",
@@ -945,23 +952,18 @@ def _bin_data(data: list[int], bin_edges: list[int]) -> list[int]:
     return counts
 
 
-def plot_w_histogram(
-    hom: DetectionResult,
-    opt: DetectionResult,
-    output_dir: str,
+def _plot_w_histogram_ax(
+    ax: plt.Axes,
+    hom: "DetectionResult",
+    opt: "DetectionResult",
     W: int,
     M: int,
     ge77: bool,
 ) -> None:
-    """Plot 5/6: W histogram (detected NCs per muon in [1µs, 200µs])."""
-    suffix = "ge77" if ge77 else "non_ge77"
+    """Draw a single W-histogram panel onto *ax* (shared helper for plot 05)."""
     title_label = "Ge-77" if ge77 else "Non-Ge-77"
-    fname = f"05_w_histogram_{suffix}.png" if ge77 else f"06_w_histogram_{suffix}.png"
-
     hom_data = hom.w_hist_ge77 if ge77 else hom.w_hist_non_ge77
     opt_data = opt.w_hist_ge77 if ge77 else opt.w_hist_non_ge77
-
-    fig, ax = plt.subplots(figsize=FIGSIZE)
 
     max_w = max(
         max(hom_data) if hom_data else 0,
@@ -969,20 +971,14 @@ def plot_w_histogram(
     )
 
     if max_w == 0:
-        # Edge case: no data
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center")
-        fig.savefig(os.path.join(output_dir, fname), dpi=150)
-        plt.close(fig)
-        print(f"  Saved {fname} (empty)")
         return
 
     bin_edges = _build_log_bins(max_w)
     hom_counts = _bin_data(hom_data, bin_edges)
     opt_counts = _bin_data(opt_data, bin_edges)
 
-    # Build labels: "0","1",...,"9","10","20",...
     bin_labels = [str(e) for e in bin_edges]
-
     x = np.arange(len(bin_edges))
     width = 0.38
 
@@ -1005,8 +1001,6 @@ def plot_w_histogram(
         linewidth=0.5,
     )
 
-    # W threshold line
-    # Find the x-position of the bin that contains W
     w_bin_idx = np.searchsorted(bin_edges, W, side="right") - 1
     ax.axvline(
         w_bin_idx - 0.5,
@@ -1029,7 +1023,6 @@ def plot_w_histogram(
     ax.set_yscale("log")
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-    # Statistics
     hom_above = sum(1 for v in hom_data if v >= W)
     opt_above = sum(1 for v in opt_data if v >= W)
     n_hom = len(hom_data)
@@ -1042,7 +1035,7 @@ def plot_w_histogram(
     )
     ax.text(
         0.5,
-        -0.15,
+        -0.18,
         stats,
         transform=ax.transAxes,
         ha="center",
@@ -1050,7 +1043,22 @@ def plot_w_histogram(
         fontstyle="italic",
     )
 
+
+def plot_w_histogram_combined(
+    hom: "DetectionResult",
+    opt: "DetectionResult",
+    output_dir: str,
+    W: int,
+    M: int,
+) -> None:
+    """Plot 05: W histogram for Ge-77 and Non-Ge-77 muons side by side."""
+    fig, (ax_ge77, ax_non) = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
+
+    _plot_w_histogram_ax(ax_ge77, hom, opt, W, M, ge77=True)
+    _plot_w_histogram_ax(ax_non, hom, opt, W, M, ge77=False)
+
     fig.tight_layout()
+    fname = "05_w_histogram_combined.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -1145,8 +1153,7 @@ def main() -> None:
     plot_multiplicity_histogram(hom_result, opt_result, output_dir, args.M)
     plot_ge77_nc_detection(hom_result, opt_result, output_dir, args.M, args.m)
     plot_confusion_matrix(hom_result, opt_result, output_dir, args.W, args.M)
-    plot_w_histogram(hom_result, opt_result, output_dir, args.W, args.M, ge77=True)
-    plot_w_histogram(hom_result, opt_result, output_dir, args.W, args.M, ge77=False)
+    plot_w_histogram_combined(hom_result, opt_result, output_dir, args.W, args.M)
 
     print("\nDone.")
 
