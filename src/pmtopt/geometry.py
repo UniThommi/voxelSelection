@@ -5,6 +5,7 @@ All dimensions in mm. Coordinate system origin at (0, 0, Z_ORIGIN + Z_OFFSET).
 """
 
 import numpy as np
+from scipy.spatial import KDTree
 
 # ---------------------------------------------------------------------------
 # Detector geometry constants (mm)
@@ -151,6 +152,35 @@ def is_valid_pmt_position(
         return z_min_allowed <= z <= z_max_allowed
 
     return False
+
+
+def compute_nn_stats(centers: np.ndarray) -> dict:
+    """Nearest-neighbor distance statistics using KDTree (global, Euclidean 3-D).
+
+    Parameters
+    ----------
+    centers : np.ndarray, shape (N, 3)
+        3-D positions of voxel centers in mm.
+
+    Returns
+    -------
+    stats : dict with keys 'mean', 'std', 'min', 'max', 'cv'.
+        Returns empty dict if fewer than 2 points.
+    """
+    if len(centers) < 2:
+        return {}
+    tree = KDTree(centers)
+    dists, _ = tree.query(centers, k=2)
+    nn_dists = dists[:, 1]
+    mean = float(np.mean(nn_dists))
+    std = float(np.std(nn_dists))
+    return {
+        "mean": mean,
+        "std": std,
+        "min": float(np.min(nn_dists)),
+        "max": float(np.max(nn_dists)),
+        "cv": std / mean if mean > 0.0 else 0.0,
+    }
 
 
 def compute_nn_homogeneity(centers: np.ndarray, layer: str) -> dict | None:

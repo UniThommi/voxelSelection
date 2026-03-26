@@ -53,7 +53,6 @@ from pmtopt.geometry import (
     R_PIT, R_ZYL_BOT, R_ZYLINDER,
     Z_BASE_GLOBAL, H_ZYLINDER,
     is_valid_pmt_position,
-    compute_nn_homogeneity,
 )
 
 # ---------------------------------------------------------------------------
@@ -506,16 +505,6 @@ def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
             entry["delta_nn_mean_rel"] = (
                 (a_stats["nn_mean"] - b_stats["nn_mean"]) / b_stats["nn_mean"]
                 if b_stats["nn_mean"] != 0.0 else 0.0
-            )
-        hom_b = compute_nn_homogeneity(b_c, layer)
-        hom_a = compute_nn_homogeneity(a_c, layer)
-        if hom_b is not None and hom_a is not None:
-            entry["cv_before"]     = hom_b["cv"]
-            entry["cv_after"]      = hom_a["cv"]
-            entry["delta_cv_abs"]  = hom_a["cv"] - hom_b["cv"]
-            entry["delta_cv_rel"]  = (
-                (hom_a["cv"] - hom_b["cv"]) / hom_b["cv"]
-                if hom_b["cv"] != 0.0 else 0.0
             )
         per_layer[layer] = entry
 

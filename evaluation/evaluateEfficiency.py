@@ -15,7 +15,7 @@ Usage
 -----
     python evaluate_efficiency.py <hdf5_file> <voxel_json> -M 2 -m 1
 
-Author: Ferundo (Thesis project, University of Tübingen)
+Author: Thomas Buerger (University of Tübingen)
 """
 
 import argparse

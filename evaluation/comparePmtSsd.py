@@ -10,7 +10,7 @@ Plots:
   4. Boxplot of hit differences per pair (sorted by z-coordinate)
   5. Event-matched total hits correlation (PMT event vs SSD event)
 
-Author: Claude (Anthropic) for Ferundo
+Author: Thomas Buerger (University of Tübingen)
 """
 
 import glob

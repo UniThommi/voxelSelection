@@ -8,6 +8,8 @@ configurations using Geant4/REMAGE simulation data.
 Usage:
     python compare_pmt_coverage.py --optimized-path /path/to/optimized \
         [--muon-path ...] [--homogeneous-path ...] [--W 6] [--M 6] [--m 1]
+
+Author: Thomas Buerger (University of Tübingen)
 """
 
 from __future__ import annotations

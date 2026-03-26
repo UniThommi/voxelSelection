@@ -23,7 +23,7 @@ Usage examples:
     python -m pmtopt.main homogeneous --mode generate --output-dir ./output
 
     # Homogeneous: select 300 PMTs across all areas
-    python -m pmtopt.main homogeneous --mode select -N 300 --output-dir ./output
+    python -m pmtopt.main homogeneous --all-voxels all_valid.json --mode select -N 300 --output-dir ./output
 
     # Rotate: single angle
     python -m pmtopt.main rotate --all-voxels all.json --selected greedy.json --angle 0.25 \\
