@@ -60,9 +60,6 @@ W_VALUES = list(range(1, 21))   # W = 1..20
 
 # Scatter plot selection — always include M=4,5,6
 _SCATTER_M_VALUES = [1, 2, 4, 5, 6, 8, 10]
-_MUON_SCATTER_MW = [
-    (1, 1), (2, 2), (4, 4), (5, 4), (5, 6), (6, 6), (6, 8), (8, 8), (8, 10), (10, 10), (10, 15),
-]
 
 
 # ===================================================================
@@ -566,7 +563,6 @@ def plot_muon_heatmaps(
             f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total",
             fontsize=12, y=1.02,
         )
-        fig.colorbar(im, ax=axes, shrink=0.8, label="Value")
         plt.tight_layout()
 
         out_path = output_dir / f"muon_heatmap_M{M}.png"
@@ -656,40 +652,6 @@ def write_nc_summary_txt(
 # Plotting: CV vs coverage
 # ===================================================================
 
-def plot_coverage_cv_overview(
-    configs: list[ConfigResult],
-    M_values: list[int],
-    output_dir: Path,
-    verbose: bool = True,
-) -> None:
-    """NC coverage curves (log scale) for all configs, ordered by CV descending."""
-    ordered = _sorted_by_cv(configs)
-    colors = _get_colors(len(ordered))
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    for i, cfg in enumerate(ordered):
-        ys = [cfg.num_detected.get(M, 0) for M in M_values]
-        ax.plot(
-            M_values, ys, marker="o", markersize=3, linewidth=1.5,
-            color=colors[i], label=_config_label(cfg),
-        )
-
-    ax.set_yscale("log")
-    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
-    ax.set_ylabel("Detected NCs", fontsize=11)
-    ax.set_title("NC Detection Coverage vs Multiplicity Threshold", fontsize=12)
-    ax.set_xticks(M_values)
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(axis="y", alpha=0.3)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
-
-    plt.tight_layout()
-    out_path = output_dir / "cv_coverage_overview.png"
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
-    if verbose:
-        print(f"  Saved: {out_path}")
 
 
 def plot_cv_coverage_scatter(
@@ -774,42 +736,62 @@ def plot_muon_cv_scatter(
     num_ge77_muons: int,
     verbose: bool = True,
 ) -> None:
-    """One subplot per selected (M, W) pair — global CV (x) vs detected Ge77 muons [TP] (y).
-    Each setup shown as a vertical stem + dot. Shared legend."""
+    """One subplot per (M, W) pair where any CV-plotted setup achieves
+    TP > 20% of all Ge77 muons (recall > 0.20).  Precision per setup is
+    printed below each panel.  Shared legend."""
     cv_cfgs = [cfg for cfg in configs if cfg.cv is not None]
 
-    if len(cv_cfgs) < 2:
+    if len(cv_cfgs) < 2 or num_ge77_muons == 0:
         return
 
-    # Filter to (M, W) pairs that actually exist in the data
-    valid_mw = [
-        (M, W) for (M, W) in _MUON_SCATTER_MW
-        if M in set(M_values) and W in set(W_values)
-    ]
-    if not valid_mw:
+    threshold = 0.20 * num_ge77_muons
+
+    # Find all (M, W) pairs where at least one config (any, incl. all-voxels) exceeds threshold
+    selected_mw = []
+    for M in M_values:
+        for W in W_values:
+            for cfg in configs:
+                cm = cfg.confusion.get((M, W))
+                if cm is not None and cm["TP"] > threshold:
+                    selected_mw.append((M, W))
+                    break  # one setup suffices
+
+    if not selected_mw:
+        if verbose:
+            print("  muon_cv_scatter: no (M,W) pair reaches TP > 20% of Ge77 muons — skipped.")
         return
 
     colors = _get_colors(len(cv_cfgs))
     color_map = {cfg.name: colors[i] for i, cfg in enumerate(cv_cfgs)}
 
     ncols = 3
-    nrows = (len(valid_mw) + ncols - 1) // ncols
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 4.5))
+    nrows = (len(selected_mw) + ncols - 1) // ncols
+    # Extra vertical space per panel for precision text below axes
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(ncols * 5, nrows * 5.5),
+        gridspec_kw={"hspace": 0.55},
+    )
     axes_flat = np.array(axes).flatten()
 
     legend_handles = []
 
-    for pi, (M, W) in enumerate(valid_mw):
+    for pi, (M, W) in enumerate(selected_mw):
         ax = axes_flat[pi]
 
+        precision_lines = []
         for cfg in cv_cfgs:
             color = color_map[cfg.name]
             cv = cfg.cv
             cm = cfg.confusion.get((M, W))
             tp = cm["TP"] if cm is not None else 0
+            fp = cm["FP"] if cm is not None else 0
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+
             ax.plot([cv, cv], [0, tp], color=color, linewidth=1.8, alpha=0.7)
             ax.scatter([cv], [tp], color=color, s=60, zorder=3)
+            precision_lines.append(f"{cfg.label}: {prec:.3f}")
+
             if pi == 0:
                 legend_handles.append(
                     plt.Line2D([0], [0], color=color, marker="o", markersize=6,
@@ -823,7 +805,17 @@ def plot_muon_cv_scatter(
         ax.grid(alpha=0.3)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-    for pi in range(len(valid_mw), len(axes_flat)):
+        # Precision text below each subplot
+        prec_text = "Precision:  " + "   ".join(precision_lines)
+        ax.text(
+            0.5, -0.22, prec_text,
+            transform=ax.transAxes,
+            ha="center", va="top",
+            fontsize=7, family="monospace",
+            wrap=True,
+        )
+
+    for pi in range(len(selected_mw), len(axes_flat)):
         axes_flat[pi].set_visible(False)
 
     fig.legend(
@@ -836,15 +828,16 @@ def plot_muon_cv_scatter(
     )
     fig.suptitle(
         f"Ge77 Muon Detection (TP) vs Global NN-Spacing CV\n"
-        f"(Ge77 muons: {num_ge77_muons:,}  |  one panel per (M, W) threshold)",
+        f"(Ge77 muons: {num_ge77_muons:,}  |  panels: TP > 20% recall  |  "
+        f"{len(selected_mw)} (M,W) pair(s))",
         fontsize=12,
     )
-    plt.tight_layout(rect=[0, 0.06, 1, 1])
+    plt.tight_layout(rect=[0, 0.06, 1, 0.96])
     out_path = output_dir / "muon_cv_scatter.png"
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
     if verbose:
-        print(f"  Saved: {out_path}")
+        print(f"  Saved: {out_path}  [{len(selected_mw)} panel(s)]")
 
 
 # ===================================================================
@@ -1085,7 +1078,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     write_nc_summary_txt(all_configs, M_values, output_dir, verbose=verbose)
 
     # CV vs coverage plots
-    plot_coverage_cv_overview(all_configs, M_values, output_dir, verbose=verbose)
     plot_cv_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
     plot_muon_cv_scatter(
         all_configs, M_values, W_values, output_dir,
