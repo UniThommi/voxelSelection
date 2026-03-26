@@ -738,9 +738,9 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str,
     print("\n" + "=" * 72)
     print("HOMOGENEITY CHECK: Nearest-Neighbour Distance Analysis")
     print("=" * 72)
-    print(f"  {'Area':<6} {'N':>4} {'Mean NN':>10} {'Std':>8} "
-          f"{'Min':>8} {'Max':>8} {'CV':>8}")
-    print(f"  {'-' * 56}")
+    print(f"\n  {'Area':<6} {'N':>4} {'Mean NN':>10} {'Std NN':>10} "
+          f"{'Min NN':>10} {'Max NN':>10} {'CV':>8}")
+    print(f"  " + "-" * 60)
     nn_data: dict = {}
     for area in areas:
         voxels = selected_by_area.get(area, [])
@@ -748,8 +748,8 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str,
         nn_data[area] = (nn_dists, stats)
         if stats:
             print(f"  {area:<6} {len(voxels):>4} {stats['mean']:>10.1f} "
-                  f"{stats['std']:>8.1f} {stats['min']:>8.1f} "
-                  f"{stats['max']:>8.1f} {stats['cv']:>8.3f}")
+                  f"{stats['std']:>10.1f} {stats['min']:>10.1f} "
+                  f"{stats['max']:>10.1f} {stats['cv']:>8.3f}")
         else:
             print(f"  {area:<6} {len(voxels):>4}   (too few points for stats)")
     print(f"\n  CV = std/mean  |  lower = more uniform")

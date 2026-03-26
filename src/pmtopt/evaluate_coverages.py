@@ -55,12 +55,14 @@ from pmtopt.data_loading import (
 # Constants
 # ===================================================================
 
-M_VALUES = list(range(1, 11))  # M = 1..10
-W_VALUES = list(range(1, 11))  # W = 1..10
+M_VALUES = list(range(1, 11))   # M = 1..10
+W_VALUES = list(range(1, 21))   # W = 1..20
 
-# Scatter plot selection
-_SCATTER_M_VALUES = [1, 2, 4, 6, 8, 10]
-_MUON_SCATTER_MW = [(1, 1), (2, 1), (2, 2), (4, 2), (4, 4), (6, 4), (8, 4), (8, 6), (10, 6)]
+# Scatter plot selection — always include M=4,5,6
+_SCATTER_M_VALUES = [1, 2, 4, 5, 6, 8, 10]
+_MUON_SCATTER_MW = [
+    (1, 1), (2, 2), (4, 4), (5, 4), (5, 6), (6, 6), (6, 8), (8, 8), (8, 10), (10, 10), (10, 15),
+]
 
 
 # ===================================================================
