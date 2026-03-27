@@ -1,0 +1,854 @@
+#!/usr/bin/env python3
+"""
+W2-span sampling
+================
+Generate PMT configurations spanning the 2-Wasserstein homogeneity range
+using geometry-driven clustering algorithms — no greedy selection.
+
+For each of n_configs configurations the algorithm:
+  1. Randomly picks which areas to include (excluded area N is redistributed).
+  2. For every included area, independently draws a clustering algorithm and
+     its geometric starting parameters (phi_center, z_center, k, …).
+  3. Probes W2 at alpha=0 (most uniform) and alpha=1 (most concentrated).
+  4. Draws alpha uniformly from [0, 1] and generates the actual configuration.
+  5. Snaps geometric points to nearest valid voxels (KD-tree), enforces minimum
+     spacing, and redirects overflow round-robin when an area is exhausted.
+  6. Computes NC detection efficiency from the B matrix and saves JSON + PNG.
+
+Available algorithms per area
+------------------------------
+  fibonacci       Fibonacci-spiral reference distribution (no concentration)
+  phi_sector      Concentrate azimuthally into a sector of half-width phi_half
+  z_band          Concentrate wall points into a horizontal z-band (wall only)
+  radial          Power-law radial warping toward inner or outer edge (disk only)
+  multi_cluster   Place N in k tight Fibonacci-seeded clusters
+  superposition   Linear blend of Fibonacci + Gaussian blob at one point
+
+Usage
+-----
+    python -m pmtopt.sample_w2_range \\
+        --hdf5 data.hdf5 -N 300 --n-configs 50 --output-dir w2_setups/
+
+    python src/pmtopt/main.py sample-w2-range \\
+        --hdf5 data.hdf5 -N 300 --n-configs 50 --output-dir w2_setups/
+
+Author: Thomas Buerger (University of Tübingen)
+"""
+
+import argparse
+import json
+import time
+import warnings
+from pathlib import Path
+from typing import Optional
+
+import matplotlib
+matplotlib.use("Agg")
+import h5py
+import numpy as np
+from scipy.spatial import KDTree
+
+from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
+from pmtopt.geometry import (
+    PMT_RADIUS, R_PIT, R_ZYL_BOT, R_ZYL_TOP, R_ZYLINDER,
+    Z_BASE_GLOBAL, H_ZYLINDER, Z_CUT_TOP,
+    DEFAULT_AREA_RATIOS, compute_per_area_N,
+)
+from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
+from pmtopt.plotting import plot_selected_voxels
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_GOLDEN = (1.0 + 5.0 ** 0.5) / 2.0
+_AREA_ORDER: list[str] = ["pit", "bot", "top", "wall"]
+
+_Z_WALL_MIN = float(Z_BASE_GLOBAL)
+_Z_WALL_MAX = float(Z_CUT_TOP)
+
+_ALG_DISK: list[str] = ["fibonacci", "phi_sector", "radial", "multi_cluster", "superposition"]
+_ALG_WALL: list[str] = ["fibonacci", "phi_sector", "z_band", "multi_cluster", "superposition"]
+
+# Shared W2 reference (lazily initialised once per process)
+_W2_REF: np.ndarray | None = None
+
+
+def _get_w2_ref() -> np.ndarray:
+    global _W2_REF
+    if _W2_REF is None:
+        _W2_REF = sample_reference_distribution(M=3000, seed=42)
+    return _W2_REF
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+
+def _area_r_bounds(area: str) -> tuple[float, float]:
+    if area == "pit":
+        return 0.0, float(R_PIT)
+    elif area == "bot":
+        return float(R_ZYL_BOT), float(R_ZYLINDER)
+    elif area == "top":
+        return float(R_ZYL_TOP), float(R_ZYLINDER)
+    raise ValueError(f"No r-bounds for area '{area}'")
+
+
+def _area_z(area: str) -> float:
+    if area in ("pit", "bot"):
+        return float(Z_BASE_GLOBAL)
+    elif area == "top":
+        return float(Z_CUT_TOP)
+    raise ValueError(f"No fixed z for area '{area}'")
+
+
+def _fib_angles(n: int) -> np.ndarray:
+    """Fibonacci-spiral azimuthal angles in [0, 2π) for n points."""
+    return (2.0 * np.pi * np.arange(n) / _GOLDEN) % (2.0 * np.pi)
+
+
+def _fib_annulus_r(n: int, r_min: float, r_max: float) -> np.ndarray:
+    """Fibonacci radii for n points on an annular disk [r_min, r_max]."""
+    t = (np.arange(n) + 0.5) / n
+    return np.sqrt(r_min ** 2 + t * (r_max ** 2 - r_min ** 2))
+
+
+# ---------------------------------------------------------------------------
+# Per-surface geometric point generators
+# ---------------------------------------------------------------------------
+
+def _gen_disk_points(
+    n: int,
+    r_min: float,
+    r_max: float,
+    z: float,
+    alg: str,
+    params: dict,
+    alpha: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Return (n, 3) geometric points on an annular disk at height z."""
+    phi_fib = _fib_angles(n)
+    r_fib = _fib_annulus_r(n, r_min, r_max)
+
+    if alg == "fibonacci":
+        r, phi = r_fib, phi_fib
+
+    elif alg == "phi_sector":
+        phi_center = params["phi_center"]
+        phi_half_min = 2.0 * np.pi / max(n, 1) * 3.0   # ~3 average spacings
+        phi_half = phi_half_min + (1.0 - alpha) * (np.pi - phi_half_min)
+        # Map [0, 2π) linearly into [phi_center − phi_half, phi_center + phi_half]
+        phi = phi_center + (phi_fib / (2.0 * np.pi) - 0.5) * 2.0 * phi_half
+        r = r_fib
+
+    elif alg == "radial":
+        beta_max = params["beta_max"]
+        direction = params["radial_direction"]
+        t = (np.arange(n) + 0.5) / n
+        if direction == "inward":        # concentrate toward r_min
+            beta = 1.0 + alpha * (beta_max - 1.0)
+        else:                            # concentrate toward r_max
+            beta = 1.0 - alpha * (1.0 - 1.0 / beta_max)
+            beta = max(beta, 0.05)
+        r = np.sqrt(r_min ** 2 + (t ** beta) * (r_max ** 2 - r_min ** 2))
+        phi = phi_fib
+
+    elif alg == "multi_cluster":
+        k = params["k"]
+        c_phi = params["cluster_phi"]
+        c_r = params["cluster_r"]
+        sigma_min = float(PMT_RADIUS) * 1.5
+        sigma_max = max(
+            sigma_min * 2.0,
+            min(r_max - r_min, np.pi * (r_min + r_max) / k) * 0.7,
+        )
+        sigma = sigma_min + (1.0 - alpha) * (sigma_max - sigma_min)
+        pts_per = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        r_parts, phi_parts = [], []
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            r_off = rng.uniform(0.0, sigma, nc)
+            a_off = rng.uniform(0.0, 2.0 * np.pi, nc)
+            rc = np.clip(c_r[ci] + r_off * np.cos(a_off), r_min, r_max)
+            # angular offset divided by radius gives phi offset
+            ref_r = max(float(c_r[ci]), r_min + 1e-6)
+            pc = (c_phi[ci] + r_off * np.sin(a_off) / ref_r) % (2.0 * np.pi)
+            r_parts.append(rc)
+            phi_parts.append(pc)
+        r = np.concatenate(r_parts)
+        phi = np.concatenate(phi_parts)
+
+    elif alg == "superposition":
+        n_conc = int(round(alpha * n))
+        n_uni = n - n_conc
+        c_phi = params["conc_phi"]
+        c_r = np.clip(params["conc_r"], r_min, r_max)
+        blob = max(float(PMT_RADIUS) * 1.5,
+                   (r_max - r_min) / max(float(np.sqrt(n)), 1.0))
+        r_parts, phi_parts = [], []
+        if n_uni > 0:
+            r_parts.append(_fib_annulus_r(n_uni, r_min, r_max))
+            phi_parts.append(_fib_angles(n_uni))
+        if n_conc > 0:
+            r_off = rng.uniform(0.0, blob, n_conc)
+            a_off = rng.uniform(0.0, 2.0 * np.pi, n_conc)
+            rc = np.clip(c_r + r_off * np.cos(a_off), r_min, r_max)
+            ref_r = max(float(c_r), r_min + 1e-6)
+            pc = (c_phi + r_off * np.sin(a_off) / ref_r) % (2.0 * np.pi)
+            r_parts.append(rc)
+            phi_parts.append(pc)
+        r = np.concatenate(r_parts) if r_parts else r_fib
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+
+    else:
+        raise ValueError(f"Unknown disk algorithm: '{alg}'")
+
+    x = r * np.cos(phi)
+    y = r * np.sin(phi)
+    return np.column_stack([x, y, np.full(n, z)])
+
+
+def _gen_wall_points(
+    n: int,
+    alg: str,
+    params: dict,
+    alpha: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Return (n, 3) geometric points on the cylindrical wall."""
+    z_min, z_max = _Z_WALL_MIN, _Z_WALL_MAX
+    phi_fib = (2.0 * np.pi * np.arange(n) / _GOLDEN) % (2.0 * np.pi)
+    z_fib = z_min + (np.arange(n) + 0.5) / n * (z_max - z_min)
+
+    if alg == "fibonacci":
+        phi, z = phi_fib, z_fib
+
+    elif alg == "phi_sector":
+        phi_center = params["phi_center"]
+        phi_half_min = 2.0 * np.pi / max(n, 1) * 3.0
+        phi_half = phi_half_min + (1.0 - alpha) * (np.pi - phi_half_min)
+        phi = phi_center + (phi_fib / (2.0 * np.pi) - 0.5) * 2.0 * phi_half
+        z = z_fib
+
+    elif alg == "z_band":
+        z_center = params["z_center"]
+        h_min = float(PMT_RADIUS)
+        h_max = (z_max - z_min) / 2.0
+        h_band = h_min + (1.0 - alpha) * (h_max - h_min)
+        # Map z_fib ∈ [z_min, z_max] → [z_center − h_band, z_center + h_band]
+        z_norm = (z_fib - z_min) / (z_max - z_min)   # ∈ [0, 1]
+        z = np.clip(z_center + (z_norm - 0.5) * 2.0 * h_band, z_min, z_max)
+        phi = phi_fib
+
+    elif alg == "multi_cluster":
+        k = params["k"]
+        c_phi = params["cluster_phi"]
+        c_z = params["cluster_z"]
+        sig_phi_min = 2.0 * np.pi / max(n, 1) * 3.0
+        sig_phi_max = max(sig_phi_min * 2.0, np.pi / k * 0.7)
+        sig_z_min = float(PMT_RADIUS)
+        sig_z_max = max(sig_z_min * 2.0, (z_max - z_min) / (2.0 * k) * 0.7)
+        sig_phi = sig_phi_min + (1.0 - alpha) * (sig_phi_max - sig_phi_min)
+        sig_z = sig_z_min + (1.0 - alpha) * (sig_z_max - sig_z_min)
+        pts_per = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        phi_parts, z_parts = [], []
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            pc = (c_phi[ci] + rng.normal(0.0, sig_phi, nc)) % (2.0 * np.pi)
+            zc = np.clip(c_z[ci] + rng.normal(0.0, sig_z, nc), z_min, z_max)
+            phi_parts.append(pc)
+            z_parts.append(zc)
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+        z = np.concatenate(z_parts) if z_parts else z_fib
+
+    elif alg == "superposition":
+        n_conc = int(round(alpha * n))
+        n_uni = n - n_conc
+        c_phi = params["conc_phi"]
+        c_z = np.clip(params["conc_z"], z_min, z_max)
+        blob_phi = 2.0 * np.pi / max(float(np.sqrt(n)), 1.0)
+        blob_z = max(float(PMT_RADIUS) * 1.5,
+                     (z_max - z_min) / max(float(np.sqrt(n)), 1.0))
+        phi_parts, z_parts = [], []
+        if n_uni > 0:
+            phi_parts.append(phi_fib[:n_uni])
+            z_parts.append(z_fib[:n_uni])
+        if n_conc > 0:
+            pc = (c_phi + rng.normal(0.0, blob_phi, n_conc)) % (2.0 * np.pi)
+            zc = np.clip(c_z + rng.normal(0.0, blob_z, n_conc), z_min, z_max)
+            phi_parts.append(pc)
+            z_parts.append(zc)
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+        z = np.concatenate(z_parts) if z_parts else z_fib
+
+    else:
+        raise ValueError(f"Unknown wall algorithm: '{alg}'")
+
+    x = R_ZYLINDER * np.cos(phi)
+    y = R_ZYLINDER * np.sin(phi)
+    return np.column_stack([x, y, z])
+
+
+def _gen_area_points(
+    area: str,
+    n: int,
+    surface_params: dict,
+    alpha: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    alg = surface_params["algorithm"]
+    if area == "wall":
+        return _gen_wall_points(n, alg, surface_params, alpha, rng)
+    r_min, r_max = _area_r_bounds(area)
+    z = _area_z(area)
+    return _gen_disk_points(n, r_min, r_max, z, alg, surface_params, alpha, rng)
+
+
+# ---------------------------------------------------------------------------
+# Surface-parameter drawing
+# ---------------------------------------------------------------------------
+
+def _draw_surface_params(
+    area: str,
+    n_area: int,
+    rng: np.random.Generator,
+) -> dict:
+    """Draw random algorithm + geometric starting parameters for one area."""
+    pool = _ALG_WALL if area == "wall" else _ALG_DISK
+    alg = str(rng.choice(pool))
+    p: dict = {"algorithm": alg}
+
+    if alg == "phi_sector":
+        p["phi_center"] = float(rng.uniform(0.0, 2.0 * np.pi))
+
+    elif alg == "z_band":                # wall only
+        z_range = _Z_WALL_MAX - _Z_WALL_MIN
+        margin = z_range * 0.25
+        p["z_center"] = float(rng.uniform(_Z_WALL_MIN + margin, _Z_WALL_MAX - margin))
+
+    elif alg == "radial":
+        p["radial_direction"] = str(rng.choice(["inward", "outward"]))
+        p["beta_max"] = float(rng.uniform(2.0, 6.0))
+
+    elif alg == "multi_cluster":
+        max_k = max(2, min(8, n_area // 10))
+        k = int(rng.integers(2, max_k + 1))
+        p["k"] = k
+        p["cluster_phi"] = rng.uniform(0.0, 2.0 * np.pi, k).tolist()
+        if area == "wall":
+            p["cluster_z"] = rng.uniform(
+                _Z_WALL_MIN + float(PMT_RADIUS),
+                _Z_WALL_MAX - float(PMT_RADIUS),
+                k,
+            ).tolist()
+        else:
+            r_min, r_max = _area_r_bounds(area)
+            p["cluster_r"] = rng.uniform(r_min, r_max, k).tolist()
+
+    elif alg == "superposition":
+        p["conc_phi"] = float(rng.uniform(0.0, 2.0 * np.pi))
+        if area == "wall":
+            p["conc_z"] = float(rng.uniform(
+                _Z_WALL_MIN + float(PMT_RADIUS),
+                _Z_WALL_MAX - float(PMT_RADIUS),
+            ))
+        else:
+            r_min, r_max = _area_r_bounds(area)
+            p["conc_r"] = float(rng.uniform(r_min, r_max))
+
+    # numpy arrays must be converted for JSON serialisation
+    for key in ("cluster_phi", "cluster_z", "cluster_r"):
+        if key in p and not isinstance(p[key], list):
+            p[key] = list(p[key])
+
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Voxel snapping with spacing enforcement and round-robin overflow
+# ---------------------------------------------------------------------------
+
+def _snap_to_voxels(
+    geo_pts_by_area: dict[str, np.ndarray],
+    all_centers: np.ndarray,
+    all_layers: np.ndarray,
+    N_by_area: dict[str, int],
+    min_spacing: float,
+) -> tuple[list[int], bool]:
+    """
+    Snap geometric points per area to nearest valid voxels with spacing.
+
+    Returns
+    -------
+    selected_cols : list[int]
+    used_overflow : bool   — True if the round-robin workaround was triggered.
+    """
+    min_sq = min_spacing ** 2
+
+    # Build per-area index arrays and KD-trees
+    area_col_indices: dict[str, np.ndarray] = {}
+    area_trees: dict[str, KDTree | None] = {}
+    for a in _AREA_ORDER:
+        idx = np.where(all_layers == a)[0]
+        area_col_indices[a] = idx
+        area_trees[a] = KDTree(all_centers[idx]) if len(idx) > 0 else None
+
+    # Tracking selected state
+    selected: list[int] = []
+    selected_set: set[int] = set()
+    # Per-layer list of selected centers for spacing checks (fast path)
+    sel_by_layer: dict[str, list[np.ndarray]] = {a: [] for a in _AREA_ORDER}
+
+    def _spacing_ok(col: int) -> bool:
+        c = all_centers[col]
+        layer = str(all_layers[col])
+        for sc in sel_by_layer[layer]:
+            diff = c - sc
+            if float(diff @ diff) < min_sq:
+                return False
+        return True
+
+    def _try_place(geo_pt: np.ndarray, area: str, k_query: int = 300) -> int | None:
+        tree = area_trees.get(area)
+        if tree is None:
+            return None
+        idxs = area_col_indices[area]
+        k = min(k_query, len(idxs))
+        _, nn_local = tree.query(geo_pt, k=k)
+        candidates = [nn_local] if k == 1 else nn_local
+        for li in candidates:
+            col = int(idxs[li])
+            if col in selected_set:
+                continue
+            if _spacing_ok(col):
+                return col
+        return None
+
+    def _accept(col: int) -> None:
+        selected.append(col)
+        selected_set.add(col)
+        layer = str(all_layers[col])
+        sel_by_layer[layer].append(all_centers[col].copy())
+
+    # Primary placement: iterate areas in order
+    used_overflow = False
+    deficits: list[tuple[str, int]] = []   # (area, n_missing) pairs
+
+    for area in _AREA_ORDER:
+        n_target = N_by_area.get(area, 0)
+        if n_target == 0:
+            continue
+        geo_pts = geo_pts_by_area.get(area, np.empty((0, 3)))
+        placed = 0
+        for pt in geo_pts:
+            if placed >= n_target:
+                break
+            col = _try_place(pt, area)
+            if col is not None:
+                _accept(col)
+                placed += 1
+        if placed < n_target:
+            deficit = n_target - placed
+            deficits.append((area, deficit))
+            warnings.warn(
+                f"[sample_w2_range] Area '{area}' placed {placed}/{n_target} voxels. "
+                f"Redirecting {deficit} to other areas (round-robin).",
+                stacklevel=4,
+            )
+            used_overflow = True
+
+    # Round-robin overflow: fill deficits from any available area
+    if deficits:
+        total_deficit = sum(d for _, d in deficits)
+        # Cycle through all areas (any area can absorb overflow)
+        area_cycle = [a for a in _AREA_ORDER if area_col_indices[a].size > 0]
+        cycle_idx = 0
+        for _ in range(total_deficit):
+            placed = False
+            for _attempt in range(len(area_cycle)):
+                overflow_area = area_cycle[cycle_idx % len(area_cycle)]
+                cycle_idx += 1
+                # Find any available, spaced voxel in this area
+                for col in area_col_indices[overflow_area]:
+                    col = int(col)
+                    if col in selected_set:
+                        continue
+                    if _spacing_ok(col):
+                        _accept(col)
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                raise RuntimeError(
+                    "[sample_w2_range] Ran out of valid, spaced voxels across ALL "
+                    "areas. Cannot place all N PMTs. Try reducing N or min_spacing."
+                )
+
+    return selected, used_overflow
+
+
+# ---------------------------------------------------------------------------
+# Coverage computation
+# ---------------------------------------------------------------------------
+
+def _compute_efficiency(
+    selected_cols: list[int],
+    B,  # scipy.sparse.csc_matrix
+    M: int,
+) -> float:
+    from scipy import sparse
+    coverage = np.zeros(B.shape[0], dtype=np.int16)
+    for col in selected_cols:
+        s, e = B.indptr[col], B.indptr[col + 1]
+        coverage[B.indices[s:e]] += 1
+    return float(np.sum(coverage >= M)) / B.shape[0]
+
+
+# ---------------------------------------------------------------------------
+# JSON output (standard selected_voxels format + W2 metadata)
+# ---------------------------------------------------------------------------
+
+def _write_config_json(
+    hdf5_path: str,
+    voxel_ids: np.ndarray,
+    selected_cols: list[int],
+    efficiency: float,
+    num_ncs: int,
+    num_primaries: int,
+    N: int,
+    M: int,
+    m: int,
+    area_ratios: dict,
+    min_spacing: float,
+    included_areas: list[str],
+    surface_params: dict,
+    alpha: float,
+    w2: float | None,
+    w2_lo: float | None,
+    w2_hi: float | None,
+    output_path: Path,
+) -> None:
+    selected_voxels_json = []
+    with h5py.File(hdf5_path, "r") as f:
+        for col_idx in selected_cols:
+            vid = voxel_ids[col_idx]
+            center = f[f"voxels/{vid}/center"][:].tolist()
+            corners_x = f[f"voxels/{vid}/corners/x"][:].tolist()
+            corners_y = f[f"voxels/{vid}/corners/y"][:].tolist()
+            corners_z = f[f"voxels/{vid}/corners/z"][:].tolist()
+            corners = [[x, y, z]
+                       for x, y, z in zip(corners_x, corners_y, corners_z)]
+            layer_raw = f[f"voxels/{vid}/layer"][()]
+            layer = (layer_raw.decode() if isinstance(layer_raw, bytes)
+                     else str(layer_raw))
+            selected_voxels_json.append({
+                "index": vid,
+                "center": center,
+                "corners": corners,
+                "layer": layer,
+            })
+
+    json_data = {
+        "config": {
+            "optimize": "nc",
+            "N": N, "M": M, "m": m, "W": None,
+            "area_ratios": area_ratios,
+            "min_spacing": min_spacing,
+            "included_areas": included_areas,
+            "algorithms": {a: surface_params[a]["algorithm"] for a in _AREA_ORDER},
+            "alpha": alpha,
+            "w2": w2,
+            "w2_probe_lo": w2_lo,
+            "w2_probe_hi": w2_hi,
+            "generator": "sample_w2_range",
+        },
+        "efficiency": efficiency,
+        "num_ncs": num_ncs,
+        "num_primaries": num_primaries,
+        "selected_voxels": selected_voxels_json,
+    }
+    with open(output_path, "w") as jf:
+        json.dump(json_data, jf, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Main sampling logic
+# ---------------------------------------------------------------------------
+
+def sample_w2_range(
+    hdf5_path: str,
+    N: int,
+    M: int,
+    m: int,
+    n_configs: int,
+    seed: int,
+    area_ratios: dict,
+    min_spacing: float,
+    output_dir: Path,
+    verbose: bool,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    main_rng = np.random.default_rng(seed)
+    w2_ref = _get_w2_ref()
+
+    # ------------------------------------------------------------------
+    # Load data
+    # ------------------------------------------------------------------
+    if verbose:
+        print("=" * 65)
+        print("Loading simulation data")
+        print("=" * 65)
+
+    (raw_rows, raw_cols, raw_vals,
+     voxel_ids, all_centers, all_layers,
+     num_ncs, num_primaries) = load_raw_sparse(hdf5_path, verbose=verbose)
+
+    B = binarize_from_raw(
+        raw_rows, raw_cols, raw_vals,
+        num_ncs=num_ncs,
+        num_voxels=len(voxel_ids),
+        layers=all_layers,
+        area_ratios=area_ratios,
+        m=m,
+        seed=seed,
+    )
+    if verbose:
+        print(f"B matrix: {num_ncs} × {len(voxel_ids)}, nnz={B.nnz:,}")
+
+    # ------------------------------------------------------------------
+    # Generate configs
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"\n{'=' * 65}")
+        print(f"Generating {n_configs} W2-spanning configurations")
+        print(f"{'=' * 65}")
+
+    results: list[dict] = []
+
+    for cfg_idx in range(n_configs):
+        t0 = time.time()
+
+        # Separate seed stream for each config so probe runs do not pollute
+        # the main rng or each other.
+        cfg_seed = int(main_rng.integers(0, 2 ** 31))
+        alpha_draw = float(main_rng.uniform(0.0, 1.0))
+
+        params_rng = np.random.default_rng([cfg_seed, 0])
+        probe_rng_lo = np.random.default_rng([cfg_seed, 1])
+        probe_rng_hi = np.random.default_rng([cfg_seed, 2])
+        actual_rng = np.random.default_rng([cfg_seed, 3])
+
+        # ---- Draw included areas (at least one; each included with p=0.8) ----
+        included = {a: bool(params_rng.random() < 0.8) for a in _AREA_ORDER}
+        if not any(included.values()):
+            included[str(params_rng.choice(_AREA_ORDER))] = True
+        included_areas = [a for a in _AREA_ORDER if included[a]]
+
+        # ---- N allocation across included areas ----
+        N_by_area = compute_per_area_N(N, areas=included_areas, verbose=False)
+
+        # ---- Draw surface-specific algorithm + geometric parameters ----
+        surface_params: dict[str, dict] = {}
+        for a in _AREA_ORDER:
+            n_a = N_by_area.get(a, 0)
+            if n_a > 0:
+                surface_params[a] = _draw_surface_params(a, n_a, params_rng)
+            else:
+                surface_params[a] = {"algorithm": "fibonacci"}
+
+        # ---- Inner helper: run one alpha value ----
+        def _run(alpha_val: float, rng: np.random.Generator) -> tuple[list[int], float | None, bool]:
+            geo_pts_by_area: dict[str, np.ndarray] = {}
+            for a in _AREA_ORDER:
+                n_a = N_by_area.get(a, 0)
+                if n_a > 0:
+                    geo_pts_by_area[a] = _gen_area_points(
+                        a, n_a, surface_params[a], alpha_val, rng
+                    )
+            sel, ovf = _snap_to_voxels(
+                geo_pts_by_area, all_centers, all_layers, N_by_area, min_spacing,
+            )
+            if len(sel) < 2:
+                return sel, None, ovf
+            w2 = compute_wasserstein_homogeneity(
+                all_centers[np.array(sel)], reference=w2_ref
+            )["w2"]
+            return sel, w2, ovf
+
+        # ---- Probe runs for W2 bounds ----
+        _, w2_lo, _ = _run(0.0, probe_rng_lo)
+        _, w2_hi, _ = _run(1.0, probe_rng_hi)
+
+        if w2_lo is None or w2_hi is None:
+            if verbose:
+                print(f"  config_{cfg_idx:03d}: skipped (too few valid voxels)")
+            continue
+
+        # ---- Actual run ----
+        sel_cols, w2_val, used_ovf = _run(alpha_draw, actual_rng)
+
+        if used_ovf:
+            warnings.warn(
+                f"[config_{cfg_idx:03d}] Bot-area overflow workaround was triggered.",
+                stacklevel=1,
+            )
+
+        eff = _compute_efficiency(sel_cols, B, M)
+
+        # ---- Save JSON ----
+        json_path = output_dir / f"config_{cfg_idx:03d}.json"
+        _write_config_json(
+            hdf5_path=hdf5_path,
+            voxel_ids=voxel_ids,
+            selected_cols=sel_cols,
+            efficiency=eff,
+            num_ncs=num_ncs,
+            num_primaries=num_primaries,
+            N=N, M=M, m=m,
+            area_ratios=area_ratios,
+            min_spacing=min_spacing,
+            included_areas=included_areas,
+            surface_params=surface_params,
+            alpha=alpha_draw,
+            w2=w2_val,
+            w2_lo=w2_lo,
+            w2_hi=w2_hi,
+            output_path=json_path,
+        )
+
+        # ---- Save PNG ----
+        sel_arr = np.array(sel_cols)
+        w2_s = f"{w2_val:.1f}" if w2_val is not None else "N/A"
+        alg_tag = "|".join(surface_params[a]["algorithm"][:3] for a in included_areas)
+        plot_selected_voxels(
+            all_centers[sel_arr],
+            all_layers[sel_arr],
+            [str(voxel_ids[c]) for c in sel_cols],
+            output_path=output_dir / f"config_{cfg_idx:03d}.png",
+            title_extra=(
+                f"W2={w2_s} mm  eff={eff:.4%}  α={alpha_draw:.3f}"
+                f"  [{alg_tag}]"
+            ),
+        )
+
+        elapsed = time.time() - t0
+        results.append({
+            "name": f"config_{cfg_idx:03d}",
+            "w2": w2_val,
+            "w2_probe_lo": w2_lo,
+            "w2_probe_hi": w2_hi,
+            "alpha": alpha_draw,
+            "efficiency": eff,
+            "included_areas": included_areas,
+            "algorithms": {a: surface_params[a]["algorithm"] for a in _AREA_ORDER},
+            "used_overflow": used_ovf,
+        })
+
+        if verbose:
+            print(
+                f"  config_{cfg_idx:03d}  W2={w2_s:>8} mm"
+                f"  [probe {w2_lo:.1f}–{w2_hi:.1f}]"
+                f"  eff={eff:.4%}  α={alpha_draw:.3f}"
+                f"  areas={included_areas}"
+                f"  ({elapsed:.1f}s)"
+            )
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    summary_txt = output_dir / "config_summary.txt"
+    with open(summary_txt, "w") as sf:
+        sf.write(f"# W2-range sampling\n")
+        sf.write(f"# N={N}, M={M}, m={m}, seed={seed}, n_configs={n_configs}\n\n")
+        hdr = (f"{'Config':<14} {'W2 mm':>9} {'W2_lo':>7} {'W2_hi':>7}"
+               f" {'alpha':>6} {'Efficiency':>12}  Areas / Algorithms\n")
+        sf.write(hdr)
+        sf.write("-" * 90 + "\n")
+        for r in results:
+            w2_s = f"{r['w2']:.1f}" if r["w2"] is not None else "N/A"
+            alg_str = "  ".join(
+                f"{a}:{r['algorithms'][a][:3]}" for a in r["included_areas"]
+            )
+            sf.write(
+                f"{r['name']:<14} {w2_s:>9} {r['w2_probe_lo']:>7.1f} {r['w2_probe_hi']:>7.1f}"
+                f" {r['alpha']:>6.3f} {r['efficiency']:>12.4%}  {alg_str}\n"
+            )
+
+    summary_json = output_dir / "config_summary.json"
+    with open(summary_json, "w") as jf:
+        json.dump(results, jf, indent=2)
+
+    if verbose:
+        print(f"\nSummary written to {summary_txt}")
+        print(f"Summary JSON   → {summary_json}")
+        w2_vals = [r["w2"] for r in results if r["w2"] is not None]
+        if w2_vals:
+            print(f"W2 range achieved: {min(w2_vals):.1f} – {max(w2_vals):.1f} mm"
+                  f"  (n={len(w2_vals)} configs)")
+        print("\nDone.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate n_configs PMT selections spanning the W2 homogeneity range "
+            "using geometry-driven clustering algorithms (no greedy selection)."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--hdf5", type=str, required=True,
+                        help="Path to raw SSD HDF5 data file.")
+    parser.add_argument("-N", type=int, required=True,
+                        help="Number of PMTs per configuration.")
+    parser.add_argument("-M", type=int, default=1,
+                        help="Multiplicity threshold for NC efficiency.")
+    parser.add_argument("-m", type=int, default=1,
+                        help="Per-voxel hit threshold for binarisation.")
+    parser.add_argument("--n-configs", type=int, default=50,
+                        help="Total number of configurations to generate.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Master random seed.")
+    parser.add_argument("--min-spacing", type=float, default=2 * PMT_RADIUS,
+                        help="Minimum inter-voxel spacing on the same layer (mm).")
+    parser.add_argument("--output-dir", type=str, default="w2_setups",
+                        help="Output directory.")
+    parser.add_argument("--pit",  type=float, default=None)
+    parser.add_argument("--bot",  type=float, default=None)
+    parser.add_argument("--top",  type=float, default=None)
+    parser.add_argument("--wall", type=float, default=None)
+    parser.add_argument("--quiet", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = parse_args(argv)
+    area_ratios = dict(DEFAULT_AREA_RATIOS)
+    if args.pit  is not None: area_ratios["pit"]  = args.pit
+    if args.bot  is not None: area_ratios["bot"]  = args.bot
+    if args.top  is not None: area_ratios["top"]  = args.top
+    if args.wall is not None: area_ratios["wall"] = args.wall
+
+    sample_w2_range(
+        hdf5_path=args.hdf5,
+        N=args.N,
+        M=args.M,
+        m=args.m,
+        n_configs=args.n_configs,
+        seed=args.seed,
+        area_ratios=area_ratios,
+        min_spacing=args.min_spacing,
+        output_dir=Path(args.output_dir),
+        verbose=not args.quiet,
+    )
+
+
+if __name__ == "__main__":
+    main()

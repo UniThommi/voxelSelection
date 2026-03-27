@@ -4,10 +4,11 @@ PMT Position Optimization — unified entry point
 ================================================
 
 Subcommands:
-  greedy       Greedy voxel selection from HDF5 simulation data (NC / muon-Ge77 modes)
-  homogeneous  Generate all voxels or select N homogeneously distributed voxels
-  rotate       Rotate an existing voxel selection by an azimuthal angle
-  plot         Generate 3D plots for existing JSON voxel selection files
+  greedy           Greedy voxel selection from HDF5 simulation data (NC / muon-Ge77 modes)
+  homogeneous      Generate all voxels or select N homogeneously distributed voxels
+  rotate           Rotate an existing voxel selection by an azimuthal angle
+  plot             Generate 3D plots for existing JSON voxel selection files
+  sample-w2-range  Generate configurations spanning the W2 homogeneity range
 
 Usage examples:
     # Greedy: NC mode
@@ -36,6 +37,10 @@ Usage examples:
 
     # Plot: generate 3D PNG for one or more existing JSON selections
     python -m pmtopt.main plot greedy_N300.json setup_*.json
+
+    # Sample W2 range: 50 geometry-driven configs spanning W2 space
+    python -m pmtopt.main sample-w2-range --hdf5 data.hdf5 -N 300 --n-configs 50 \\
+        --output-dir w2_setups/
 
 Author: Thomas Buerger (University of Tübingen)
 """
@@ -746,7 +751,7 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
         print(f"  -> {png_path}")
 
 
-_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot")
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "sample-w2-range")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -758,10 +763,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(
             "usage: main.py <subcommand> [args ...]\n"
             f"subcommands: {', '.join(_SUBCOMMANDS)}\n\n"
-            "  greedy       Greedy PMT selection from HDF5 simulation data\n"
-            "  homogeneous  Generate or select homogeneously distributed voxels\n"
-            "  rotate       Rotate an existing voxel selection azimuthally\n"
-            "  plot         Plot existing JSON voxel selection file(s)\n\n"
+            "  greedy           Greedy PMT selection from HDF5 simulation data\n"
+            "  homogeneous      Generate or select homogeneously distributed voxels\n"
+            "  rotate           Rotate an existing voxel selection azimuthally\n"
+            "  plot             Plot existing JSON voxel selection file(s)\n"
+            "  sample-w2-range  Generate configurations spanning the W2 range\n\n"
             "Run 'main.py <subcommand> --help' for subcommand-specific help."
         )
         sys.exit(1 if argv else 0)
@@ -778,6 +784,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         rot_main(rest)
     elif mode == "plot":
         run_plot(rest)
+    elif mode == "sample-w2-range":
+        from pmtopt.sample_w2_range import main as w2_main
+        w2_main(rest)
 
 
 if __name__ == "__main__":
