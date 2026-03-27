@@ -56,6 +56,7 @@ from pmtopt.geometry import (
 )
 from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
 from pmtopt.plotting import plot_selected_voxels
+from pmtopt.sensitivity import run_sensitivity
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -589,6 +590,8 @@ def sample_w2_range(
     area_ratios: dict,
     min_spacing: float,
     output_dir: Path,
+    sensitivity: bool,
+    deltas: list[float] | None,
     verbose: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -606,6 +609,8 @@ def sample_w2_range(
     (raw_rows, raw_cols, raw_vals,
      voxel_ids, all_centers, all_layers,
      num_ncs, num_primaries) = load_raw_sparse(hdf5_path, verbose=verbose)
+    # Keep raw sparse data for optional sensitivity analysis
+    _raw_rows, _raw_cols, _raw_vals = raw_rows, raw_cols, raw_vals
 
     B = binarize_from_raw(
         raw_rows, raw_cols, raw_vals,
@@ -746,6 +751,7 @@ def sample_w2_range(
             "included_areas": included_areas,
             "algorithms": {a: surface_params[a]["algorithm"] for a in _AREA_ORDER},
             "used_overflow": used_ovf,
+            "selected": sel_cols,
         })
 
         if verbose:
@@ -789,6 +795,43 @@ def sample_w2_range(
         if w2_vals:
             print(f"W2 range achieved: {min(w2_vals):.1f} – {max(w2_vals):.1f} mm"
                   f"  (n={len(w2_vals)} configs)")
+
+    # ------------------------------------------------------------------
+    # Optional: sensitivity analysis for every generated config
+    # ------------------------------------------------------------------
+    if sensitivity:
+        if verbose:
+            print("\n" + "=" * 65)
+            print("Running sensitivity analysis for all configs")
+            print("=" * 65)
+        for r in results:
+            if verbose:
+                print(f"\n  -- {r['name']} (eff={r['efficiency']:.4%}) --")
+            run_sensitivity(
+                filepath=hdf5_path,
+                N=N,
+                m=m,
+                area_ratios=area_ratios,
+                optimize="nc",
+                M=M,
+                min_spacing=min_spacing,
+                seed=seed,
+                deltas=deltas,
+                output_dir=str(output_dir / "sensitivity" / r["name"]),
+                baseline_selected=r["selected"],
+                baseline_eff=r["efficiency"],
+                raw_rows=_raw_rows,
+                raw_cols=_raw_cols,
+                raw_vals=_raw_vals,
+                voxel_ids=voxel_ids,
+                centers=all_centers,
+                layers=all_layers,
+                num_ncs=num_ncs,
+                num_primaries=num_primaries,
+                verbose=verbose,
+            )
+
+    if verbose:
         print("\nDone.")
 
 
@@ -824,6 +867,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--bot",  type=float, default=None)
     parser.add_argument("--top",  type=float, default=None)
     parser.add_argument("--wall", type=float, default=None)
+    parser.add_argument("--sensitivity", action="store_true",
+                        help="Run sensitivity analysis on every generated config.")
+    parser.add_argument("--deltas", type=str, default=None,
+                        help="Comma-separated area-ratio perturbation values for "
+                             "sensitivity analysis (e.g. '-0.10,0.10'). "
+                             "Default: -0.20,-0.10,-0.05,+0.05,+0.10,+0.20.")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args(argv)
 
@@ -836,6 +885,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.top  is not None: area_ratios["top"]  = args.top
     if args.wall is not None: area_ratios["wall"] = args.wall
 
+    deltas = None
+    if args.deltas is not None:
+        deltas = [float(d) for d in args.deltas.split(",")]
+
     sample_w2_range(
         hdf5_path=args.hdf5,
         N=args.N,
@@ -846,6 +899,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         area_ratios=area_ratios,
         min_spacing=args.min_spacing,
         output_dir=Path(args.output_dir),
+        sensitivity=args.sensitivity,
+        deltas=deltas,
         verbose=not args.quiet,
     )
 
