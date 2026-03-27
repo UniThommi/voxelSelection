@@ -500,7 +500,7 @@ def plot_muon_heatmaps(
     verbose: bool = True,
 ) -> None:
     """
-    Per M: one figure with 3 heatmaps (Accuracy, Precision).
+    Per M: one figure with 3 heatmaps (Recall, Precision, F2-score).
     Axes: W (y) x Config (x). Cell text = value.
     """
     config_labels = [c.label for c in configs]
@@ -512,7 +512,7 @@ def plot_muon_heatmaps(
             sharey=True,
         )
 
-        metric_names = ["Accuracy", "Precision", "Specificity"]
+        metric_names = ["Recall", "Precision", "F2-score"]
         cmaps = ["YlOrRd", "PuBu", "Greens"]
 
         for mi, (metric_name, cmap) in enumerate(
@@ -529,15 +529,16 @@ def plot_muon_heatmaps(
 
                     TP, FP, TN, FN = cm["TP"], cm["FP"], cm["TN"], cm["FN"]
 
-                    if metric_name == "Accuracy":
-                        denom = TP + FP + TN + FN
-                        val = (TP + TN) / denom if denom > 0 else 0.0
+                    if metric_name == "Recall":
+                        denom = TP + FN
+                        val = TP / denom if denom > 0 else 0.0
                     elif metric_name == "Precision":
                         denom = TP + FP
                         val = TP / denom if denom > 0 else 0.0
-                    elif metric_name == "Specificity":
-                        denom = TN + FP
-                        val = TN / denom if denom > 0 else 0.0
+                    elif metric_name == "F2-score":
+                        # F_beta with beta=2: weights recall twice as much as precision
+                        denom = 5 * TP + 4 * FN + FP
+                        val = 5 * TP / denom if denom > 0 else 0.0
                     else:
                         val = 0.0
 
@@ -574,8 +575,9 @@ def plot_muon_heatmaps(
 
         fig.suptitle(
             f"Ge77 Muon Classification (M={M})\n"
-            f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total",
-            fontsize=12, y=1.02,
+            f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total  "
+            f"| Recall = TP/(TP+FN)  Precision = TP/(TP+FP)  F2 = 5·TP/(5·TP+4·FN+FP)",
+            fontsize=10, y=1.02,
         )
         plt.tight_layout()
 
@@ -757,7 +759,7 @@ def plot_muon_w2_scatter(
     if len(w2_cfgs) < 2 or num_ge77_muons == 0:
         return
 
-    threshold = 0.20 * num_ge77_muons
+    threshold = 0.05 * num_ge77_muons
 
     # Find all (M, W) pairs where at least one config (any, incl. all-voxels) exceeds threshold
     selected_mw = []
@@ -771,7 +773,8 @@ def plot_muon_w2_scatter(
 
     if not selected_mw:
         if verbose:
-            print("  muon_w2_scatter: no (M,W) pair reaches TP > 20% of Ge77 muons — skipped.")
+            print(f"  muon_w2_scatter: no (M,W) pair reaches TP > 5% of Ge77 muons "
+                  f"(>{0.05 * num_ge77_muons:.0f}) — skipped.")
         return
 
     colors = _get_colors(len(w2_cfgs))
@@ -841,7 +844,7 @@ def plot_muon_w2_scatter(
     )
     fig.suptitle(
         f"Ge77 Muon Detection (TP) vs Global W2 Homogeneity\n"
-        f"(Ge77 muons: {num_ge77_muons:,}  |  panels: TP > 20% recall  |  "
+        f"(Ge77 muons: {num_ge77_muons:,}  |  panels shown: TP > 5% of Ge77 muons  |  "
         f"{len(selected_mw)} (M,W) pair(s))",
         fontsize=12,
     )
