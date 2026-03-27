@@ -31,6 +31,8 @@ TestWassersteinWithBaseline
     - All-on-wall vs Fibonacci baseline → w2_normalized > 1.
 """
 
+import contextlib
+import io
 import math
 import sys
 import unittest
@@ -89,7 +91,8 @@ _SURFACE = {
 
 def _fibonacci_config(n: int, areas: list) -> np.ndarray:
     """N Fibonacci-spiral points distributed across the given areas (no snapping)."""
-    alloc = allocate_N_per_area(n, areas)
+    with contextlib.redirect_stdout(io.StringIO()):
+        alloc = allocate_N_per_area(n, areas)
     parts = []
     if "pit" in areas and alloc["pit"] > 0:
         pts = fibonacci_disk(alloc["pit"], 0.0, R_PIT - PMT_RADIUS)
@@ -141,7 +144,7 @@ def _classify_points(pts: np.ndarray) -> dict:
     r = np.sqrt(pts[:, 0]**2 + pts[:, 1]**2)
     z = pts[:, 2]
 
-    mask_wall = np.abs(r - R_ZYLINDER) < 1.0
+    mask_wall = np.abs(r - R_ZYLINDER) < 0.01   # wall pts at exact R_ZYLINDER (±1e-10 mm)
     mask_top  = (np.abs(z - _Z_TOP) < 1.0) & ~mask_wall
     mask_pit  = (np.abs(z - _Z_PIT) < 1.0) & (r <= R_PIT + 1.0) & ~mask_wall
     mask_bot  = (np.abs(z - _Z_BOT) < 1.0) & (r >= R_ZYL_BOT - 1.0) & ~mask_wall
