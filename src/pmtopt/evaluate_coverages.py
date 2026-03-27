@@ -600,10 +600,13 @@ def write_confusion_txt(
     num_ge77_muons: int,
     total_muons: int,
     verbose: bool = True,
+    ratio_override_warning: Optional[str] = None,
 ) -> None:
     """Write confusion matrices to text file."""
     out_path = output_dir / "confusion_matrices.txt"
     with open(out_path, "w") as f:
+        if ratio_override_warning is not None:
+            f.write(ratio_override_warning + "\n")
         f.write(f"# Ge77 Muon Confusion Matrices\n")
         f.write(f"# Total muons: {total_muons:,}\n")
         f.write(f"# Ge77 muons: {num_ge77_muons:,}\n")
@@ -641,10 +644,13 @@ def write_nc_summary_txt(
     M_values: list[int],
     output_dir: Path,
     verbose: bool = True,
+    ratio_override_warning: Optional[str] = None,
 ) -> None:
     """Write NC detection summary to text file."""
     out_path = output_dir / "nc_summary.txt"
     with open(out_path, "w") as f:
+        if ratio_override_warning is not None:
+            f.write(ratio_override_warning + "\n")
         f.write(f"# NC Detection Summary\n\n")
 
         for cfg in configs:
@@ -926,29 +932,58 @@ def main(argv: Optional[list[str]] = None) -> None:
     bl_voxels, bl_voxel_dicts, bl_data = load_config_json(args.baseline)
 
     # Area ratios — use baseline JSON ratios if present, else CLI/defaults
-    cli_ratio_flags = {
-        k for k, v in {"pit": args.pit, "bot": args.bot,
-                        "top": args.top, "wall": args.wall}.items()
+    _ALL_LAYERS = ("pit", "bot", "top", "wall")
+    cli_ratio_map = {
+        k: v for k, v in {"pit": args.pit, "bot": args.bot,
+                           "top": args.top, "wall": args.wall}.items()
         if v is not None
     }
+    cli_ratio_flags = set(cli_ratio_map)
     json_ratios = bl_data.get("config", {}).get("area_ratios", {})
     if json_ratios:
         if cli_ratio_flags:
-            raise RuntimeError(
-                f"Baseline JSON '{args.baseline}' already contains "
-                f"area_ratios — do not also pass "
-                f"--{'/--'.join(sorted(cli_ratio_flags))}. "
-                f"Remove the CLI ratio flags to use the JSON values."
+            # Require all four layers when overriding JSON ratios via CLI
+            missing_layers = [l for l in _ALL_LAYERS if l not in cli_ratio_flags]
+            if missing_layers:
+                raise RuntimeError(
+                    f"Baseline JSON '{args.baseline}' already contains "
+                    f"area_ratios. To override them via CLI flags you must "
+                    f"specify ALL four layers, but "
+                    f"{[f'--{l}' for l in missing_layers]} are missing."
+                )
+            # Full CLI override — use CLI values and emit a prominent warning
+            area_ratios = dict(cli_ratio_map)
+            ratio_override_warning = (
+                "\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                "!!                        WARNING                           !!\n"
+                "!!  CLI area ratios are overriding the ratios stored in     !!\n"
+                f"!!  the baseline JSON ({Path(args.baseline).name!r:^38s})  !!\n"
+                "!!  The binarization will NOT match the ratios used during  !!\n"
+                "!!  greedy optimisation.  Remove --pit/--bot/--top/--wall   !!\n"
+                "!!  to use the JSON ratios.                                 !!\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
             )
-        area_ratios = dict(DEFAULT_AREA_RATIOS)
-        area_ratios.update(json_ratios)
-        if verbose:
-            print(f"  Area ratios from baseline JSON (applied via stochastic "
-                  f"rounding to raw HDF5):")
-            for layer, ratio in area_ratios.items():
-                src = "(from JSON)" if layer in json_ratios else "(default)"
-                print(f"    {layer:>6}: {ratio}  {src}")
+            print(ratio_override_warning, file=sys.stderr)
+            if verbose:
+                print("  Area ratios (CLI override — see WARNING above):")
+                for layer in _ALL_LAYERS:
+                    json_val = json_ratios.get(layer, DEFAULT_AREA_RATIOS[layer])
+                    cli_val = area_ratios[layer]
+                    changed = " <-- overrides JSON" if cli_val != json_val else ""
+                    print(f"    {layer:>6}: {cli_val}  (JSON had {json_val}){changed}")
+        else:
+            ratio_override_warning = None
+            area_ratios = dict(DEFAULT_AREA_RATIOS)
+            area_ratios.update(json_ratios)
+            if verbose:
+                print(f"  Area ratios from baseline JSON (applied via stochastic "
+                      f"rounding to raw HDF5):")
+                for layer, ratio in area_ratios.items():
+                    src = "(from JSON)" if layer in json_ratios else "(default)"
+                    print(f"    {layer:>6}: {ratio}  {src}")
     else:
+        ratio_override_warning = None
         area_ratios = dict(DEFAULT_AREA_RATIOS)
         if args.pit is not None:
             area_ratios["pit"] = args.pit
@@ -1090,8 +1125,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         num_ge77_muons=ed.num_ge77_muons,
         total_muons=ed.total_muons,
         verbose=verbose,
+        ratio_override_warning=ratio_override_warning,
     )
-    write_nc_summary_txt(all_configs, M_values, output_dir, verbose=verbose)
+    write_nc_summary_txt(
+        all_configs, M_values, output_dir,
+        verbose=verbose,
+        ratio_override_warning=ratio_override_warning,
+    )
 
     # W2 vs coverage plots
     plot_w2_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
