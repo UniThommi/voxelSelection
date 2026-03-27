@@ -42,6 +42,7 @@ from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
 from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS
 from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
 from pmtopt.greedy import _apply_spacing, greedy_select_nc
+from pmtopt.plotting import plot_selected_voxels
 from pmtopt.sensitivity import run_sensitivity
 
 
@@ -419,6 +420,16 @@ def sample_efficiency_range(
         if verbose:
             print(f"  setup_{i:02d}  achieved={achieved:.4%}  W2={w2_str} mm  [{info}]"
                   f"  -> {out_path.name}")
+
+        plot_path = output_dir / f"setup_{i:02d}.png"
+        sel_arr = np.array(final_selected)
+        plot_selected_voxels(
+            centers[sel_arr],
+            layers[sel_arr],
+            [str(voxel_ids[c]) for c in final_selected],
+            output_path=plot_path,
+            title_extra=f"eff={achieved:.4%}  W2={w2_str} mm  [{info}]",
+        )
 
     # setup_00: best (greedy, deterministic)
     t0 = time.time()

@@ -7,6 +7,7 @@ Subcommands:
   greedy       Greedy voxel selection from HDF5 simulation data (NC / muon-Ge77 modes)
   homogeneous  Generate all voxels or select N homogeneously distributed voxels
   rotate       Rotate an existing voxel selection by an azimuthal angle
+  plot         Generate 3D plots for existing JSON voxel selection files
 
 Usage examples:
     # Greedy: NC mode
@@ -32,6 +33,9 @@ Usage examples:
     # Rotate: explore all valid angles
     python -m pmtopt.main rotate --all-voxels all.json --selected greedy.json \\
         --output-dir ./output
+
+    # Plot: generate 3D PNG for one or more existing JSON selections
+    python -m pmtopt.main plot greedy_N300.json setup_*.json
 
 Author: Thomas Buerger (University of Tübingen)
 """
@@ -682,7 +686,67 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         )
 
 
-_SUBCOMMANDS = ("greedy", "homogeneous", "rotate")
+def run_plot(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate 3D plots for existing JSON voxel selection files.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "json_files", nargs="+", type=str,
+        help="One or more paths to JSON voxel selection files. "
+             "The PNG is saved next to each JSON with the same stem.",
+    )
+    parser.add_argument(
+        "--title", type=str, default=None,
+        help="Custom title suffix for all plots. If not set, uses "
+             "config metadata from the JSON (N, efficiency, etc.).",
+    )
+    args = parser.parse_args(argv)
+
+    for json_path_str in args.json_files:
+        json_path = Path(json_path_str)
+        if not json_path.exists():
+            print(f"ERROR: file not found: {json_path}", file=sys.stderr)
+            continue
+
+        with open(json_path) as jf:
+            data = json.load(jf)
+
+        selected_voxels = data.get("selected_voxels", [])
+        if not selected_voxels:
+            print(f"WARNING: no selected_voxels in {json_path.name}, skipping.")
+            continue
+
+        centers_list = [v["center"] for v in selected_voxels]
+        layers_list = [v["layer"] for v in selected_voxels]
+        ids_list = [str(v["index"]) for v in selected_voxels]
+
+        centers = np.array(centers_list, dtype=float)
+        layers = np.array(layers_list)
+
+        if args.title is not None:
+            title_extra = args.title
+        else:
+            cfg = data.get("config", {})
+            eff = data.get("efficiency")
+            parts = [f"N={len(selected_voxels)}"]
+            if cfg.get("optimize"):
+                parts.append(f"mode={cfg['optimize']}")
+            if cfg.get("M") is not None:
+                parts.append(f"M={cfg['M']}")
+            if cfg.get("m") is not None:
+                parts.append(f"m={cfg['m']}")
+            if eff is not None:
+                parts.append(f"eff={eff:.4%}")
+            title_extra = "  ".join(parts)
+
+        png_path = json_path.with_suffix(".png")
+        plot_selected_voxels(centers, layers, ids_list,
+                             output_path=png_path, title_extra=title_extra)
+        print(f"  -> {png_path}")
+
+
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -694,6 +758,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(
             "usage: main.py <subcommand> [args ...]\n"
             f"subcommands: {', '.join(_SUBCOMMANDS)}\n\n"
+            "  greedy       Greedy PMT selection from HDF5 simulation data\n"
+            "  homogeneous  Generate or select homogeneously distributed voxels\n"
+            "  rotate       Rotate an existing voxel selection azimuthally\n"
+            "  plot         Plot existing JSON voxel selection file(s)\n\n"
             "Run 'main.py <subcommand> --help' for subcommand-specific help."
         )
         sys.exit(1 if argv else 0)
@@ -708,6 +776,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     elif mode == "rotate":
         from pmtopt.rotate import main as rot_main
         rot_main(rest)
+    elif mode == "plot":
+        run_plot(rest)
 
 
 if __name__ == "__main__":
