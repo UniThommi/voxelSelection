@@ -16,12 +16,13 @@ import math
 import os
 import sys
 from pathlib import Path
+import ot
 
 import numpy as np
+import scipy.spatial.distance as _ssd
 from matplotlib import patches
 from matplotlib import pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from scipy.spatial import KDTree
 
 # ---------------------------------------------------------------------------
 # Import geometry constants from pmtopt package
@@ -387,59 +388,209 @@ def select_homogeneous_for_area(n: int, area: str, voxels: list) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Homogeneity statistics
+# Wasserstein homogeneity
 # ---------------------------------------------------------------------------
+def sample_reference_distribution(
+    M: int = 3000,
+    seed: int = 42,
+    areas: list[str] | None = None,
+) -> np.ndarray:
+    """Sample M points uniformly from the detector surface.
 
-def compute_nn_stats(voxels: list) -> tuple:
-    """Euclidean nearest-neighbour distance stats."""
-    if len(voxels) < 2:
-        return np.array([]), {}
-    centers = np.array([v["center"] for v in voxels])
-    tree = KDTree(centers)
-    dists, _ = tree.query(centers, k=2)
-    nn = dists[:, 1]
-    mean = float(np.mean(nn))
-    return nn, {
-        "mean": mean,
-        "std":  float(np.std(nn)),
-        "min":  float(np.min(nn)),
-        "max":  float(np.max(nn)),
-        "cv":   float(np.std(nn) / mean) if mean > 0 else 0.0,
+    Points are distributed across the requested areas proportionally to
+    surface area using the largest-remainder method, then sampled with the
+    correct area-uniform distribution (inverse-CDF for flat disks, direct
+    uniform for the cylindrical wall).
+
+    Parameters
+    ----------
+    M : int
+        Total number of reference points.
+    seed : int
+        Seed for the random number generator (reproducible by default).
+    areas : list of str or None
+        Subset of ``["pit", "bot", "top", "wall"]``.  If None, all four
+        areas are used.
+
+    Returns
+    -------
+    ref : np.ndarray, shape (M, 3)
+        3-D coordinates of the reference points in mm.
+    """
+    _all_areas = ["pit", "bot", "top", "wall"]
+    areas_to_use = areas if areas is not None else _all_areas
+
+    rng = np.random.default_rng(seed)
+
+    # z-coordinates of the flat surfaces (use homogeneous.py voxel conventions)
+    z_pit = float(Z_BASE + DZ_PIT / 2)
+    z_bot = float(Z_BASE + T_ZYLINDER / 2)
+    z_top = float(Z_BASE + H_CYLINDER + T_ZYLINDER / 2)
+    z_wall_min = float(Z_BASE)
+    z_wall_max = float(Z_BASE + H_CYLINDER)
+
+    surface_areas: dict[str, float] = {
+        "pit":  np.pi * R_PIT**2,
+        "bot":  np.pi * (R_ZYLINDER**2 - R_ZYL_BOT**2),
+        "top":  np.pi * (R_ZYLINDER**2 - R_ZYL_TOP**2),
+        "wall": 2.0 * np.pi * R_ZYLINDER * (z_wall_max - z_wall_min),
+    }
+    selected = {a: surface_areas[a] for a in areas_to_use}
+    total_area = sum(selected.values())
+
+    # Proportional allocation with largest-remainder rounding
+    raw = {a: M * s / total_area for a, s in selected.items()}
+    floors = {a: int(np.floor(v)) for a, v in raw.items()}
+    remainders = {a: raw[a] - floors[a] for a in raw}
+    leftover = M - sum(floors.values())
+    sorted_by_rem = sorted(remainders, key=lambda a: remainders[a], reverse=True)
+    m_per_area = dict(floors)
+    for i in range(leftover):
+        m_per_area[sorted_by_rem[i]] += 1
+
+    parts: list[np.ndarray] = []
+
+    if "pit" in areas_to_use:
+        m = m_per_area["pit"]
+        # Inverse-CDF for disk (r_in = 0): r = sqrt(u) * R_PIT
+        u = rng.uniform(0.0, 1.0, size=m)
+        r = np.sqrt(u) * R_PIT
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
+        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_pit)]))
+
+    if "bot" in areas_to_use:
+        m = m_per_area["bot"]
+        u = rng.uniform(0.0, 1.0, size=m)
+        r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_BOT**2) + R_ZYL_BOT**2)
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
+        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_bot)]))
+
+    if "top" in areas_to_use:
+        m = m_per_area["top"]
+        u = rng.uniform(0.0, 1.0, size=m)
+        r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_TOP**2) + R_ZYL_TOP**2)
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
+        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_top)]))
+
+    if "wall" in areas_to_use:
+        m = m_per_area["wall"]
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
+        z = rng.uniform(z_wall_min, z_wall_max, size=m)
+        r = float(R_ZYLINDER)
+        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), z]))
+
+    return np.vstack(parts)
+
+
+def compute_wasserstein_homogeneity(
+    centers: np.ndarray,
+    reference: np.ndarray | None = None,
+    M: int = 3000,
+    seed: int = 42,
+) -> dict:
+    """2-Wasserstein distance between a PMT configuration and the uniform
+    detector surface.
+
+    Uses exact Earth Mover's Distance (``ot.emd2``) on a squared-Euclidean
+    cost matrix.  Lower W2 means better spatial homogeneity.
+
+    If ``reference`` is pre-computed, it is reused directly (pass this when
+    calling many times to avoid redundant sampling).  Otherwise M reference
+    points are sampled via ``sample_reference_distribution``.
+
+    Parameters
+    ----------
+    centers : np.ndarray, shape (N, 3)
+        3-D positions of the PMT configuration in mm.
+    reference : np.ndarray, shape (M, 3) or None
+        Pre-computed reference sample.  If None, computed from
+        ``sample_reference_distribution(M, seed)``.
+    M : int
+        Reference sample size (used only when ``reference`` is None).
+    seed : int
+        Seed for reference sampling (used only when ``reference`` is None).
+
+    Returns
+    -------
+    dict with keys:
+        ``w2``         — W2 distance in mm (sqrt of OT cost); primary metric.
+        ``ot_cost``    — raw OT cost (W2²); for debugging.
+        ``n_config``   — number of configuration points N.
+        ``m_reference``— number of reference points used.
+
+    Notes
+    -----
+    For N=300, M=3000 the cost matrix is ~7 MB and ``ot.emd2`` runs in
+    < 1 s.  For tight loops (> 1000 calls) consider the faster
+    ``ot.sliced_wasserstein_distance`` approximation instead.
+    """
+
+    if len(centers) < 2:
+        raise ValueError(f"compute_wasserstein_homogeneity requires at least 2 points, got {len(centers)}")
+
+    if reference is None:
+        reference = sample_reference_distribution(M=M, seed=seed)
+
+    N = len(centers)
+    M_ref = len(reference)
+
+    a = np.ones(N, dtype=np.float64) / N
+    b = np.ones(M_ref, dtype=np.float64) / M_ref
+    cost = _ssd.cdist(centers.astype(np.float64), reference.astype(np.float64), metric="sqeuclidean")
+
+    ot_cost = float(ot.emd2(a, b, cost))
+    return {
+        "w2":          float(np.sqrt(ot_cost)),
+        "ot_cost":     ot_cost,
+        "n_config":    N,
+        "m_reference": M_ref,
     }
 
 
-def compute_nn_stats_wall(voxels: list) -> tuple:
-    """Geodesic NN stats on cylinder wall: arc length in φ, Euclidean in z."""
-    if len(voxels) < 2:
-        return np.array([]), {}
-    centers = np.array([v["center"] for v in voxels])
-    phi = np.arctan2(centers[:, 1], centers[:, 0])
-    z = centers[:, 2]
-    n = len(centers)
-    nn = np.full(n, np.inf)
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            dphi = abs(phi[i] - phi[j])
-            dphi = min(dphi, 2 * np.pi - dphi)
-            dist = np.sqrt((R_ZYLINDER * dphi)**2 + (z[i] - z[j])**2)
-            if dist < nn[i]:
-                nn[i] = dist
-    mean = float(np.mean(nn))
-    return nn, {
-        "mean": mean,
-        "std":  float(np.std(nn)),
-        "min":  float(np.min(nn)),
-        "max":  float(np.max(nn)),
-        "cv":   float(np.std(nn) / mean) if mean > 0 else 0.0,
+def compute_wasserstein_homogeneity_with_baseline(
+    centers: np.ndarray,
+    fibonacci_centers: np.ndarray,
+    M: int = 3000,
+    seed: int = 42,
+) -> dict:
+    """Like ``compute_wasserstein_homogeneity`` but also reports a Fibonacci
+    baseline and a normalised score.
+
+    Computes W2 for both ``centers`` and ``fibonacci_centers`` against the
+    *same* reference sample (same seed), enabling a normalised score:
+    ``w2_normalized = w2 / w2_fibonacci_baseline``.  A value of 1.0 means the
+    configuration is as homogeneous as the Fibonacci ideal.
+
+    Parameters
+    ----------
+    centers : np.ndarray, shape (N, 3)
+        Configuration to evaluate.
+    fibonacci_centers : np.ndarray, shape (N, 3)
+        Fibonacci reference configuration of the same size.
+    M : int
+        Reference sample size.
+    seed : int
+        Seed for reference sampling.
+
+    Returns
+    -------
+    dict with keys:
+        ``w2``                   — W2 of the input configuration.
+        ``w2_fibonacci_baseline``— W2 of the Fibonacci configuration.
+        ``w2_normalized``        — ``w2 / w2_fibonacci_baseline``.
+        ``ot_cost``              — raw OT cost for the input configuration.
+        ``n_config``             — N.
+        ``m_reference``          — M.
+    """
+    reference = sample_reference_distribution(M=M, seed=seed)
+    result = compute_wasserstein_homogeneity(centers, reference=reference)
+    fib_result = compute_wasserstein_homogeneity(fibonacci_centers, reference=reference)
+    w2_fib = fib_result["w2"]
+    return {
+        **result,
+        "w2_fibonacci_baseline": w2_fib,
+        "w2_normalized": result["w2"] / w2_fib if w2_fib > 0.0 else float("inf"),
     }
-
-
-def compute_nn_stats_for_area(area: str, voxels: list) -> tuple:
-    if area == "wall":
-        return compute_nn_stats_wall(voxels)
-    return compute_nn_stats(voxels)
 
 
 # ---------------------------------------------------------------------------
@@ -571,8 +722,12 @@ def plot_selected_3d(selected_by_area: dict, all_by_area: dict, output_path: str
     print(f"  Saved: {output_path}")
 
 
-def plot_homogeneity(selected_by_area: dict, nn_data: dict, output_path: str) -> None:
-    """2D homogeneity plots per area: XY for pit/bot/top, φ-z for wall, with CV."""
+def plot_homogeneity(
+    selected_by_area: dict,
+    w2_data: dict[str, float | None],
+    output_path: str,
+) -> None:
+    """2D homogeneity plots per area: XY for pit/bot/top, φ-z for wall, with W2."""
     area_order = [a for a in VALID_AREAS if a in selected_by_area and selected_by_area[a]]
     if not area_order:
         return
@@ -583,8 +738,8 @@ def plot_homogeneity(selected_by_area: dict, nn_data: dict, output_path: str) ->
     for idx, area in enumerate(area_order):
         ax = axes[idx // ncols][idx % ncols]
         voxels = selected_by_area[area]
-        _, stats = nn_data.get(area, (np.array([]), {}))
-        cv_str = f"CV={stats['cv']:.3f}" if stats else "n/a"
+        w2_val = w2_data.get(area)
+        w2_str = f"W2={w2_val:.1f} mm" if w2_val is not None else "n/a"
 
         if area == "wall":
             centers = np.array([v["center"] for v in voxels])
@@ -628,7 +783,7 @@ def plot_homogeneity(selected_by_area: dict, nn_data: dict, output_path: str) ->
             ax.set_xlabel("x [mm]")
             ax.set_ylabel("y [mm]")
 
-        ax.set_title(f"{area.capitalize()} (N={len(voxels)}, {cv_str})")
+        ax.set_title(f"{area.capitalize()} (N={len(voxels)}, {w2_str})")
         ax.grid(True, alpha=0.3)
 
     for idx in range(len(area_order), nrows * ncols):
@@ -636,7 +791,7 @@ def plot_homogeneity(selected_by_area: dict, nn_data: dict, output_path: str) ->
 
     plt.suptitle(
         "PMT positions per area — homogeneity check\n"
-        "CV = std/mean of nearest-neighbour distances (lower = more uniform)",
+        "W2 = 2-Wasserstein distance vs uniform reference (lower = more uniform)",
         fontsize=13, fontweight="bold"
     )
     plt.tight_layout()
@@ -734,26 +889,41 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str,
     total_selected = sum(len(v) for v in selected_by_area.values())
     print(f"\n  Total selected: {total_selected}")
 
-    # Homogeneity stats
+    # Wasserstein homogeneity
     print("\n" + "=" * 72)
-    print("HOMOGENEITY CHECK: Nearest-Neighbour Distance Analysis")
+    print("HOMOGENEITY CHECK: Wasserstein Distance Analysis")
     print("=" * 72)
-    print(f"\n  {'Area':<6} {'N':>4} {'Mean NN':>10} {'Std NN':>10} "
-          f"{'Min NN':>10} {'Max NN':>10} {'CV':>8}")
-    print(f"  " + "-" * 60)
-    nn_data: dict = {}
+
+    # Pre-compute per-area reference distributions once (seed=42, M=3000)
+    area_refs = {
+        area: sample_reference_distribution(M=3000, seed=42, areas=[area])
+        for area in areas
+        if selected_by_area.get(area)
+    }
+    # Global reference across all selected areas
+    global_ref = sample_reference_distribution(M=3000, seed=42, areas=areas)
+
+    all_centers = np.array([
+        v["center"] for area in areas for v in selected_by_area.get(area, [])
+    ])
+    global_w2_result = compute_wasserstein_homogeneity(all_centers, reference=global_ref)
+
+    print(f"\n  Global W2 = {global_w2_result['w2']:.1f} mm  "
+          f"(N={global_w2_result['n_config']}, M_ref={global_w2_result['m_reference']})")
+    print(f"\n  {'Area':<6} {'N':>4} {'W2 (mm)':>12}")
+    print(f"  " + "-" * 26)
+    w2_data: dict[str, float | None] = {}
     for area in areas:
         voxels = selected_by_area.get(area, [])
-        nn_dists, stats = compute_nn_stats_for_area(area, voxels)
-        nn_data[area] = (nn_dists, stats)
-        if stats:
-            print(f"  {area:<6} {len(voxels):>4} {stats['mean']:>10.1f} "
-                  f"{stats['std']:>10.1f} {stats['min']:>10.1f} "
-                  f"{stats['max']:>10.1f} {stats['cv']:>8.3f}")
+        if len(voxels) >= 2:
+            centers = np.array([v["center"] for v in voxels])
+            result = compute_wasserstein_homogeneity(centers, reference=area_refs[area])
+            w2_data[area] = result["w2"]
+            print(f"  {area:<6} {len(voxels):>4} {result['w2']:>12.1f}")
         else:
+            w2_data[area] = None
             print(f"  {area:<6} {len(voxels):>4}   (too few points for stats)")
-    print(f"\n  CV = std/mean  |  lower = more uniform")
-    print(f"  Fibonacci ideal: CV ~0.05-0.15  |  after voxel snapping: CV <= 0.25 is good")
+    print(f"\n  W2 = 2-Wasserstein distance vs uniform reference  |  lower = more uniform")
 
     # Plots
     print("\n  Generating plots...")
@@ -762,7 +932,7 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str,
         os.path.join(output_dir, f"{stem}_3d.png")
     )
     plot_homogeneity(
-        selected_by_area, nn_data,
+        selected_by_area, w2_data,
         os.path.join(output_dir, f"{stem}_homogeneity.png")
     )
 
@@ -845,4 +1015,61 @@ Examples (via unified CLI):
 
 
 if __name__ == "__main__":
-    main()
+    # ------------------------------------------------------------------
+    # Sanity check: W2 detects global region imbalance
+    #   Run with:  python homogeneous.py --sanity-check
+    # ------------------------------------------------------------------
+    if len(sys.argv) == 2 and sys.argv[1] == "--sanity-check":
+        print("Running Wasserstein sanity check ...")
+        _N = 300
+        _areas = ["pit", "bot", "top", "wall"]
+
+        # 1. Fibonacci homogeneous configuration
+        _alloc = allocate_N_per_area(_N, _areas)
+        _fib_voxels: list[dict] = []
+        for _a in _areas:
+            _n_a = _alloc[_a]
+            if _a == "pit":
+                _pts = fibonacci_disk(_n_a, 0, R_PIT - PMT_RADIUS)
+                _z_a = float(Z_BASE + DZ_PIT / 2)
+                for _p in _pts:
+                    _fib_voxels.append({"center": [_p[0], _p[1], _z_a], "layer": _a})
+            elif _a == "bot":
+                _pts = fibonacci_disk(_n_a, R_ZYL_BOT + PMT_RADIUS, R_ZYLINDER - PMT_RADIUS)
+                _z_a = float(Z_BASE + T_ZYLINDER / 2)
+                for _p in _pts:
+                    _fib_voxels.append({"center": [_p[0], _p[1], _z_a], "layer": _a})
+            elif _a == "top":
+                _pts = fibonacci_disk(_n_a, R_ZYL_TOP + PMT_RADIUS, R_ZYLINDER - PMT_RADIUS)
+                _z_a = float(Z_BASE + H_CYLINDER + T_ZYLINDER / 2)
+                for _p in _pts:
+                    _fib_voxels.append({"center": [_p[0], _p[1], _z_a], "layer": _a})
+            elif _a == "wall":
+                _z_min_w = float(Z_BASE + PMT_RADIUS)
+                _z_max_w = float(Z_BASE + H_CYLINDER - PMT_RADIUS)
+                _pts = fibonacci_cylinder_wall(_n_a, float(R_ZYLINDER), _z_min_w, _z_max_w)
+                for _p in _pts:
+                    _fib_voxels.append({"center": _p.tolist(), "layer": _a})
+
+        _fib_centers = np.array([v["center"] for v in _fib_voxels])
+
+        # 2. Clustered configuration: all 300 points on the wall only
+        _wall_pts = fibonacci_cylinder_wall(
+            _N, float(R_ZYLINDER),
+            float(Z_BASE + PMT_RADIUS), float(Z_BASE + H_CYLINDER - PMT_RADIUS)
+        )
+        _clustered_centers = _wall_pts
+
+        # 3. Compute W2 for both against the full reference
+        _ref = sample_reference_distribution(M=3000, seed=42)
+        _w2_fib = compute_wasserstein_homogeneity(_fib_centers, reference=_ref)["w2"]
+        _w2_clust = compute_wasserstein_homogeneity(_clustered_centers, reference=_ref)["w2"]
+
+        print(f"  W2 (Fibonacci homogeneous) = {_w2_fib:.1f} mm")
+        print(f"  W2 (all on wall, clustered) = {_w2_clust:.1f} mm")
+        assert _w2_clust > _w2_fib, (
+            f"FAIL: W2_clustered ({_w2_clust:.1f}) should be > W2_fibonacci ({_w2_fib:.1f})"
+        )
+        print("  PASS: W2_clustered > W2_fibonacci — global imbalance correctly detected.")
+    else:
+        main()

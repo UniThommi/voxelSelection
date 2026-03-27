@@ -39,20 +39,33 @@ import numpy as np
 from scipy import sparse
 
 from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
-from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS, compute_nn_stats
+from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS
+from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
 from pmtopt.greedy import _apply_spacing, greedy_select_nc
 from pmtopt.sensitivity import run_sensitivity
 
 
 # ===================================================================
-# CV helper
+# W2 homogeneity helper
 # ===================================================================
 
-def _compute_cv(selected_cols: list[int], centers: np.ndarray) -> float | None:
-    """Global CV of NN distances (KDTree, Euclidean 3-D) for selected voxels."""
+# Reference distribution shared across all calls within a run (lazy init).
+_W2_REF: np.ndarray | None = None
+
+
+def _get_w2_ref() -> np.ndarray:
+    global _W2_REF
+    if _W2_REF is None:
+        _W2_REF = sample_reference_distribution(M=3000, seed=42)
+    return _W2_REF
+
+
+def _compute_w2(selected_cols: list[int], centers: np.ndarray) -> float | None:
+    """Global W2 homogeneity (2-Wasserstein vs uniform detector surface)."""
     sel_centers = centers[selected_cols]
-    stats = compute_nn_stats(sel_centers)
-    return stats.get("cv") if stats else None
+    if len(sel_centers) < 2:
+        return None
+    return compute_wasserstein_homogeneity(sel_centers, reference=_get_w2_ref())["w2"]
 
 
 # ===================================================================
@@ -243,13 +256,13 @@ def plot_coverage_vs_f(
         zip(f_per_result, [r["achieved"] for r in results]),
         key=lambda x: x[0],
     )
-    pairs_cv = sorted(
-        [(f, r["cv"]) for f, r in zip(f_per_result, results) if r["cv"] is not None],
+    pairs_w2 = sorted(
+        [(f, r["w2"]) for f, r in zip(f_per_result, results) if r["w2"] is not None],
         key=lambda x: x[0],
     )
     fs, effs = zip(*pairs_eff)
 
-    cv_color = "darkorange"
+    w2_color = "darkorange"
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(fs, effs, "o-", color="steelblue", markersize=6, linewidth=1.5,
@@ -257,17 +270,17 @@ def plot_coverage_vs_f(
     ax.set_xlabel("f  (probability of greedy pick)")
     ax.set_ylabel("NC detection efficiency", color="steelblue")
     ax.tick_params(axis="y", labelcolor="steelblue")
-    ax.set_title("NC coverage and NN-spacing CV vs greedy fraction f")
+    ax.set_title("NC coverage and W2 homogeneity vs greedy fraction f")
     ax.set_xlim(-0.05, 1.05)
     ax.grid(True, alpha=0.3)
 
-    if pairs_cv:
-        fs_cv, cvs = zip(*pairs_cv)
+    if pairs_w2:
+        fs_w2, w2s = zip(*pairs_w2)
         ax2 = ax.twinx()
-        ax2.plot(fs_cv, cvs, "s--", color=cv_color, markersize=5, linewidth=1.5,
-                 label="CV (agg)")
-        ax2.set_ylabel("Aggregate CV (NN homogeneity)", color=cv_color)
-        ax2.tick_params(axis="y", labelcolor=cv_color)
+        ax2.plot(fs_w2, w2s, "s--", color=w2_color, markersize=5, linewidth=1.5,
+                 label="W2 (mm)")
+        ax2.set_ylabel("W2 (mm)  — 2-Wasserstein homogeneity", color=w2_color)
+        ax2.tick_params(axis="y", labelcolor=w2_color)
         ax2.set_ylim(bottom=0)
     fig.tight_layout()
 
@@ -394,17 +407,17 @@ def sample_efficiency_range(
             min_spacing=min_spacing,
             output_path=out_path,
         )
-        cv = _compute_cv(final_selected, centers)
+        w2 = _compute_w2(final_selected, centers)
         results.append({
             "name": f"setup_{i:02d}",
             "achieved": achieved,
-            "cv": cv,
+            "w2": w2,
             "info": info,
             "selected": final_selected,
         })
-        cv_str = f"{cv:.4f}" if cv is not None else "N/A"
+        w2_str = f"{w2:.1f}" if w2 is not None else "N/A"
         if verbose:
-            print(f"  setup_{i:02d}  achieved={achieved:.4%}  CV={cv_str}  [{info}]"
+            print(f"  setup_{i:02d}  achieved={achieved:.4%}  W2={w2_str} mm  [{info}]"
                   f"  -> {out_path.name}")
 
     # setup_00: best (greedy, deterministic)
@@ -441,13 +454,13 @@ def sample_efficiency_range(
         sf.write(f"# eff_min={eff_min:.6f}, eff_max={eff_max:.6f}\n")
         sf.write(f"# range={eff_max - eff_min:.6f}\n\n")
         sf.write(
-            f"{'Setup':<12} {'Achieved':>12} {'CV (global)':>12}  Notes\n"
+            f"{'Setup':<12} {'Achieved':>12} {'W2 mm (global)':>15}  Notes\n"
         )
-        sf.write("-" * 55 + "\n")
+        sf.write("-" * 58 + "\n")
         for r in results:
-            cv_str = f"{r['cv']:.4f}" if r["cv"] is not None else "N/A"
+            w2_str = f"{r['w2']:.1f}" if r["w2"] is not None else "N/A"
             sf.write(
-                f"{r['name']:<12} {r['achieved']:>10.4%} {cv_str:>12}  {r['info']}\n"
+                f"{r['name']:<12} {r['achieved']:>10.4%} {w2_str:>15}  {r['info']}\n"
             )
 
     if verbose:

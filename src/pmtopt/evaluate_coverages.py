@@ -41,7 +41,10 @@ from pmtopt.geometry import (
     DEFAULT_AREA_RATIOS,
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
-    compute_nn_stats,
+)
+from pmtopt.homogeneous import (
+    sample_reference_distribution,
+    compute_wasserstein_homogeneity,
 )
 from pmtopt.data_loading import (
     load_raw_sparse,
@@ -74,7 +77,7 @@ class ConfigResult:
         self.label = label
         self.voxel_ids = voxel_ids
         self.voxel_dicts: list[dict] = []          # full voxel objects from JSON (center, layer, …)
-        self.cv: float | None = None               # global CV of NN spacing (all voxels)
+        self.w2: float | None = None               # global W2 homogeneity (all voxels)
         self.col_indices: np.ndarray | None = None
 
         # NC coverage: coverage_counts[nc] = #selected voxels seeing NC
@@ -273,16 +276,27 @@ def load_shared_data(
 
 
 # ===================================================================
-# CV computation
+# W2 homogeneity computation
 # ===================================================================
 
-def compute_config_cv(voxel_dicts: list[dict]) -> float | None:
-    """Global CV of NN distances (Euclidean 3-D, KDTree) over all voxels."""
+# Reference distribution shared across all calls within a run (lazy init).
+_W2_REFERENCE: np.ndarray | None = None
+
+
+def _get_w2_reference() -> np.ndarray:
+    """Return (and lazily compute) the module-level W2 reference sample."""
+    global _W2_REFERENCE
+    if _W2_REFERENCE is None:
+        _W2_REFERENCE = sample_reference_distribution(M=3000, seed=42)
+    return _W2_REFERENCE
+
+
+def compute_config_w2(voxel_dicts: list[dict]) -> float | None:
+    """Global W2 homogeneity (2-Wasserstein vs uniform detector surface)."""
     if len(voxel_dicts) < 2:
         return None
     centers = np.array([v["center"] for v in voxel_dicts], dtype=float)
-    stats = compute_nn_stats(centers)
-    return stats.get("cv") if stats else None
+    return compute_wasserstein_homogeneity(centers, reference=_get_w2_reference())["w2"]
 
 
 # ===================================================================
@@ -387,17 +401,17 @@ def _get_colors(n: int) -> list:
 
 
 def _config_label(cfg: ConfigResult) -> str:
-    """Label with CV appended if available."""
-    if cfg.cv is not None:
-        return f"{cfg.label} (CV={cfg.cv:.3f})"
+    """Label with W2 appended if available."""
+    if cfg.w2 is not None:
+        return f"{cfg.label} (W2={cfg.w2:.1f})"
     return cfg.label
 
 
-def _sorted_by_cv(configs: list[ConfigResult]) -> list[ConfigResult]:
-    """Return configs sorted by CV descending (None CV goes last)."""
+def _sorted_by_w2(configs: list[ConfigResult]) -> list[ConfigResult]:
+    """Return configs sorted by W2 descending (None W2 goes last)."""
     return sorted(
         configs,
-        key=lambda c: (c.cv is None, -(c.cv or 0.0)),
+        key=lambda c: (c.w2 is None, -(c.w2 or 0.0)),
     )
 
 
@@ -415,12 +429,12 @@ def plot_nc_coverage(
     Two-panel NC detection coverage plot:
     - Left: log scale, all configs (incl. all-voxels reference)
     - Right: linear scale, configs without the all-voxels reference
-    Configs ordered by CV descending; labels show CV value.
+    Configs ordered by W2 descending; labels show W2 value.
     """
     M_range = list(range(1, M_max + 1))
 
-    # Sort all configs by CV desc; the all-voxels config has no CV
-    ordered = _sorted_by_cv(configs)
+    # Sort all configs by W2 desc; the all-voxels config has no W2
+    ordered = _sorted_by_w2(configs)
     no_all = [c for c in ordered if c.name != "all_voxels"]
 
     colors_all = _get_colors(len(ordered))
@@ -649,26 +663,25 @@ def write_nc_summary_txt(
 
 
 # ===================================================================
-# Plotting: CV vs coverage
+# Plotting: W2 vs coverage
 # ===================================================================
 
 
-
-def plot_cv_coverage_scatter(
+def plot_w2_coverage_scatter(
     configs: list[ConfigResult],
     M_values: list[int],
     output_dir: Path,
     verbose: bool = True,
 ) -> None:
-    """One subplot per selected M — global CV (x) vs detected NCs (y).
+    """One subplot per selected M — global W2 (x) vs detected NCs (y).
     Each setup shown as a vertical stem + dot. Shared legend with setup names."""
-    cv_cfgs = [cfg for cfg in configs if cfg.cv is not None]
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
 
-    if len(cv_cfgs) < 2:
+    if len(w2_cfgs) < 2:
         return
 
-    colors = _get_colors(len(cv_cfgs))
-    color_map = {cfg.name: colors[i] for i, cfg in enumerate(cv_cfgs)}
+    colors = _get_colors(len(w2_cfgs))
+    color_map = {cfg.name: colors[i] for i, cfg in enumerate(w2_cfgs)}
 
     scatter_ms = [M for M in _SCATTER_M_VALUES if M in set(M_values)]
     if not scatter_ms:
@@ -685,19 +698,19 @@ def plot_cv_coverage_scatter(
     for pi, M in enumerate(scatter_ms):
         ax = axes_flat[pi]
 
-        for cfg in cv_cfgs:
+        for cfg in w2_cfgs:
             color = color_map[cfg.name]
-            cv = cfg.cv
+            w2 = cfg.w2
             count = cfg.num_detected.get(M, 0)
-            stem, = ax.plot([cv, cv], [0, count], color=color, linewidth=1.8, alpha=0.7)
-            dot = ax.scatter([cv], [count], color=color, s=60, zorder=3)
+            ax.plot([w2, w2], [0, count], color=color, linewidth=1.8, alpha=0.7)
+            ax.scatter([w2], [count], color=color, s=60, zorder=3)
             if pi == 0:
                 legend_handles.append(
                     plt.Line2D([0], [0], color=color, marker="o", markersize=6,
                                label=_config_label(cfg), linewidth=1.5)
                 )
 
-        ax.set_xlabel("Global CV (NN spacing)", fontsize=9)
+        ax.set_xlabel("Global W2 (mm)", fontsize=9)
         ax.set_ylabel("Detected NCs", fontsize=9)
         ax.set_title(f"M ≥ {M}", fontsize=10)
         ax.set_ylim(bottom=0)
@@ -710,25 +723,25 @@ def plot_cv_coverage_scatter(
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        ncol=min(len(cv_cfgs), 4),
+        ncol=min(len(w2_cfgs), 4),
         fontsize=8,
         bbox_to_anchor=(0.5, 0.0),
         framealpha=0.9,
     )
     fig.suptitle(
-        "NC Coverage vs Global NN-Spacing CV\n"
+        "NC Coverage vs Global W2 Homogeneity\n"
         "(vertical stem per setup, one panel per M threshold)",
         fontsize=12,
     )
     plt.tight_layout(rect=[0, 0.06, 1, 1])
-    out_path = output_dir / "cv_coverage_scatter.png"
+    out_path = output_dir / "w2_coverage_scatter.png"
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
     if verbose:
         print(f"  Saved: {out_path}")
 
 
-def plot_muon_cv_scatter(
+def plot_muon_w2_scatter(
     configs: list[ConfigResult],
     M_values: list[int],
     W_values: list[int],
@@ -736,12 +749,12 @@ def plot_muon_cv_scatter(
     num_ge77_muons: int,
     verbose: bool = True,
 ) -> None:
-    """One subplot per (M, W) pair where any CV-plotted setup achieves
+    """One subplot per (M, W) pair where any W2-plotted setup achieves
     TP > 20% of all Ge77 muons (recall > 0.20).  Precision per setup is
     printed below each panel.  Shared legend."""
-    cv_cfgs = [cfg for cfg in configs if cfg.cv is not None]
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
 
-    if len(cv_cfgs) < 2 or num_ge77_muons == 0:
+    if len(w2_cfgs) < 2 or num_ge77_muons == 0:
         return
 
     threshold = 0.20 * num_ge77_muons
@@ -758,11 +771,11 @@ def plot_muon_cv_scatter(
 
     if not selected_mw:
         if verbose:
-            print("  muon_cv_scatter: no (M,W) pair reaches TP > 20% of Ge77 muons — skipped.")
+            print("  muon_w2_scatter: no (M,W) pair reaches TP > 20% of Ge77 muons — skipped.")
         return
 
-    colors = _get_colors(len(cv_cfgs))
-    color_map = {cfg.name: colors[i] for i, cfg in enumerate(cv_cfgs)}
+    colors = _get_colors(len(w2_cfgs))
+    color_map = {cfg.name: colors[i] for i, cfg in enumerate(w2_cfgs)}
 
     ncols = 3
     nrows = (len(selected_mw) + ncols - 1) // ncols
@@ -780,16 +793,16 @@ def plot_muon_cv_scatter(
         ax = axes_flat[pi]
 
         precision_lines = []
-        for cfg in cv_cfgs:
+        for cfg in w2_cfgs:
             color = color_map[cfg.name]
-            cv = cfg.cv
+            w2 = cfg.w2
             cm = cfg.confusion.get((M, W))
             tp = cm["TP"] if cm is not None else 0
             fp = cm["FP"] if cm is not None else 0
             prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
 
-            ax.plot([cv, cv], [0, tp], color=color, linewidth=1.8, alpha=0.7)
-            ax.scatter([cv], [tp], color=color, s=60, zorder=3)
+            ax.plot([w2, w2], [0, tp], color=color, linewidth=1.8, alpha=0.7)
+            ax.scatter([w2], [tp], color=color, s=60, zorder=3)
             precision_lines.append(f"{cfg.label}: {prec:.3f}")
 
             if pi == 0:
@@ -798,7 +811,7 @@ def plot_muon_cv_scatter(
                                label=_config_label(cfg), linewidth=1.5)
                 )
 
-        ax.set_xlabel("Global CV (NN spacing)", fontsize=9)
+        ax.set_xlabel("Global W2 (mm)", fontsize=9)
         ax.set_ylabel("Detected Ge77 muons (TP)", fontsize=9)
         ax.set_title(f"M ≥ {M},  W ≥ {W}", fontsize=10)
         ax.set_ylim(bottom=0)
@@ -821,19 +834,19 @@ def plot_muon_cv_scatter(
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        ncol=min(len(cv_cfgs), 4),
+        ncol=min(len(w2_cfgs), 4),
         fontsize=8,
         bbox_to_anchor=(0.5, 0.0),
         framealpha=0.9,
     )
     fig.suptitle(
-        f"Ge77 Muon Detection (TP) vs Global NN-Spacing CV\n"
+        f"Ge77 Muon Detection (TP) vs Global W2 Homogeneity\n"
         f"(Ge77 muons: {num_ge77_muons:,}  |  panels: TP > 20% recall  |  "
         f"{len(selected_mw)} (M,W) pair(s))",
         fontsize=12,
     )
     plt.tight_layout(rect=[0, 0.06, 1, 0.96])
-    out_path = output_dir / "muon_cv_scatter.png"
+    out_path = output_dir / "muon_w2_scatter.png"
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
     if verbose:
@@ -954,7 +967,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         label="Baseline",
     )
     baseline.voxel_dicts = bl_voxel_dicts
-    baseline.cv = compute_config_cv(bl_voxel_dicts)
+    baseline.w2 = compute_config_w2(bl_voxel_dicts)
     if verbose:
         print(f"  Baseline: {args.baseline} ({len(bl_voxels)} voxels)")
 
@@ -979,7 +992,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             label=label,
         )
         cr.voxel_dicts = voxel_dicts
-        cr.cv = compute_config_cv(voxel_dicts)
+        cr.w2 = compute_config_w2(voxel_dicts)
         configs_extra.append(cr)
         if verbose:
             print(f"  Config {i+1}: {cfg_path} ({len(voxel_ids)} voxels) "
@@ -1077,9 +1090,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     write_nc_summary_txt(all_configs, M_values, output_dir, verbose=verbose)
 
-    # CV vs coverage plots
-    plot_cv_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
-    plot_muon_cv_scatter(
+    # W2 vs coverage plots
+    plot_w2_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
+    plot_muon_w2_scatter(
         all_configs, M_values, W_values, output_dir,
         num_ge77_muons=ed.num_ge77_muons,
         verbose=verbose,

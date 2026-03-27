@@ -5,7 +5,6 @@ All dimensions in mm. Coordinate system origin at (0, 0, Z_ORIGIN + Z_OFFSET).
 """
 
 import numpy as np
-from scipy.spatial import KDTree
 
 # ---------------------------------------------------------------------------
 # Detector geometry constants (mm)
@@ -154,70 +153,3 @@ def is_valid_pmt_position(
     return False
 
 
-def compute_nn_stats(centers: np.ndarray) -> dict:
-    """Nearest-neighbor distance statistics using KDTree (global, Euclidean 3-D).
-
-    Parameters
-    ----------
-    centers : np.ndarray, shape (N, 3)
-        3-D positions of voxel centers in mm.
-
-    Returns
-    -------
-    stats : dict with keys 'mean', 'std', 'min', 'max', 'cv'.
-        Returns empty dict if fewer than 2 points.
-    """
-    if len(centers) < 2:
-        return {}
-    tree = KDTree(centers)
-    dists, _ = tree.query(centers, k=2)
-    nn_dists = dists[:, 1]
-    mean = float(np.mean(nn_dists))
-    std = float(np.std(nn_dists))
-    return {
-        "mean": mean,
-        "std": std,
-        "min": float(np.min(nn_dists)),
-        "max": float(np.max(nn_dists)),
-        "cv": std / mean if mean > 0.0 else 0.0,
-    }
-
-
-def compute_nn_homogeneity(centers: np.ndarray, layer: str) -> dict | None:
-    """Coefficient of variation (std/mean) of nearest-neighbour distances.
-
-    Wall uses geodesic distance sqrt((R_ZYLINDER × Δφ)² + Δz²);
-    all other layers use 3-D Euclidean distance.
-
-    Returns None if fewer than 2 voxels are provided.
-    """
-    n = len(centers)
-    if n < 2:
-        return None
-
-    if layer == "wall":
-        phi = np.arctan2(centers[:, 1], centers[:, 0])
-        z = centers[:, 2]
-        dphi = phi[:, None] - phi[None, :]
-        dphi = (dphi + np.pi) % (2.0 * np.pi) - np.pi
-        arc = R_ZYLINDER * np.abs(dphi)
-        dz = z[:, None] - z[None, :]
-        dists = np.sqrt(arc ** 2 + dz ** 2)
-    else:
-        diffs = centers[:, None, :] - centers[None, :, :]
-        dists = np.sqrt(np.sum(diffs ** 2, axis=2))
-
-    np.fill_diagonal(dists, np.inf)
-    nn_dists = dists.min(axis=1)
-
-    mean = float(nn_dists.mean())
-    std  = float(nn_dists.std())
-    cv   = std / mean if mean > 0.0 else 0.0
-
-    return {
-        "cv":      cv,
-        "nn_mean": mean,
-        "nn_std":  std,
-        "nn_min":  float(nn_dists.min()),
-        "nn_max":  float(nn_dists.max()),
-    }

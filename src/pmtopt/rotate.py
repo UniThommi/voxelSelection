@@ -54,6 +54,10 @@ from pmtopt.geometry import (
     Z_BASE_GLOBAL, H_ZYLINDER,
     is_valid_pmt_position,
 )
+from pmtopt.homogeneous import (
+    sample_reference_distribution,
+    compute_wasserstein_homogeneity,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -436,7 +440,10 @@ def compute_mean_actual_phi(mapping: list[tuple[dict, dict]]) -> float:
     return float(np.angle(np.mean(np.exp(1j * deltas))))
 
 
-def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
+def compute_config_metrics(
+    mapping: list[tuple[dict, dict]],
+    per_layer_refs: dict[str, np.ndarray] | None = None,
+) -> dict:
     """Compute quality metrics for one rotation configuration.
 
     Metrics
@@ -452,6 +459,16 @@ def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
       mean_delta_phi_deg, std_delta_phi_deg, mean_radial_disp_mm,
       delta_pw_mean_rel         — relative change in mean pairwise distance
       delta_nn_mean_rel         — relative change in mean nearest-neighbour dist
+      w2_before                 — W2 homogeneity of original layer positions
+      w2_after                  — W2 homogeneity of rotated layer positions
+      delta_w2_abs              — absolute change w2_after − w2_before
+
+    Parameters
+    ----------
+    mapping : list of (original_voxel, target_voxel) pairs
+    per_layer_refs : dict mapping layer name → pre-computed reference sample
+        (shape (M, 3)).  If None, references are sampled on the fly
+        (seed=42, M=3000) for each layer.
     """
     original_indices = {orig["index"] for orig, _ in mapping}
     layers = sorted({orig["layer"] for orig, _ in mapping})
@@ -506,6 +523,20 @@ def compute_config_metrics(mapping: list[tuple[dict, dict]]) -> dict:
                 (a_stats["nn_mean"] - b_stats["nn_mean"]) / b_stats["nn_mean"]
                 if b_stats["nn_mean"] != 0.0 else 0.0
             )
+
+        # W2 homogeneity before and after rotation
+        if len(b_c) >= 2 and len(a_c) >= 2:
+            ref = (
+                per_layer_refs[layer]
+                if (per_layer_refs is not None and layer in per_layer_refs)
+                else sample_reference_distribution(M=3000, seed=42, areas=[layer])
+            )
+            w2_before = compute_wasserstein_homogeneity(b_c, reference=ref)["w2"]
+            w2_after  = compute_wasserstein_homogeneity(a_c, reference=ref)["w2"]
+            entry["w2_before"]    = w2_before
+            entry["w2_after"]     = w2_after
+            entry["delta_w2_abs"] = w2_after - w2_before
+
         per_layer[layer] = entry
 
     self_overlap_total = sum(
@@ -687,13 +718,13 @@ def plot_homogeneity_comparison(
     configs: list[dict],   # each: {"phi_frac", "phi_deg", "metrics"}
     output_dir: Path,
 ) -> None:
-    """Figure comparing NN-homogeneity (CV) across all valid rotation configs.
+    """Figure comparing W2 homogeneity across all valid rotation configs.
 
     Panels
     ------
-    1. Absolute CV per layer per config — original CV shown as a dashed
+    1. Absolute W2 per layer per config — original W2 shown as a dashed
        reference line per layer.
-    2. ΔCV (absolute change, after − before) per layer per config.
+    2. ΔW2 (absolute change, after − before) per layer per config.
     """
     if not configs:
         return
@@ -711,57 +742,57 @@ def plot_homogeneity_comparison(
 
     fig, axes = plt.subplots(1, 2, figsize=(max(14, n * 0.8 + 4), 6))
     fig.suptitle(
-        f"NN-homogeneity (CV) comparison  ({n} valid angle(s))\n"
-        "CV = std / mean of nearest-neighbour distances  (lower = more uniform)",
+        f"W2-homogeneity comparison  ({n} valid angle(s))\n"
+        "W2 = 2-Wasserstein distance vs uniform reference  (lower = more uniform)",
         fontsize=13, fontweight="bold",
     )
 
-    # --- Panel 1: absolute CV, with before-rotation reference lines ---
+    # --- Panel 1: W2 after rotation (bars) with W2 before (dashed reference) ---
     ax = axes[0]
     for i, layer in enumerate(layers):
-        cv_after_vals = []
+        w2_after_vals = []
         xi_list = []
         for xi, c in zip(x, configs):
-            v = c["metrics"]["per_layer"].get(layer, {}).get("cv_after")
+            v = c["metrics"]["per_layer"].get(layer, {}).get("w2_after")
             if v is not None:
-                cv_after_vals.append(v)
+                w2_after_vals.append(v)
                 xi_list.append(xi)
         if xi_list:
             ax.bar(
-                np.array(xi_list) + i * width_unit, cv_after_vals, width_unit,
+                np.array(xi_list) + i * width_unit, w2_after_vals, width_unit,
                 label=layer, color=layer_colors.get(layer, f"C{i}"), alpha=0.8,
             )
-        # Reference line: cv_before (same for all configs since original doesn't change)
-        cv_before = next(
-            (c["metrics"]["per_layer"].get(layer, {}).get("cv_before")
+        # Reference line: w2_before (same for all configs since original doesn't change)
+        w2_before = next(
+            (c["metrics"]["per_layer"].get(layer, {}).get("w2_before")
              for c in configs
-             if c["metrics"]["per_layer"].get(layer, {}).get("cv_before") is not None),
+             if c["metrics"]["per_layer"].get(layer, {}).get("w2_before") is not None),
             None,
         )
-        if cv_before is not None and xi_list:
+        if w2_before is not None and xi_list:
             center_offset = i * width_unit + width_unit / 2.0
             x_min = min(xi_list) + center_offset - width_unit
             x_max = max(xi_list) + center_offset + width_unit
             ax.hlines(
-                cv_before, x_min, x_max,
+                w2_before, x_min, x_max,
                 colors=layer_colors.get(layer, f"C{i}"),
                 linestyles="--", linewidths=1.5, alpha=0.9,
             )
 
     ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
     ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
-    ax.set_title("CV after rotation (bars) vs. before (dashed lines)", fontsize=11)
-    ax.set_ylabel("CV  (std / mean NN dist)")
+    ax.set_title("W2 after rotation (bars) vs. before (dashed lines)", fontsize=11)
+    ax.set_ylabel("W2 (mm)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
-    # --- Panel 2: ΔCV per layer ---
+    # --- Panel 2: ΔW2 per layer ---
     ax = axes[1]
     for i, layer in enumerate(layers):
         delta_vals = []
         xi_list = []
         for xi, c in zip(x, configs):
-            v = c["metrics"]["per_layer"].get(layer, {}).get("delta_cv_abs")
+            v = c["metrics"]["per_layer"].get(layer, {}).get("delta_w2_abs")
             if v is not None:
                 delta_vals.append(v)
                 xi_list.append(xi)
@@ -773,8 +804,8 @@ def plot_homogeneity_comparison(
     ax.axhline(0, color="black", lw=0.8, ls="--")
     ax.set_xticks(x + width_unit * (len(layers) - 1) / 2)
     ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
-    ax.set_title("ΔCV  (after − before rotation, per layer)", fontsize=11)
-    ax.set_ylabel("ΔCV")
+    ax.set_title("ΔW2  (after − before rotation, per layer)", fontsize=11)
+    ax.set_ylabel("ΔW2 (mm)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
