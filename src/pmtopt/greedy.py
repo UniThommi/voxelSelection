@@ -175,6 +175,13 @@ def greedy_select_nc(
         t0 = time.time()
         phase_tag = ""
 
+        if not available.any():
+            raise RuntimeError(
+                f"Spacing constraint exhausted available voxels at step {step + 1} "
+                f"({N - step} selection(s) still needed). "
+                "Reduce N or disable spacing with --no-spacing."
+            )
+
         if worst:
             # --- Worst mode: select voxel with MINIMAL gain ---
             at_m1 = (coverage_counts == 0)
@@ -226,15 +233,15 @@ def greedy_select_nc(
 
                 if best_M_gain > 0:
                     best_voxel = best_M_voxel
-                    best_gain = int(best_M_gain)
+                    best_gain = float(best_M_gain) if use_muon_weight else int(best_M_gain)
                     phase_tag = " [M]"
                 else:
                     best_voxel = int(np.argmax(gains_m1))
-                    best_gain = int(gains_m1[best_voxel])
+                    best_gain = float(gains_m1[best_voxel]) if use_muon_weight else int(gains_m1[best_voxel])
                     phase_tag = " [M=1]"
             else:
                 best_voxel = int(np.argmax(gains_m1))
-                best_gain = int(gains_m1[best_voxel])
+                best_gain = float(gains_m1[best_voxel]) if use_muon_weight else int(gains_m1[best_voxel])
                 phase_tag = " [M=1]"
 
         elif use_dynamic_M:
@@ -259,7 +266,7 @@ def greedy_select_nc(
                 all_gains = B.T.dot(at_threshold.astype(np.int32))
             all_gains[~available] = -1
             best_voxel = int(np.argmax(all_gains))
-            best_gain = int(all_gains[best_voxel])
+            best_gain = float(all_gains[best_voxel]) if use_muon_weight else int(all_gains[best_voxel])
             phase_tag = f" [M=1]" if effective_M == 1 else ""
 
         else:
@@ -274,7 +281,7 @@ def greedy_select_nc(
                 all_gains = B.T.dot(at_threshold.astype(np.int32))
             all_gains[~available] = -1
             best_voxel = int(np.argmax(all_gains))
-            best_gain = int(all_gains[best_voxel])
+            best_gain = float(all_gains[best_voxel]) if use_muon_weight else int(all_gains[best_voxel])
 
         # Update coverage counts
         col_start = B.indptr[best_voxel]
