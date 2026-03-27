@@ -761,11 +761,11 @@ def plot_muon_w2_scatter(
 
     threshold = 0.05 * num_ge77_muons
 
-    # Find all (M, W) pairs where at least one config (any, incl. all-voxels) exceeds threshold
+    # Find all (M, W) pairs where at least one w2-plotted config exceeds threshold
     selected_mw = []
     for M in M_values:
         for W in W_values:
-            for cfg in configs:
+            for cfg in w2_cfgs:
                 cm = cfg.confusion.get((M, W))
                 if cm is not None and cm["TP"] > threshold:
                     selected_mw.append((M, W))
