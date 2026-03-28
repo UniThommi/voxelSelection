@@ -126,8 +126,8 @@ def run_single_greedy_from_raw(
         _area_mask = np.isin(layers, areas)
         global_idx = np.where(_area_mask)[0]
         B = B[:, global_idx]
-        centers = centers[global_idx]
-        layers = layers[global_idx]
+        centers = centers[global_idx].copy()
+        layers = layers[global_idx].copy()
     else:
         global_idx = np.arange(num_voxels)
 
