@@ -59,7 +59,8 @@ from pmtopt.geometry import (
     PMT_RADIUS, DEFAULT_AREA_RATIOS, compute_per_area_N,
 )
 from pmtopt.data_loading import (
-    load_and_binarize, load_muon_data, build_muon_index, load_nc_muon_ids,
+    load_raw_sparse, binarize_from_raw,
+    load_muon_data, build_muon_index, load_nc_muon_ids,
 )
 from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
@@ -157,12 +158,12 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     min_spacing = 0.0 if args.no_spacing else 2 * PMT_RADIUS
 
     # --- Determine run mode ---
-    run_greedy = args.optimize is not None
+    do_greedy = args.optimize is not None
     run_write_hdf5 = args.write_hdf5
     do_sensitivity = args.sensitivity
 
     # --- Validate: must do at least something ---
-    if not run_greedy and not run_write_hdf5:
+    if not do_greedy and not run_write_hdf5:
         parser.error(
             "No action specified. Either set --optimize (nc/muon-ge77) "
             "to run greedy, or set --write-hdf5 to write a ratio-adjusted "
@@ -170,7 +171,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         )
 
     # --- Validate: greedy-only parameters require --optimize ---
-    if not run_greedy:
+    if not do_greedy:
         greedy_only_errors = []
         if args.N is not None:
             greedy_only_errors.append("-N")
@@ -203,7 +204,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             )
 
     # --- Validate greedy-specific arguments ---
-    if run_greedy:
+    if do_greedy:
         if args.N is None:
             parser.error("--optimize requires -N argument.")
 
@@ -256,7 +257,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
 
     # --- Auto-generate output filename (only for greedy mode) ---
     base_name = None
-    if run_greedy:
+    if do_greedy:
         spacing_tag = ("nospacing" if args.no_spacing
                        else f"spacing{int(min_spacing)}mm")
         perarea_tag = "_perarea" if args.per_area else ""
@@ -301,7 +302,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         )
 
     # If no greedy requested, we're done after writing HDF5
-    if not run_greedy:
+    if not do_greedy:
         if verbose:
             print("\nNo --optimize set. Done.")
         return
@@ -329,11 +330,28 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
 
     t_greedy_start = time.time()
 
-    B, voxel_ids, centers, layers, num_primaries = load_and_binarize(
-        args.hdf5_file, m=args.m, area_ratios=area_ratios,
-        seed=args.seed, verbose=verbose,
+    (raw_rows, raw_cols, raw_vals,
+     voxel_ids, centers, layers,
+     num_ncs, num_primaries) = load_raw_sparse(
+        args.hdf5_file, verbose=verbose,
         skip_validity=args.no_spacing,
     )
+
+    B = binarize_from_raw(
+        raw_rows, raw_cols, raw_vals,
+        num_ncs=num_ncs,
+        num_voxels=len(voxel_ids),
+        layers=layers,
+        area_ratios=area_ratios,
+        m=args.m,
+        seed=args.seed,
+    )
+
+    # Save full (unfiltered) arrays for sensitivity — run_sensitivity handles
+    # area filtering internally and needs the complete voxel space.
+    voxel_ids_full = voxel_ids
+    centers_full = centers
+    layers_full = layers
 
     # Filter voxels to selected areas (if --areas was given)
     if selected_areas is not None:
@@ -687,6 +705,14 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             worst=args.worst,
             baseline_selected=selected_cols,
             baseline_eff=final_eff,
+            raw_rows=raw_rows,
+            raw_cols=raw_cols,
+            raw_vals=raw_vals,
+            voxel_ids=voxel_ids_full,
+            centers=centers_full,
+            layers=layers_full,
+            num_ncs=num_ncs,
+            num_primaries=num_primaries,
             verbose=verbose,
         )
 
