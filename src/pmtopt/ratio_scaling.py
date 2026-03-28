@@ -137,6 +137,15 @@ def write_ratio_hdf5(
     verbose : bool
         Print progress.
     """
+    _REQUIRED_AREAS = {"pit", "bot", "top", "wall"}
+    missing = _REQUIRED_AREAS - set(ratios.keys())
+    if missing:
+        raise ValueError(
+            f"write_ratio_hdf5: ratios dict is missing areas {sorted(missing)}. "
+            "All four areas (pit, bot, top, wall) must be present to avoid "
+            "corrupting the region_matrix of non-specified areas."
+        )
+
     rng = np.random.default_rng(seed)
 
     if verbose:
