@@ -140,6 +140,13 @@ def stochastic_greedy_nc_m1(
     greedy_count = 0
 
     for step in range(N):
+        if not available.any():
+            raise RuntimeError(
+                f"Spacing constraint exhausted available voxels at step {step + 1} "
+                f"({N - step} selection(s) still needed). "
+                "Reduce N or disable spacing with --min-spacing 0."
+            )
+
         at_m1 = (coverage_counts == 0)
         gains = B.T.dot(at_m1.astype(np.int32))
 
