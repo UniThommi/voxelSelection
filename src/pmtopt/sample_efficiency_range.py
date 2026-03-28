@@ -40,7 +40,7 @@ from scipy import sparse
 
 from pmtopt.data_loading import load_raw_sparse, binarize_from_raw
 from pmtopt.geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS
-from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
+from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
 from pmtopt.greedy import _apply_spacing, greedy_select_nc
 from pmtopt.plotting import plot_selected_voxels
 from pmtopt.sensitivity import run_sensitivity
@@ -50,23 +50,12 @@ from pmtopt.sensitivity import run_sensitivity
 # W2 homogeneity helper
 # ===================================================================
 
-# Reference distribution shared across all calls within a run (lazy init).
-_W2_REF: np.ndarray | None = None
-
-
-def _get_w2_ref() -> np.ndarray:
-    global _W2_REF
-    if _W2_REF is None:
-        _W2_REF = sample_reference_distribution(M=3000, seed=42)
-    return _W2_REF
-
-
 def _compute_w2(selected_cols: list[int], centers: np.ndarray) -> float | None:
     """Global W2 homogeneity (2-Wasserstein vs uniform detector surface)."""
     sel_centers = centers[selected_cols]
     if len(sel_centers) < 2:
         return None
-    return compute_wasserstein_homogeneity(sel_centers, reference=_get_w2_ref())["w2"]
+    return compute_wasserstein_homogeneity(sel_centers, reference=get_w2_ref())["w2"]
 
 
 # ===================================================================

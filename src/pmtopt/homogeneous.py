@@ -547,6 +547,21 @@ def compute_wasserstein_homogeneity(
     }
 
 
+# ---------------------------------------------------------------------------
+# Process-wide W2 reference cache (M=3000, seed=42, all areas).
+# Shared by all callers in the same process via import — computed at most once.
+# ---------------------------------------------------------------------------
+_W2_REF: np.ndarray | None = None
+
+
+def get_w2_ref() -> np.ndarray:
+    """Return the cached global W2 reference distribution, computing it once."""
+    global _W2_REF
+    if _W2_REF is None:
+        _W2_REF = sample_reference_distribution(M=3000, seed=42)
+    return _W2_REF
+
+
 def compute_wasserstein_homogeneity_with_baseline(
     centers: np.ndarray,
     fibonacci_centers: np.ndarray,

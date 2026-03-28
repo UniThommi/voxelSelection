@@ -54,7 +54,7 @@ from pmtopt.geometry import (
     Z_BASE_GLOBAL, H_ZYLINDER, Z_CUT_TOP,
     DEFAULT_AREA_RATIOS, compute_per_area_N,
 )
-from pmtopt.homogeneous import sample_reference_distribution, compute_wasserstein_homogeneity
+from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
 from pmtopt.plotting import plot_selected_voxels
 from pmtopt.sensitivity import run_sensitivity
 
@@ -70,15 +70,6 @@ _Z_WALL_MAX = float(Z_CUT_TOP)
 _ALG_DISK: list[str] = ["fibonacci", "phi_sector", "radial", "multi_cluster", "superposition"]
 _ALG_WALL: list[str] = ["fibonacci", "phi_sector", "z_band", "multi_cluster", "superposition"]
 
-# Shared W2 reference (lazily initialised once per process)
-_W2_REF: np.ndarray | None = None
-
-
-def _get_w2_ref() -> np.ndarray:
-    global _W2_REF
-    if _W2_REF is None:
-        _W2_REF = sample_reference_distribution(M=3000, seed=42)
-    return _W2_REF
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +587,7 @@ def sample_w2_range(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     main_rng = np.random.default_rng(seed)
-    w2_ref = _get_w2_ref()
+    w2_ref = get_w2_ref()
 
     # ------------------------------------------------------------------
     # Load data

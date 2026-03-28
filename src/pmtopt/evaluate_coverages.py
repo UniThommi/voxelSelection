@@ -43,8 +43,8 @@ from pmtopt.geometry import (
     MUON_TIME_WINDOW_MAX_NS,
 )
 from pmtopt.homogeneous import (
-    sample_reference_distribution,
     compute_wasserstein_homogeneity,
+    get_w2_ref,
 )
 from pmtopt.data_loading import (
     load_raw_sparse,
@@ -279,16 +279,6 @@ def load_shared_data(
 # W2 homogeneity computation
 # ===================================================================
 
-# Reference distribution shared across all calls within a run (lazy init).
-_W2_REFERENCE: np.ndarray | None = None
-
-
-def _get_w2_reference() -> np.ndarray:
-    """Return (and lazily compute) the module-level W2 reference sample."""
-    global _W2_REFERENCE
-    if _W2_REFERENCE is None:
-        _W2_REFERENCE = sample_reference_distribution(M=3000, seed=42)
-    return _W2_REFERENCE
 
 
 def compute_config_w2(voxel_dicts: list[dict]) -> float | None:
@@ -296,7 +286,7 @@ def compute_config_w2(voxel_dicts: list[dict]) -> float | None:
     if len(voxel_dicts) < 2:
         return None
     centers = np.array([v["center"] for v in voxel_dicts], dtype=float)
-    return compute_wasserstein_homogeneity(centers, reference=_get_w2_reference())["w2"]
+    return compute_wasserstein_homogeneity(centers, reference=get_w2_ref())["w2"]
 
 
 # ===================================================================
