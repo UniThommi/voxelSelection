@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""
+"""compare_pmt_ssd.py
+
 Compare PMT simulation hits vs. SSD postprocessed voxel hits
 for LEGEND neutron capture optical photon simulations.
 
@@ -13,42 +14,81 @@ Plots:
 Author: Thomas Buerger (University of Tübingen)
 """
 
+import argparse
 import glob
 import os
-import sys
 from collections import defaultdict
 from pathlib import Path
 
 import h5py
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+
 # ─────────────────────────────────────────────────────────────
-# Configuration
+# Default paths
 # ─────────────────────────────────────────────────────────────
-PMT_SIM_DIR = (
+_DEFAULT_PMT_SIM_DIR = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
     "rawOpticalHomogeneousPMTsFromMusunNCs/run_20260216_195734"
 )
-SSD_POSTPROCESSED_FILE = (
+_DEFAULT_SSD_POSTPROCESSED_FILE = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
     "MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5"
 )
-MERGED_NCS_CSV_DIR = (
+_DEFAULT_MERGED_NCS_CSV_DIR = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
     "gammaGunFormatOpticalSSD"
 )
-RAW_NC_SIM_DIR = (
+_DEFAULT_RAW_NC_SIM_DIR = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
     "rawMusunNCsSSD"
 )
 
 MAX_PMTS = 300
 
-# Output directory: where the script is executed
-OUTPUT_DIR = Path.cwd() / "comparison_plots"
-OUTPUT_DIR.mkdir(exist_ok=True)
+# Module-level path variables — set from CLI args in main()
+PMT_SIM_DIR: str = _DEFAULT_PMT_SIM_DIR
+SSD_POSTPROCESSED_FILE: str = _DEFAULT_SSD_POSTPROCESSED_FILE
+MERGED_NCS_CSV_DIR: str = _DEFAULT_MERGED_NCS_CSV_DIR
+RAW_NC_SIM_DIR: str = _DEFAULT_RAW_NC_SIM_DIR
+OUTPUT_DIR: Path = Path.cwd() / "comparison_plots"
+
+
+# ─────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Compare PMT simulation hits vs. SSD postprocessed voxel hits."
+    )
+    p.add_argument(
+        '--pmt-sim-dir', type=str, default=_DEFAULT_PMT_SIM_DIR,
+        help="Directory with raw optical PMT HDF5 files (output_t*.hdf5) "
+             "(default: %(default)s)"
+    )
+    p.add_argument(
+        '--ssd-file', type=str, default=_DEFAULT_SSD_POSTPROCESSED_FILE,
+        help="SSD postprocessed HDF5 file (default: %(default)s)"
+    )
+    p.add_argument( # FIX not needed anymore
+        '--merged-ncs-csv-dir', type=str, default=_DEFAULT_MERGED_NCS_CSV_DIR,
+        help="Directory containing merged_ncs.csv for NC-to-run mapping "
+             "(default: %(default)s)"
+    )
+    p.add_argument(
+        '--raw-nc-sim-dir', type=str, default=_DEFAULT_RAW_NC_SIM_DIR,
+        help="Directory containing raw NC simulation run subdirectories "
+             "(default: %(default)s)"
+    )
+    p.add_argument(
+        '--output-dir', type=Path, default=Path.cwd() / "comparison_plots",
+        help="Output directory for plots (default: %(default)s)"
+    )
+    return p.parse_args()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -89,7 +129,7 @@ def classify_region(voxel_id: str) -> str:
 # ─────────────────────────────────────────────────────────────
 # Step 1: Load PMT simulation data
 # ─────────────────────────────────────────────────────────────
-def load_pmt_hits() -> dict[str, int]:
+def load_pmt_hits() -> dict:
     """Load PMT hits from all output files, return {voxel_id: total_hits}.
 
     Also validates that there are at most MAX_PMTS unique det_uids.
@@ -104,8 +144,7 @@ def load_pmt_hits() -> dict[str, int]:
     print(f"  Found {len(pmt_files)} files")
 
     all_det_uids = set()
-    # Accumulate hits per voxel_id
-    hits_per_voxel: dict[str, int] = defaultdict(int)
+    hits_per_voxel: dict = defaultdict(int)
 
     for fpath in pmt_files:
         with h5py.File(fpath, "r") as f:
@@ -115,12 +154,9 @@ def load_pmt_hits() -> dict[str, int]:
                 continue
 
             det_uids = optical["det_uid"]["pages"][:]
-            evtids = optical["evtid"]["pages"][:]
-
             unique_uids = set(det_uids.tolist())
             all_det_uids.update(unique_uids)
 
-            # Count hits per det_uid
             uid_values, counts = np.unique(det_uids, return_counts=True)
             for uid, count in zip(uid_values, counts):
                 voxel_id = det_uid_to_voxel_id(int(uid))
@@ -144,7 +180,7 @@ def load_pmt_hits() -> dict[str, int]:
 # ─────────────────────────────────────────────────────────────
 # Step 2: Load SSD postprocessed voxel hits (only matching voxels)
 # ─────────────────────────────────────────────────────────────
-def load_ssd_voxel_hits(voxel_ids: list[str]) -> dict[str, int]:
+def load_ssd_voxel_hits(voxel_ids: list) -> dict:
     """Load SSD postprocessed hits for specified voxel IDs.
 
     Returns {voxel_id: total_hits_over_all_NCs}.
@@ -154,7 +190,7 @@ def load_ssd_voxel_hits(voxel_ids: list[str]) -> dict[str, int]:
     print(f"  File: {SSD_POSTPROCESSED_FILE}")
     print(f"  Voxels to load: {len(voxel_ids)}")
 
-    hits_per_voxel: dict[str, int] = {}
+    hits_per_voxel: dict = {}
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         target = f["target"]
@@ -185,7 +221,7 @@ def load_ssd_voxel_hits(voxel_ids: list[str]) -> dict[str, int]:
 # ─────────────────────────────────────────────────────────────
 # Step 3: Load voxel geometry for spatial plots
 # ─────────────────────────────────────────────────────────────
-def load_voxel_centers(voxel_ids: list[str]) -> dict[str, np.ndarray]:
+def load_voxel_centers(voxel_ids: list) -> dict:
     """Load voxel center coordinates from SSD postprocessed file.
 
     Returns {voxel_id: np.array([x, y, z])}.
@@ -193,7 +229,7 @@ def load_voxel_centers(voxel_ids: list[str]) -> dict[str, np.ndarray]:
     print("=" * 60)
     print("Loading voxel center coordinates...")
 
-    centers: dict[str, np.ndarray] = {}
+    centers: dict = {}
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         voxels_grp = f["voxels"]
@@ -211,7 +247,7 @@ def load_voxel_centers(voxel_ids: list[str]) -> dict[str, np.ndarray]:
 # ─────────────────────────────────────────────────────────────
 # Step 4: Load per-NC hits for boxplot (Plot 4)
 # ─────────────────────────────────────────────────────────────
-def load_pmt_hits_per_nc() -> dict[str, dict[int, int]]:
+def load_pmt_hits_per_nc() -> dict:
     """Load PMT hits per NC event per voxel.
 
     Returns {voxel_id: {evtid: hit_count}}.
@@ -219,7 +255,7 @@ def load_pmt_hits_per_nc() -> dict[str, dict[int, int]]:
     print("=" * 60)
     print("Loading PMT hits per NC event...")
 
-    hits: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    hits: dict = defaultdict(lambda: defaultdict(int))
 
     pmt_files = sorted(glob.glob(os.path.join(PMT_SIM_DIR, "output_t*.hdf5")))
 
@@ -233,7 +269,6 @@ def load_pmt_hits_per_nc() -> dict[str, dict[int, int]]:
             det_uids = optical["det_uid"]["pages"][:]
             evtids = optical["evtid"]["pages"][:]
 
-            # Vectorized: group by (voxel_id, evtid)
             for uid, evt in zip(det_uids, evtids):
                 voxel_id = det_uid_to_voxel_id(int(uid))
                 hits[voxel_id][int(evt)] += 1
@@ -241,14 +276,14 @@ def load_pmt_hits_per_nc() -> dict[str, dict[int, int]]:
     return dict(hits)
 
 
-def load_ssd_hits_per_nc(voxel_ids: list[str]) -> dict[str, np.ndarray]:
+def load_ssd_hits_per_nc(voxel_ids: list) -> dict:
     """Load per-NC hit arrays for specified voxels from SSD postprocessed.
 
     Returns {voxel_id: np.array of hits per NC}.
     """
     print("Loading SSD per-NC hits for boxplot...")
 
-    per_nc: dict[str, np.ndarray] = {}
+    per_nc: dict = {}
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         target = f["target"]
@@ -263,7 +298,7 @@ def load_ssd_hits_per_nc(voxel_ids: list[str]) -> dict[str, np.ndarray]:
 # Plotting functions
 # ─────────────────────────────────────────────────────────────
 def plot1_hit_difference_histogram(
-    pmt_hits: dict[str, int], ssd_hits: dict[str, int]
+    pmt_hits: dict, ssd_hits: dict
 ) -> None:
     """Plot 1: Histogram of Δhits = Σhits_PMT - Σhits_Voxel per pair."""
     print("\n--- Plot 1: Hit Difference Histogram ---")
@@ -288,7 +323,6 @@ def plot1_hit_difference_histogram(
     ax = axes[1]
     pmt_arr = np.array([pmt_hits[v] for v in voxel_ids], dtype=float)
     ssd_arr = np.array([ssd_hits[v] for v in voxel_ids], dtype=float)
-    # Avoid division by zero: use mean of both as denominator
     denom = 0.5 * (pmt_arr + ssd_arr)
     mask = denom > 0
     rel_deltas = np.full_like(deltas, dtype=float, fill_value=np.nan)
@@ -311,7 +345,7 @@ def plot1_hit_difference_histogram(
 
 
 def plot2_scatter_pmt_vs_ssd(
-    pmt_hits: dict[str, int], ssd_hits: dict[str, int]
+    pmt_hits: dict, ssd_hits: dict
 ) -> None:
     """Plot 2: Scatter plot of total hits PMT vs Voxel."""
     print("\n--- Plot 2: Scatter PMT vs SSD ---")
@@ -320,7 +354,6 @@ def plot2_scatter_pmt_vs_ssd(
     pmt_arr = np.array([pmt_hits[v] for v in voxel_ids])
     ssd_arr = np.array([ssd_hits[v] for v in voxel_ids])
 
-    # Classify regions for coloring
     regions = [classify_region(v) for v in voxel_ids]
     region_colors = {"pit": "blue", "bot": "cyan", "top": "red", "wall": "green"}
 
@@ -335,7 +368,6 @@ def plot2_scatter_pmt_vs_ssd(
                 alpha=0.7, edgecolors="black", linewidth=0.5, s=40
             )
 
-    # Diagonal
     max_val = max(pmt_arr.max(), ssd_arr.max()) * 1.05
     ax.plot([0, max_val], [0, max_val], "k--", linewidth=1, label="y = x")
     ax.set_xlabel("Σ hits PMT (over all NCs)")
@@ -352,9 +384,9 @@ def plot2_scatter_pmt_vs_ssd(
 
 
 def plot3_spatial_deviation(
-    pmt_hits: dict[str, int],
-    ssd_hits: dict[str, int],
-    centers: dict[str, np.ndarray],
+    pmt_hits: dict,
+    ssd_hits: dict,
+    centers: dict,
 ) -> None:
     """Plot 3: Spatial maps of relative deviation per detector region."""
     print("\n--- Plot 3: Spatial Deviation Maps ---")
@@ -363,7 +395,6 @@ def plot3_spatial_deviation(
         set(pmt_hits.keys()) & set(ssd_hits.keys()) & set(centers.keys())
     )
 
-    # Compute relative deviation
     data = []
     for v in voxel_ids:
         pmt_h = pmt_hits[v]
@@ -382,14 +413,13 @@ def plot3_spatial_deviation(
 
     df = pd.DataFrame(data)
 
-    # Determine global color limits (symmetric)
     vmax = max(abs(df["rel_dev"].min()), abs(df["rel_dev"].max()))
     if vmax == 0:
         vmax = 1.0
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # --- Bot + Pit: x vs y ---
+    # Bot + Pit: x vs y
     ax = axes[0]
     subset = df[df["region"].isin(["bot", "pit"])]
     if not subset.empty:
@@ -404,7 +434,7 @@ def plot3_spatial_deviation(
     ax.set_title("Bot + Pit (x-y projection)")
     ax.set_aspect("equal")
 
-    # --- Top: x vs y ---
+    # Top: x vs y
     ax = axes[1]
     subset = df[df["region"] == "top"]
     if not subset.empty:
@@ -419,7 +449,7 @@ def plot3_spatial_deviation(
     ax.set_title("Top (x-y projection)")
     ax.set_aspect("equal")
 
-    # --- Wall: z vs phi ---
+    # Wall: z vs phi
     ax = axes[2]
     subset = df[df["region"] == "wall"]
     if not subset.empty:
@@ -441,9 +471,9 @@ def plot3_spatial_deviation(
 
 
 def plot4_boxplot_per_pair(
-    pmt_hits_per_nc: dict[str, dict[int, int]],
-    ssd_hits_per_nc: dict[str, np.ndarray],
-    centers: dict[str, np.ndarray],
+    pmt_hits_per_nc: dict,
+    ssd_hits_per_nc: dict,
+    centers: dict,
 ) -> None:
     """Plot 4: Boxplot of hit distribution differences per pair, sorted by z."""
     print("\n--- Plot 4: Boxplot per PMT/Voxel pair ---")
@@ -452,28 +482,21 @@ def plot4_boxplot_per_pair(
         set(pmt_hits_per_nc.keys()) & set(ssd_hits_per_nc.keys()) & set(centers.keys())
     )
 
-    # Sort by z-coordinate
     voxel_ids_sorted = sorted(voxel_ids, key=lambda v: centers[v][2])
 
-    # For each voxel: compute distribution of hits
-    # PMT: sum over all NC events -> distribution is total per voxel
-    # SSD: array of hits per NC event
-    # Since we can't match events, compare distributions of per-NC hits
     pmt_distributions = []
     ssd_distributions = []
-    labels = []
 
     for v in voxel_ids_sorted:
-        # PMT per-NC hits as array
-        pmt_per_nc = np.array(list(pmt_hits_per_nc[v].values())) if v in pmt_hits_per_nc else np.array([])
+        pmt_per_nc = (
+            np.array(list(pmt_hits_per_nc[v].values()))
+            if v in pmt_hits_per_nc else np.array([])
+        )
         ssd_per_nc_arr = ssd_hits_per_nc.get(v, np.array([]))
 
         pmt_distributions.append(pmt_per_nc)
         ssd_distributions.append(ssd_per_nc_arr)
-        labels.append(v)
 
-    # Plot: show distribution of per-NC hits for PMT and SSD side by side
-    # With 300 pairs, use a summary: mean ± std per pair
     n_pairs = len(voxel_ids_sorted)
 
     pmt_means = np.array([d.mean() if len(d) > 0 else 0 for d in pmt_distributions])
@@ -485,7 +508,6 @@ def plot4_boxplot_per_pair(
 
     fig, axes = plt.subplots(2, 1, figsize=(20, 10), sharex=True)
 
-    # Mean hits comparison
     ax = axes[0]
     ax.errorbar(x, pmt_means, yerr=pmt_stds, fmt=".", color="steelblue",
                 alpha=0.6, markersize=3, linewidth=0.5, label="PMT (mean ± std)")
@@ -495,7 +517,6 @@ def plot4_boxplot_per_pair(
     ax.set_title("Per-NC hit distribution per PMT/Voxel pair (sorted by z)")
     ax.legend()
 
-    # Difference of means
     ax = axes[1]
     diff_means = pmt_means - ssd_means
     ax.bar(x, diff_means, color="steelblue", alpha=0.7, width=1.0)
@@ -537,12 +558,10 @@ def load_pmt_nc_identifiers() -> pd.DataFrame:
             muon_ids = optical["muon_track_id"]["pages"][:]
             nc_ids = optical["nC_track_id"]["pages"][:]
 
-            # Group by evtid
             unique_evts = np.unique(evtids)
             for evt in unique_evts:
                 mask = evtids == evt
                 total_hits = int(mask.sum())
-                # All photons in one event should share muon/nc ids
                 muon_id = int(muon_ids[mask][0])
                 nc_id = int(nc_ids[mask][0])
                 records.append({
@@ -598,7 +617,6 @@ def lookup_nc_properties(
             evtids = nc_out["evtid"]["pages"][:]
             nc_ids_arr = nc_out["nC_track_id"]["pages"][:]
 
-            # evtid in raw NC files corresponds to orig_muon_id from CSV
             mask = (evtids == orig_muon_id) & (nc_ids_arr == nc_id)
             if not mask.any():
                 continue
@@ -623,77 +641,24 @@ def lookup_nc_properties(
     return None
 
 
-def find_nc_in_ssd_postprocessed(nc_props: dict) -> int | None:
-    """Find matching NC event index in SSD postprocessed file.
-
-    Matches on position (m -> mm conversion), gamma amount, and energies.
-    Returns event index or None.
-    """
-    with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        phi_grp = f["phi"]
-
-        # Load arrays
-        x_nc = phi_grp["xNC_mm"][:]
-        y_nc = phi_grp["yNC_mm"][:]
-        z_nc = phi_grp["zNC_mm"][:]
-        n_gamma = phi_grp["#gamma"][:]
-        e_tot = phi_grp["E_gamma_tot_keV"][:]
-        e1 = phi_grp["gammaE1_keV"][:]
-        e2 = phi_grp["gammaE2_keV"][:]
-        e3 = phi_grp["gammaE3_keV"][:]
-        e4 = phi_grp["gammaE4_keV"][:]
-
-    # Convert m -> mm
-    target_x = nc_props["nC_x_position_in_m"] * 1000.0
-    target_y = nc_props["nC_y_position_in_m"] * 1000.0
-    target_z = nc_props["nC_z_position_in_m"] * 1000.0
-    target_ngamma = nc_props["nC_gamma_amount"]
-    target_etot = nc_props["nC_gamma_total_energy_in_keV"]
-    target_e1 = nc_props["gamma1_E_in_keV"]
-    target_e2 = nc_props["gamma2_E_in_keV"]
-    target_e3 = nc_props["gamma3_E_in_keV"]
-    target_e4 = nc_props["gamma4_E_in_keV"]
-
-    # Exact float match
-    mask = (
-        (x_nc == np.float32(target_x))
-        & (y_nc == np.float32(target_y))
-        & (z_nc == np.float32(target_z))
-        & (n_gamma == np.float32(target_ngamma))
-        & (e_tot == np.float32(target_etot))
-        & (e1 == np.float32(target_e1))
-        & (e2 == np.float32(target_e2))
-        & (e3 == np.float32(target_e3))
-        & (e4 == np.float32(target_e4))
-    )
-
-    indices = np.where(mask)[0]
-    if len(indices) == 0:
-        return None
-    return int(indices[0])
-
-
 def plot5_event_matched_correlation(
     pmt_nc_df: pd.DataFrame,
-    voxel_ids: list[str],
+    voxel_ids: list,
 ) -> None:
     """Plot 5: Matched NC events — total hits PMT vs total hits SSD."""
     print("\n--- Plot 5: Event-Matched Correlation ---")
     print("  This may take a while due to NC matching...")
 
-    # Load CSV
     merged_csv = load_merged_ncs_csv()
 
-    # Preload SSD postprocessed arrays for all matching voxels
     print("  Preloading SSD target arrays...")
-    ssd_target_arrays: dict[str, np.ndarray] = {}
+    ssd_target_arrays: dict = {}
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         target = f["target"]
         for v in voxel_ids:
             if v in target:
                 ssd_target_arrays[v] = target[v][:]
 
-    # Preload SSD phi arrays for matching
     print("  Preloading SSD phi arrays for NC matching...")
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         phi_grp = f["phi"]
@@ -707,7 +672,6 @@ def plot5_event_matched_correlation(
         ssd_e3 = phi_grp["gammaE3_keV"][:]
         ssd_e4 = phi_grp["gammaE4_keV"][:]
 
-    # Process events
     matched_pmt_totals = []
     matched_ssd_totals = []
     n_matched = 0
@@ -722,7 +686,6 @@ def plot5_event_matched_correlation(
         muon_id = row["muon_track_id"]
         nc_id = row["nC_track_id"]
 
-        # Look up in merged CSV
         csv_match = merged_csv[
             (merged_csv["muon_id"] == muon_id) & (merged_csv["nc_id"] == nc_id)
         ]
@@ -734,7 +697,6 @@ def plot5_event_matched_correlation(
         run_id = int(csv_row["run_id"])
         orig_muon_id = int(csv_row["orig_muon_id"])
 
-        # Get NC properties from raw simulation
         nc_props = lookup_nc_properties(orig_muon_id, nc_id, run_id)
         if nc_props is None:
             print(f"  WARNING: NC properties not found for orig_muon_id={orig_muon_id}, "
@@ -742,7 +704,6 @@ def plot5_event_matched_correlation(
             n_failed += 1
             continue
 
-        # Find in SSD postprocessed — vectorized inline matching
         target_x = np.float32(nc_props["nC_x_position_in_m"] * 1000.0)
         target_y = np.float32(nc_props["nC_y_position_in_m"] * 1000.0)
         target_z = np.float32(nc_props["nC_z_position_in_m"] * 1000.0)
@@ -774,7 +735,6 @@ def plot5_event_matched_correlation(
 
         ssd_event_idx = int(indices[0])
 
-        # Total hits in SSD for this event across the 300 voxels
         ssd_total = sum(
             int(arr[ssd_event_idx]) for arr in ssd_target_arrays.values()
         )
@@ -813,6 +773,18 @@ def plot5_event_matched_correlation(
 # Main
 # ─────────────────────────────────────────────────────────────
 def main() -> None:
+    global PMT_SIM_DIR, SSD_POSTPROCESSED_FILE, MERGED_NCS_CSV_DIR, RAW_NC_SIM_DIR
+    global OUTPUT_DIR
+
+    args = parse_args()
+
+    PMT_SIM_DIR = args.pmt_sim_dir
+    SSD_POSTPROCESSED_FILE = args.ssd_file
+    MERGED_NCS_CSV_DIR = args.merged_ncs_csv_dir
+    RAW_NC_SIM_DIR = args.raw_nc_sim_dir
+    OUTPUT_DIR = args.output_dir
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     print("PMT vs SSD Voxel Hit Comparison")
     print("=" * 60)
 
@@ -832,7 +804,6 @@ def main() -> None:
     n_pmt_events = len(all_evtids)
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        # Number of NCs = length of any target array
         first_key = next(iter(f["target"].keys()))
         n_ssd_events = f["target"][first_key].shape[0]
 
@@ -844,11 +815,10 @@ def main() -> None:
             f"ABORT: NC count mismatch! PMT vertices: {n_pmt_events}, "
             f"SSD postprocessed: {n_ssd_events}"
         )
-    print("  ✓ NC counts match")
+    print("  NC counts match")
 
     # --- Cross-check: zero-hit NC events ---
     print("\nComparing zero-hit NC events...")
-    # SSD: NCs where all voxels have 0 hits
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         ssd_voxel_keys = sorted(f["target"].keys())
         n_ncs = f["target"][ssd_voxel_keys[0]].shape[0]
@@ -857,7 +827,6 @@ def main() -> None:
             total_per_nc += f["target"][v][:]
         ssd_zero_ncs = int(np.sum(total_per_nc == 0))
 
-    # PMT: unique vertex evtids minus unique optical evtids
     optical_evtids = set()
     for fpath in pmt_files:
         with h5py.File(fpath, "r") as f:
@@ -874,7 +843,6 @@ def main() -> None:
     pmt_hits = load_pmt_hits()
     voxel_ids = sorted(pmt_hits.keys())
 
-    # Cross-check: print available SSD target keys for debugging
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
         ssd_target_keys = set(f["target"].keys())
     matched_ids = [v for v in voxel_ids if v in ssd_target_keys]
@@ -882,7 +850,6 @@ def main() -> None:
     print(f"\n  PMT voxel IDs matched in SSD target: {len(matched_ids)}/{len(voxel_ids)}")
     if unmatched_ids:
         print(f"  Unmatched PMT voxel IDs (first 10): {unmatched_ids[:10]}")
-        # Try to find close matches in SSD target
         for uid in unmatched_ids[:5]:
             close = [k for k in ssd_target_keys if uid in k or k in uid]
             if close:
@@ -891,7 +858,7 @@ def main() -> None:
     ssd_hits = load_ssd_voxel_hits(voxel_ids)
     centers = load_voxel_centers(voxel_ids)
 
-    # --- Plots 1-3: Save early ---
+    # --- Plots 1-3 ---
     plot1_hit_difference_histogram(pmt_hits, ssd_hits)
     plot2_scatter_pmt_vs_ssd(pmt_hits, ssd_hits)
     plot3_spatial_deviation(pmt_hits, ssd_hits, centers)
