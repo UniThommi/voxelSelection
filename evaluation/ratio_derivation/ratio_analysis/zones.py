@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .pmt_data import PMTInfo
-from .photon_filters import PMT_RADIUS, MC_SAMPLES
+from .photon_filters import PMT_CATHODE_RADIUS, MC_SAMPLES
 from .geometry import GeometryConfig
 
 
@@ -67,7 +67,7 @@ def compute_radial_fractions(
     """Fraction of PMT cathode area in each radial zone via MC sampling."""
     rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
-    radii  = PMT_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
+    radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
 
     sample_x = pmt.center[0] + radii * np.cos(angles)
     sample_y = pmt.center[1] + radii * np.sin(angles)
@@ -96,7 +96,7 @@ def compute_z_fractions(
     """Fraction of PMT cathode area in each z-zone via MC sampling (wall PMTs)."""
     rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
-    radii  = PMT_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
+    radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
     sample_z = pmt.z + radii * np.cos(angles)
 
     fractions: Dict[int, float] = {}

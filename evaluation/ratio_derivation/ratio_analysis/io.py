@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from .zones import Zone
-from .photon_filters import PMT_RADIUS, MC_SAMPLES
+from .photon_filters import PMT_CATHODE_RADIUS, MC_SAMPLES
 
 
 # ─── Zone scan ────────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ def save_results_txt(
             fout.write(f"Zone scan areas: {zone_scan_areas}\n")
             fout.write(f"SNR threshold: {snr_threshold}, "
                        f"Min PMTs/zone: {min_pmts_per_zone}\n")
-        fout.write(f"PMT cathode radius: {PMT_RADIUS} mm\n")
+        fout.write(f"PMT cathode radius: {PMT_CATHODE_RADIUS} mm\n")
         fout.write(f"MC samples: {MC_SAMPLES}\n")
         fout.write(f"Files: SSD={ssd_files}, PMT={pmt_files}\n")
         fout.write(f"NC events: SSD={ssd_nc:,}, PMT={pmt_nc:,}\n\n")
@@ -200,7 +200,7 @@ def save_results_json(
             },
             'ssd_nc': ssd_nc, 'pmt_nc': pmt_nc,
             'ssd_files': ssd_files, 'pmt_files': pmt_files,
-            'pmt_cathode_radius': PMT_RADIUS,
+            'pmt_cathode_radius': PMT_CATHODE_RADIUS,
             'mc_samples': MC_SAMPLES,
             'geometry': geometry_name,
         },

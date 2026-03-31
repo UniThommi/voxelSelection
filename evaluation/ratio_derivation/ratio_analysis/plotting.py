@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .pmt_data import PMTInfo
 from .zones import Zone
-from .photon_filters import PMT_RADIUS
+from .photon_filters import PMT_CATHODE_RADIUS
 
 
 def plot_radial_zones(
@@ -46,7 +46,7 @@ def plot_radial_zones(
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
     for pmt in pmts:
-        circle = plt.Circle((pmt.center[0], pmt.center[1]), PMT_RADIUS,
+        circle = plt.Circle((pmt.center[0], pmt.center[1]), PMT_CATHODE_RADIUS,
                              fill=False, edgecolor='blue', linewidth=0.5, alpha=0.7)
         ax.add_patch(circle)
         ax.plot(pmt.center[0], pmt.center[1], 'b.', markersize=1)
@@ -110,10 +110,10 @@ def plot_wall_zones(
 
     for pmt in pmts:
         phi_center = np.arctan2(pmt.center[1], pmt.center[0])
-        delta_phi  = PMT_RADIUS / r_zylinder
+        delta_phi  = PMT_CATHODE_RADIUS / r_zylinder
         rect = mpatches.Rectangle(
-            (phi_center - delta_phi, pmt.z - PMT_RADIUS),
-            2 * delta_phi, 2 * PMT_RADIUS,
+            (phi_center - delta_phi, pmt.z - PMT_CATHODE_RADIUS),
+            2 * delta_phi, 2 * PMT_CATHODE_RADIUS,
             fill=False, edgecolor='blue', linewidth=0.5, alpha=0.7,
         )
         ax.add_patch(rect)

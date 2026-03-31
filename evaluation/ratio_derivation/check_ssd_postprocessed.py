@@ -14,7 +14,6 @@ import gc
 import glob
 import os
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -25,6 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import psutil
 
+from ratio_analysis.geometry import GeometryConfig
 from ratio_analysis.photon_filters import get_chunk_size
 
 
@@ -41,26 +41,18 @@ OUTPUT_DIR: Path = Path.cwd() / "ssd_raw_vs_postprocessed_plots"
 
 
 # ---------------------------------------------------------------------------
-# Geometry — Note: h_zylinder uses h + 20 − z_origin (different from
-# ratio_analysis.geometry, which uses h − 1). Do NOT share that module here.
+# SSD-specific geometry offset
+#
+# The shared GeometryConfig (from ratio_analysis.geometry / pmtopt) uses
+# h_zylinder = H_ZYLINDER = 8899, which is the wall-zone height excluding
+# the 1 mm top cap.  For raw SSD processing we need the full cylinder height
+# (8900 mm), so we add one cap-thickness unit wherever z_cut_top is derived.
+#
+#   z_cut_top (SSD) = geometry.z_cut_bot + geometry.h_zylinder
+#                     + _SSD_WALL_CAP_THICKNESS - 2
+#                   = -4979 + 8899 + 1 - 2 = 3919
 # ---------------------------------------------------------------------------
-@dataclass
-class GeometryConfig:
-    h: float = 8900
-    r_zylinder: float = 4300
-    z_origin: float = 20
-
-    @property
-    def h_zylinder(self) -> float:
-        return self.h + 20 - self.z_origin  # 8900
-
-    @property
-    def z_cut_bot(self) -> float:
-        return -4979
-
-    @property
-    def z_cut_top(self) -> float:
-        return self.z_cut_bot + self.h_zylinder - 2  # 3919
+_SSD_WALL_CAP_THICKNESS: int = 1  # mm — accounts for full cylinder vs wall-zone height
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +96,7 @@ def process_ssd_raw(
     total_nc_events = 0
     hits_per_uid: Dict[int, int] = defaultdict(int)
     z_cut_bot = geometry.z_cut_bot
-    z_cut_top = geometry.z_cut_top
+    z_cut_top = geometry.z_cut_top + _SSD_WALL_CAP_THICKNESS
 
     for file_idx, fpath in enumerate(hdf5_files):
         if (file_idx + 1) % 50 == 0:
@@ -276,7 +268,7 @@ def find_nc_in_raw_and_count_hits(
     raw_dir: str, nc_sample: Dict, geometry: GeometryConfig,
 ) -> Optional[int]:
     z_cut_bot = geometry.z_cut_bot
-    z_cut_top = geometry.z_cut_top
+    z_cut_top = geometry.z_cut_top + _SSD_WALL_CAP_THICKNESS
     chunk_size = get_chunk_size()
 
     hdf5_files = sorted(glob.glob(os.path.join(raw_dir, "output_t*.hdf5")))

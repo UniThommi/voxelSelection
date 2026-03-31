@@ -30,7 +30,7 @@ from ratio_analysis.pmt_data import (
 from ratio_analysis.photon_filters import (
     get_chunk_size, checkRadialMomentumVectorized,
     SSD_UID_PIT, SSD_UID_BOT, SSD_UID_TOP, SSD_UID_WALL,
-    PMT_RADIUS, MC_SAMPLES,
+    PMT_CATHODE_RADIUS, MC_SAMPLES,
 )
 from ratio_analysis.nc_data import (
     load_nc_data_dict_homogeneous, load_nc_data_dict_musun,
@@ -559,7 +559,7 @@ def main() -> None:
         print(f"Zone scan areas: "
               f"{zone_scan_areas if zone_scan_areas else 'none (manual zones)'}")
         print(f"Min PMTs per zone: {args.min_pmts}")
-    print(f"PMT cathode radius: {PMT_RADIUS} mm")
+    print(f"PMT cathode radius: {PMT_CATHODE_RADIUS} mm")
     print(f"MC samples for overlap: {MC_SAMPLES}")
     print("=" * 80)
 

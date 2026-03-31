@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pmtopt"
+version = "0.1.0"
+description = "PMT placement optimizer and analysis tools for LEGEND detector"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "POT",          # Python Optimal Transport (imported as `ot`)
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

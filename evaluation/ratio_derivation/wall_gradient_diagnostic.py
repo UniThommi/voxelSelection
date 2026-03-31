@@ -27,6 +27,7 @@ import h5py
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from pmtopt.geometry import R_ZYLINDER, Z_CUT_BOT, Z_CUT_TOP
 from ratio_analysis.photon_filters import (
     get_chunk_size, checkRadialMomentumVectorized,
     SSD_UID_PIT, SSD_UID_BOT, SSD_UID_TOP, SSD_UID_WALL,
@@ -48,10 +49,6 @@ _DEFAULT_OUTPUT_DIR = _BASE / "zone_analysis" / "diagnostics"
 
 NC_TIME_WINDOW = 200.0  # ns
 
-# Geometry constants
-R_ZYLINDER = 4300.0
-Z_CUT_BOT  = -4979.0
-Z_CUT_TOP  = 3918.0
 
 SSD_UIDS = {'pit': SSD_UID_PIT, 'bot': SSD_UID_BOT, 'top': SSD_UID_TOP, 'wall': SSD_UID_WALL}
 

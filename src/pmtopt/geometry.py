@@ -9,14 +9,16 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Detector geometry constants (mm)
 # ---------------------------------------------------------------------------
-PMT_RADIUS: int = 131          # PMT physical radius
+PMT_RADIUS: int = 131          # PMT physical radius (used for placement validation)
+PMT_CATHODE_RADIUS: int = 110  # PMT cathode (sensitive surface) radius
+#                                (used for MC overlap fraction sampling)
 R_PIT: int = 3800              # Pit radius
 R_ZYL_BOT: int = 3950          # Inner radius of bottom ring
 R_ZYL_TOP: int = 1200          # Inner radius of top ring
 R_ZYLINDER: int = 4300         # Apothem (outer radius of rings / wall)
 Z_ORIGIN: int = 20
 Z_OFFSET: int = -5000
-H_ZYLINDER: int = 8900 - 1    # h - 1
+H_ZYLINDER: int = 8900 - 1    # h - 1; wall-zone height excl. 1 mm top cap
 Z_BASE_GLOBAL: int = Z_ORIGIN + Z_OFFSET
 
 # Muon-Ge77 time window (ns)
@@ -36,7 +38,7 @@ DEFAULT_AREA_RATIOS: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # Detector surface areas (mm²), derived from geometry constants.
 # ---------------------------------------------------------------------------
-Z_CUT_BOT: int = Z_BASE_GLOBAL
+Z_CUT_BOT: int = Z_BASE_GLOBAL + 1   # +1 mm extra clearance offset at cylinder bottom
 Z_CUT_TOP: int = Z_CUT_BOT + H_ZYLINDER - 2
 WALL_HEIGHT: int = Z_CUT_TOP - Z_CUT_BOT
 

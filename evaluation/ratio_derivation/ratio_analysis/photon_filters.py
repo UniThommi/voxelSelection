@@ -3,9 +3,12 @@
 import numpy as np
 import psutil
 
+from pmtopt.geometry import PMT_CATHODE_RADIUS, PMT_RADIUS  # noqa: F401
+#   PMT_CATHODE_RADIUS = 110 mm  — cathode (sensitive surface) radius,
+#                                  used for MC overlap fraction sampling
+#   PMT_RADIUS         = 131 mm  — physical PMT radius, used for placement
+#                                  (re-exported here for convenience)
 
-# ─── PMT / MC constants ───────────────────────────────────────────────────────
-PMT_RADIUS = 110.0   # mm, cathode radius used for MC overlap fractions
 MC_SAMPLES = 10000   # Monte Carlo samples for fractional PMT overlap
 
 # ─── SSD UID constants ────────────────────────────────────────────────────────
