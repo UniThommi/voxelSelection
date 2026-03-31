@@ -1,12 +1,12 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pmtopt"
 version = "0.1.0"
 description = "PMT placement optimizer and analysis tools for LEGEND detector"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "scipy",

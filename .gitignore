@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 *.md
 settings*
+*.egg-info
