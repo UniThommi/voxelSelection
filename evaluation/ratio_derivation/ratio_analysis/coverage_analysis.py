@@ -1,0 +1,225 @@
+"""NC and muon coverage analysis functions for raw LGDO data.
+
+Works with sparse NC×PMT binary matrices produced by raw_loading.build_pmt_matrix()
+and the nc_truth DataFrame from raw_loading.build_nc_truth().
+
+The muon-classification logic mirrors comparePMTCoverage.py exactly:
+  - A muon is Ge77 if any of its NCs has flag_ge77 == 1.
+  - Muon is classified as Ge77 if it has ≥W detected NCs in [1µs, 200µs].
+  - "Detected" means the NC's PMT multiplicity (row-sum of B) ≥ M.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+
+# ──────────────────────────────────────────────────────────────────────
+# Constants (same as comparePMTCoverage.py)
+# ──────────────────────────────────────────────────────────────────────
+MUON_WINDOW_LO_NS: float = 1_000.0    # 1 µs
+MUON_WINDOW_HI_NS: float = 200_000.0  # 200 µs
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+def compute_nc_multiplicities(B: sp.spmatrix) -> np.ndarray:
+    """Return per-NC multiplicity array (number of firing PMTs per NC)."""
+    return np.asarray(B.sum(axis=1)).ravel().astype(np.int32)
+
+
+def compute_metrics(
+    tp: int, fp: int, tn: int, fn: int
+) -> dict[str, float]:
+    """Compute Recall, Precision, and F2 (β=2 weights recall twice over precision)."""
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    beta = 2.0
+    f2   = ((1 + beta**2) * prec * rec / (beta**2 * prec + rec)) if (beta**2 * prec + rec) > 0 else 0.0
+    return {
+        "Precision": prec,
+        "Recall":    rec,
+        "F2":        f2,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# NC analysis
+# ──────────────────────────────────────────────────────────────────────
+def evaluate_nc(
+    B: sp.spmatrix,
+    nc_truth: pd.DataFrame,
+    M_values: list[int],
+    detect_info: dict | None = None,
+) -> dict[str, Any]:
+    """Compute NC detection statistics for each M threshold.
+
+    Parameters
+    ----------
+    B:
+        Sparse NC×PMT binary matrix from build_pmt_matrix().
+    nc_truth:
+        Shared NC truth DataFrame from build_nc_truth(); rows must align
+        with B rows.
+    M_values:
+        List of PMT multiplicity thresholds to evaluate.
+    detect_info:
+        Optional dict from build_pmt_matrix() with boolean arrays:
+          "nc_any_photon"   — NC has ≥1 photon at any time
+          "nc_within_200ns" — NC has ≥1 photon within the time window
+        If None, these detectability categories are not computed.
+
+    Returns
+    -------
+    dict with keys:
+        nc_total               : int
+        nc_any_photon          : int  (≥1 photon at any time; -1 if unknown)
+        nc_within_200ns        : int  (≥1 photon in time window; -1 if unknown)
+        nc_only_outside_200ns  : int  (photons exist but all late; -1 if unknown)
+        nc_detected            : dict[M → int]
+        ge77_nc_total          : int
+        ge77_nc_any_photon     : int  (-1 if unknown)
+        ge77_nc_within_200ns   : int  (-1 if unknown)
+        ge77_nc_only_outside   : int  (-1 if unknown)
+        ge77_nc_detected       : dict[M → int]
+        multiplicity_counts    : np.ndarray[int32], shape (n_nc,)
+    """
+    mults    = compute_nc_multiplicities(B)
+    ge77_mask = nc_truth["flag_ge77"].values == 1
+
+    # ── detectability categories ──────────────────────────────────────
+    if detect_info is not None:
+        any_ph   = detect_info["nc_any_photon"]
+        within   = detect_info["nc_within_200ns"]
+        only_out = any_ph & ~within
+
+        nc_any_photon          = int(any_ph.sum())
+        nc_within_200ns        = int(within.sum())
+        nc_only_outside_200ns  = int(only_out.sum())
+        ge77_nc_any_photon     = int((any_ph   & ge77_mask).sum())
+        ge77_nc_within_200ns   = int((within   & ge77_mask).sum())
+        ge77_nc_only_outside   = int((only_out & ge77_mask).sum())
+    else:
+        nc_any_photon = nc_within_200ns = nc_only_outside_200ns = -1
+        ge77_nc_any_photon = ge77_nc_within_200ns = ge77_nc_only_outside = -1
+
+    result: dict[str, Any] = {
+        "nc_total":              len(nc_truth),
+        "nc_any_photon":         nc_any_photon,
+        "nc_within_200ns":       nc_within_200ns,
+        "nc_only_outside_200ns": nc_only_outside_200ns,
+        "nc_detected":           {},
+        "ge77_nc_total":         int(ge77_mask.sum()),
+        "ge77_nc_any_photon":    ge77_nc_any_photon,
+        "ge77_nc_within_200ns":  ge77_nc_within_200ns,
+        "ge77_nc_only_outside":  ge77_nc_only_outside,
+        "ge77_nc_detected":      {},
+        "multiplicity_counts":   mults,
+    }
+
+    for M in M_values:
+        detected = mults >= M
+        result["nc_detected"][M]      = int(detected.sum())
+        result["ge77_nc_detected"][M] = int((detected & ge77_mask).sum())
+
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Muon analysis
+# ──────────────────────────────────────────────────────────────────────
+def evaluate_muon(
+    B: sp.spmatrix,
+    nc_truth: pd.DataFrame,
+    M_values: list[int],
+    W_values: list[int],
+) -> dict[str, Any]:
+    """Compute muon Ge77 classification results for all (M, W) combinations.
+
+    Classification logic (identical to comparePMTCoverage.py):
+      1. A muon is Ge77 (ground truth) if any of its NCs has flag_ge77==1.
+      2. For threshold M: a NC is "detected" if its multiplicity (row sum
+         of B) ≥ M.
+      3. Count detected NCs per muon restricted to the time window
+         [1 µs, 200 µs] = [MUON_WINDOW_LO_NS, MUON_WINDOW_HI_NS].
+      4. Classify muon as Ge77 if its count ≥ W.
+
+    Parameters
+    ----------
+    B, nc_truth, M_values, W_values: see evaluate_nc.
+
+    Returns
+    -------
+    dict with keys:
+        muon_stats : dict  — total, n_ge77, n_non_ge77 counts
+        confusion  : dict[(M, W) → {"TP", "FP", "TN", "FN"}]
+        w_hist     : dict[M → {"ge77": list[int], "non_ge77": list[int]}]
+                     — w_count per muon for W-histogram plots
+    """
+    mults = compute_nc_multiplicities(B)
+
+    # ── derive muon ground truth ──────────────────────────────────────
+    # A muon is Ge77 if ANY of its NCs has flag_ge77 == 1.
+    muon_is_ge77: pd.Series = (
+        nc_truth.groupby("muon_id")["flag_ge77"]
+        .apply(lambda flags: bool((flags == 1).any()))
+    )
+    unique_muons = muon_is_ge77.index.values  # sorted by groupby
+    ge77_truth   = muon_is_ge77.values.astype(bool)
+
+    n_ge77     = int(ge77_truth.sum())
+    n_non_ge77 = len(unique_muons) - n_ge77
+
+    muon_stats = {
+        "total":      len(unique_muons),
+        "n_ge77":     n_ge77,
+        "n_non_ge77": n_non_ge77,
+    }
+
+    # ── precompute in-window mask (shared for all M) ──────────────────
+    in_window = (
+        (nc_truth["nc_time_ns"].values >= MUON_WINDOW_LO_NS)
+        & (nc_truth["nc_time_ns"].values <= MUON_WINDOW_HI_NS)
+    )
+
+    nc_work = pd.DataFrame({
+        "muon_id":   nc_truth["muon_id"].values,
+        "in_window": in_window,
+    })
+
+    confusion: dict[tuple[int, int], dict[str, int]] = {}
+    w_hist:    dict[int, dict[str, list[int]]]        = {}
+
+    for M in M_values:
+        detected = (mults >= M).astype(np.int8)
+        nc_work["det_in_window"] = detected & in_window
+
+        w_per_muon: pd.Series = (
+            nc_work
+            .groupby("muon_id")["det_in_window"]
+            .sum()
+        )
+        w_counts = w_per_muon.reindex(unique_muons, fill_value=0).values.astype(np.int32)
+
+        w_hist[M] = {
+            "ge77":     w_counts[ ge77_truth].tolist(),
+            "non_ge77": w_counts[~ge77_truth].tolist(),
+        }
+
+        for W in W_values:
+            classified_ge77 = w_counts >= W
+            tp = int(( ge77_truth &  classified_ge77).sum())
+            fp = int((~ge77_truth &  classified_ge77).sum())
+            tn = int((~ge77_truth & ~classified_ge77).sum())
+            fn = int(( ge77_truth & ~classified_ge77).sum())
+            confusion[(M, W)] = {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
+
+    return {
+        "muon_stats": muon_stats,
+        "confusion":  confusion,
+        "w_hist":     w_hist,
+    }
