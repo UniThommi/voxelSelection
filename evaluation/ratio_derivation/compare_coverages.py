@@ -162,8 +162,32 @@ def validate_pmt_uids(results: list[SetupResult]) -> None:
 # ──────────────────────────────────────────────────────────────────────
 # Shared plot helpers
 # ──────────────────────────────────────────────────────────────────────
-def _colors(n: int) -> list:
-    return [plt.cm.tab10(i % 10) for i in range(n)]
+
+# Qualitative palette: 10 clearly distinguishable colours ordered so that
+# adjacent entries have maximum hue contrast.  Used for ALL non-heatmap
+# plots so every setup is always represented by the same colour.
+_SETUP_PALETTE: list[str] = [
+    "#1f77b4",  # 0  blue
+    "#d62728",  # 1  red
+    "#2ca02c",  # 2  green
+    "#ff7f0e",  # 3  orange
+    "#9467bd",  # 4  purple
+    "#17becf",  # 5  cyan
+    "#8c564b",  # 6  brown
+    "#e377c2",  # 7  pink
+    "#bcbd22",  # 8  yellow-green
+    "#7f7f7f",  # 9  grey
+]
+
+
+def _colors(n: int) -> list[str]:
+    """Return a list of n setup colours, cycling _SETUP_PALETTE if n > 10."""
+    return [_SETUP_PALETTE[i % len(_SETUP_PALETTE)] for i in range(n)]
+
+
+def _setup_color(results: list, r) -> str:
+    """Return the palette colour for SetupResult r relative to the full list."""
+    return _SETUP_PALETTE[results.index(r) % len(_SETUP_PALETTE)]
 
 
 def _annotate_bar(
@@ -501,15 +525,18 @@ def plot_nc_detectability_overview(
 def plot_ge77_nc_detectability_overview(
     results: list[SetupResult],
     M_default: int,
+    W_default: int,
     output_dir: str,
 ) -> None:
     """Two-panel figure: Ge77-NC detectability counts + Δ from reference."""
     _detectability_figure(
         results, nc_key="ge77_nc_", M_default=M_default,
         title=(
-            "Ge-77 Muon NC Detection Overview\n"
+            f"Ge-77 Muon NC Detection Overview  [M={M_default}, W={W_default}]\n"
             "(NCs belonging to muons with ≥1 Ge-77 producing NC; "
-            "only muons with ≥1 NC)"
+            "only muons with ≥1 NC;\n"
+            f"'Detected' = NC has ≥{M_default} firing PMT(s); "
+            f"W threshold for muon classification = {W_default})"
         ),
         total_key="ge77_nc_total",
         fname="04_ge77_nc_detectability_overview.png",
@@ -560,11 +587,11 @@ def plot_muon_heatmaps(
     W_values: list[int],
     output_dir: str,
 ) -> None:
-    """One figure per M: 3-panel heatmap (Recall, Precision, F2) with x=setup, y=W.
+    """One figure per M: 2-panel heatmap (Recall, Precision) with x=setup, y=W.
 
-    All three metric panels share the same logarithmic colour scale.
+    Both metric panels share the same logarithmic colour scale.
     """
-    metrics_to_plot = ["Recall", "Precision", "F2"]
+    metrics_to_plot = ["Recall", "Precision"]
     n_setups = len(results)
     labels = [r.label for r in results]
 
@@ -583,8 +610,8 @@ def plot_muon_heatmaps(
                     grid[wi, si] = max(m[metric], 1e-4)
             grids[metric] = grid
 
-        fig_w = max(8, 3 + 2 * n_setups)
-        fig, axes = plt.subplots(1, 3, figsize=(fig_w, 6))
+        fig_w = max(6, 2 + 2 * n_setups)
+        fig, axes = plt.subplots(1, 2, figsize=(fig_w, 6))
         fig.suptitle(f"Ge-77 Classification  M={M}", fontsize=13)
 
         for col, metric in enumerate(metrics_to_plot):
@@ -663,8 +690,7 @@ def plot_confusion_bar(
         conf = r.muon["confusion"][(M_default, W_default)]
         m = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
         lines.append(
-            f"{r.label}: Precision={m['Precision']:.3f}  Recall={m['Recall']:.3f}  "
-            f"F2={m['F2']:.3f}"
+            f"{r.label}: Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}"
         )
     n_lines = len(lines)
     fig.text(
@@ -793,14 +819,23 @@ def plot_w_histogram(
 # ──────────────────────────────────────────────────────────────────────
 def _w2_scatter_figure(
     w2_results: list[SetupResult],
+    all_results: list[SetupResult],
     scatter_M: list[int],
     M: int,
     W: int,
     output_dir: str,
     fname: str,
 ) -> None:
-    """Draw and save one W2 scatter figure for fixed (M, W)."""
+    """Draw and save one W2 scatter figure for fixed (M, W).
+
+    Panel 1 — W2 vs NC coverage for multiple M values (M-series colours).
+    Panel 2 — W2 vs Recall at (M, W) with per-setup palette colours.
+    Panel 3 — W2 vs Precision at (M, W) with per-setup palette colours.
+    """
     w2_vals = np.array([r.w2 for r in w2_results])
+    # Per-setup colours derived from the global results list so they match
+    # every other non-heatmap plot.
+    setup_colors = [_setup_color(all_results, r) for r in w2_results]
     colors_m = plt.cm.plasma(np.linspace(0.1, 0.9, len(scatter_M)))
 
     fig, axes = plt.subplots(1, 3, figsize=(21, 6))
@@ -823,44 +858,40 @@ def _w2_scatter_figure(
     ax.legend(title="M", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: W2 vs Recall at (M, W)
+    # Panel 2: W2 vs Recall at (M, W) — per-setup colours
     ax = axes[1]
-    recalls = [
-        compute_metrics(
+    for r, w2v, c in zip(w2_results, w2_vals, setup_colors):
+        m = compute_metrics(
             r.muon["confusion"][(M, W)]["TP"],
             r.muon["confusion"][(M, W)]["FP"],
             r.muon["confusion"][(M, W)]["TN"],
             r.muon["confusion"][(M, W)]["FN"],
-        )["Recall"]
-        for r in w2_results
-    ]
-    ax.scatter(w2_vals, recalls, color="steelblue", s=80, zorder=3)
-    for r, w2v, rec in zip(w2_results, w2_vals, recalls):
-        ax.annotate(r.label, xy=(w2v, rec), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8)
+        )
+        ax.scatter([w2v], [m["Recall"]], color=c, s=80, zorder=3, label=r.label)
+        ax.annotate(r.label, xy=(w2v, m["Recall"]), xytext=(4, 2),
+                    textcoords="offset points", fontsize=8, color=c)
     ax.set_xlabel("W2 (mm)")
     ax.set_ylabel("Recall")
     ax.set_title(f"W2 vs Recall (M={M}, W={W})")
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Panel 3: W2 vs F2 at (M, W)
+    # Panel 3: W2 vs Precision at (M, W) — per-setup colours
     ax = axes[2]
-    f2s = [
-        compute_metrics(
+    for r, w2v, c in zip(w2_results, w2_vals, setup_colors):
+        m = compute_metrics(
             r.muon["confusion"][(M, W)]["TP"],
             r.muon["confusion"][(M, W)]["FP"],
             r.muon["confusion"][(M, W)]["TN"],
             r.muon["confusion"][(M, W)]["FN"],
-        )["F2"]
-        for r in w2_results
-    ]
-    ax.scatter(w2_vals, f2s, color="darkorange", s=80, zorder=3)
-    for r, w2v, f2 in zip(w2_results, w2_vals, f2s):
-        ax.annotate(r.label, xy=(w2v, f2), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8)
+        )
+        ax.scatter([w2v], [m["Precision"]], color=c, s=80, zorder=3, label=r.label)
+        ax.annotate(r.label, xy=(w2v, m["Precision"]), xytext=(4, 2),
+                    textcoords="offset points", fontsize=8, color=c)
     ax.set_xlabel("W2 (mm)")
-    ax.set_ylabel("F2 score")
-    ax.set_title(f"W2 vs F2 (M={M}, W={W})")
+    ax.set_ylabel("Precision")
+    ax.set_title(f"W2 vs Precision (M={M}, W={W})")
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -893,7 +924,7 @@ def plot_w2_scatter(
 
     for M, W in mw_combos:
         fname = f"09_w2_scatter_M{M:02d}_W{W:02d}.png"
-        _w2_scatter_figure(w2_results, scatter_M, M, W, output_dir, fname)
+        _w2_scatter_figure(w2_results, results, scatter_M, M, W, output_dir, fname)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -962,7 +993,7 @@ def write_confusion_matrices(
         hdr = (
             f"{'Config':<20} {'M':>3} {'W':>3}  "
             f"{'TP':>7} {'FP':>7} {'TN':>7} {'FN':>7}  "
-            f"{'Recall':>7} {'Prec':>7} {'F2':>7}\n"
+            f"{'Recall':>7} {'Prec':>7}\n"
         )
         f.write(hdr)
         f.write("-" * len(hdr) + "\n")
@@ -977,8 +1008,7 @@ def write_confusion_matrices(
                         f"{r.label:<20} {M:>3} {W:>3}  "
                         f"{conf['TP']:>7} {conf['FP']:>7} "
                         f"{conf['TN']:>7} {conf['FN']:>7}  "
-                        f"{m['Recall']:>7.4f} {m['Precision']:>7.4f} "
-                        f"{m['F2']:>7.4f}\n"
+                        f"{m['Recall']:>7.4f} {m['Precision']:>7.4f}\n"
                     )
             f.write("\n")
     print("  Saved confusion_matrices.txt")
@@ -1145,7 +1175,7 @@ def main() -> None:
         print(f"  Detected (M≥{M_default}):     {nc['nc_detected'][M_default]:,}  ({100*nc['nc_detected'][M_default]/max(nc['nc_total'],1):.1f}%)")
         print(f"  Muons: {ms['total']:,}  Ge77: {ms['n_ge77']:,}  non-Ge77: {ms['n_non_ge77']:,}")
         print(f"  At (M={M_default}, W={W_default}): TP={conf['TP']}  FN={conf['FN']}  TN={conf['TN']}  FP={conf['FP']}")
-        print(f"  Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}  F2={m['F2']:.3f}")
+        print(f"  Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}")
         if r.w2 is not None:
             print(f"  W2: {r.w2:.2f} mm")
 
@@ -1156,7 +1186,7 @@ def main() -> None:
     plot_nc_coverage_line(results, M_values, args.output_dir)
     plot_nc_multiplicity_histogram(results, M_default, args.output_dir)
     plot_nc_detectability_overview(results, M_default, args.output_dir)
-    plot_ge77_nc_detectability_overview(results, M_default, args.output_dir)
+    plot_ge77_nc_detectability_overview(results, M_default, W_default, args.output_dir)
     plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     plot_w_histogram(results, M_default, W_default, args.output_dir)

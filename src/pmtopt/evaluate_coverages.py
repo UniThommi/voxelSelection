@@ -490,7 +490,7 @@ def plot_muon_heatmaps(
     verbose: bool = True,
 ) -> None:
     """
-    Per M: one figure with 3 heatmaps (Recall, Precision, F2-score).
+    Per M: one figure with 2 heatmaps (Recall, Precision).
     Axes: W (y) x Config (x). Cell text = value.
     """
     config_labels = [c.label for c in configs]
@@ -498,12 +498,12 @@ def plot_muon_heatmaps(
 
     for M in M_values:
         fig, axes = plt.subplots(
-            1, 3, figsize=(max(9, num_configs * 2.4 + 2), len(W_values) * 0.8 + 3),
+            1, 2, figsize=(max(7, num_configs * 2.4 + 2), len(W_values) * 0.8 + 3),
             sharey=True,
         )
 
-        metric_names = ["Recall", "Precision", "F2-score"]
-        cmaps = ["YlOrRd", "PuBu", "Greens"]
+        metric_names = ["Recall", "Precision"]
+        cmaps = ["YlOrRd", "PuBu"]
 
         for mi, (metric_name, cmap) in enumerate(
             zip(metric_names, cmaps)
@@ -525,10 +525,6 @@ def plot_muon_heatmaps(
                     elif metric_name == "Precision":
                         denom = TP + FP
                         val = TP / denom if denom > 0 else 0.0
-                    elif metric_name == "F2-score":
-                        # F_beta with beta=2: weights recall twice as much as precision
-                        denom = 5 * TP + 4 * FN + FP
-                        val = 5 * TP / denom if denom > 0 else 0.0
                     else:
                         val = 0.0
 
@@ -566,7 +562,7 @@ def plot_muon_heatmaps(
         fig.suptitle(
             f"Ge77 Muon Classification (M={M})\n"
             f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total  "
-            f"| Recall = TP/(TP+FN)  Precision = TP/(TP+FP)  F2 = 5·TP/(5·TP+4·FN+FP)",
+            f"| Recall = TP/(TP+FN)  Precision = TP/(TP+FP)",
             fontsize=10, y=1.02,
         )
         plt.tight_layout()

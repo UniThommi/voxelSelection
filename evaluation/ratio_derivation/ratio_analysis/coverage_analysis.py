@@ -35,15 +35,12 @@ def compute_nc_multiplicities(B: sp.spmatrix) -> np.ndarray:
 def compute_metrics(
     tp: int, fp: int, tn: int, fn: int
 ) -> dict[str, float]:
-    """Compute Recall, Precision, and F2 (β=2 weights recall twice over precision)."""
+    """Compute Recall and Precision for Ge-77 muon classification."""
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    beta = 2.0
-    f2   = ((1 + beta**2) * prec * rec / (beta**2 * prec + rec)) if (beta**2 * prec + rec) > 0 else 0.0
     return {
         "Precision": prec,
         "Recall":    rec,
-        "F2":        f2,
     }
 
 
