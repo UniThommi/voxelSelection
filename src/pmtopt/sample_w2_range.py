@@ -71,8 +71,8 @@ _AREA_ORDER: list[str] = ["pit", "bot", "top", "wall"]
 _Z_WALL_MIN = float(Z_BASE_GLOBAL)
 _Z_WALL_MAX = float(Z_CUT_TOP)
 
-_ALG_DISK: list[str] = ["fibonacci", "radial", "multi_cluster", "superposition", "multi_ring"]
-_ALG_WALL: list[str] = ["fibonacci", "z_band", "multi_cluster", "superposition", "multi_ring"]
+_ALG_DISK: list[str] = ["fibonacci", "radial", "multi_cluster", "superposition", "multi_ring", "phi_sectors"]
+_ALG_WALL: list[str] = ["fibonacci", "z_band", "multi_cluster", "superposition", "multi_ring", "phi_sectors", "phi_band", "pole"]
 
 
 
@@ -210,6 +210,28 @@ def _gen_disk_points(
         r = np.concatenate(r_parts) if r_parts else r_fib
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
 
+    elif alg == "phi_sectors":
+        # Concentrate points into n_sectors azimuthal wedges, r from fibonacci.
+        # alpha=1 → narrow sectors; alpha=0 → sectors widen to fill full circle.
+        n_sectors = params["n_sectors"]
+        centers = params["sector_centers"]
+        max_w = np.pi / max(n_sectors, 1)
+        min_w = max_w * 0.1
+        half_width = min_w + (1.0 - alpha) * (max_w - min_w)
+        pts_per = [n_half // n_sectors + (1 if i < n_half % n_sectors else 0)
+                   for i in range(n_sectors)]
+        r_parts, phi_parts = [], []
+        r_idx = 0
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            pc = (centers[ci] + rng.uniform(-half_width, half_width, nc)) % (2.0 * np.pi)
+            r_parts.append(r_fib[r_idx:r_idx + nc])
+            phi_parts.append(pc)
+            r_idx += nc
+        r = np.concatenate(r_parts) if r_parts else r_fib
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+
     else:
         raise ValueError(f"Unknown disk algorithm: '{alg}'")
 
@@ -314,6 +336,52 @@ def _gen_wall_points(
             z_parts.append(np.full(np_r, zz))
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
         z = np.concatenate(z_parts) if z_parts else z_fib
+
+    elif alg == "phi_sectors":
+        # Same logic as disk phi_sectors but z from fibonacci instead of r.
+        n_sectors = params["n_sectors"]
+        centers = params["sector_centers"]
+        max_w = np.pi / max(n_sectors, 1)
+        min_w = max_w * 0.1
+        half_width = min_w + (1.0 - alpha) * (max_w - min_w)
+        pts_per = [n_half // n_sectors + (1 if i < n_half % n_sectors else 0)
+                   for i in range(n_sectors)]
+        phi_parts, z_parts = [], []
+        z_idx = 0
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            pc = (centers[ci] + rng.uniform(-half_width, half_width, nc)) % (2.0 * np.pi)
+            phi_parts.append(pc)
+            z_parts.append(z_fib[z_idx:z_idx + nc])
+            z_idx += nc
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+        z = np.concatenate(z_parts) if z_parts else z_fib
+
+    elif alg == "phi_band":
+        # Concentrate all points in a narrow azimuthal stripe; z stays uniform.
+        # After point-symmetry mirroring, two stripes appear (phi_center and phi_center+π).
+        # alpha=1 → very narrow band; alpha=0 → band widens to half the circle.
+        phi_center = params["phi_center"]
+        min_w = float(PMT_RADIUS) / float(R_ZYLINDER)   # ~one PMT angular size
+        max_w = np.pi / 2.0                               # quarter-circle half-width
+        half_width = min_w + (1.0 - alpha) * (max_w - min_w)
+        phi = (phi_center + rng.uniform(-half_width, half_width, n_half)) % (2.0 * np.pi)
+        z = z_fib
+
+    elif alg == "pole":
+        # Concentrate points near the top or bottom edge of the wall.
+        # alpha=1 → tightly packed at the edge; alpha=0 → spread over half the wall height.
+        pole_pos = params["pole_pos"]
+        h_full = z_max - z_min
+        h_min = float(PMT_RADIUS) * 2.0
+        h_pole = h_min + (1.0 - alpha) * (h_full / 2.0 - h_min)
+        t = (np.arange(n_half) + 0.5) / n_half   # uniform [0, 1) spacing
+        if pole_pos == "bottom":
+            z = z_min + t * h_pole
+        else:
+            z = z_max - t * h_pole
+        phi = phi_fib
 
     else:
         raise ValueError(f"Unknown wall algorithm: '{alg}'")
@@ -423,8 +491,22 @@ def _draw_surface_params(
             r_min, r_max = _area_r_bounds(area)
             p["ring_radii"] = rng.uniform(r_min, r_max, n_rings).tolist()
 
+    elif alg == "phi_sectors":
+        n_half = max(1, n_area // 2)
+        max_k = max(1, min(3, n_half // 3))
+        n_sectors = int(rng.integers(1, max_k + 1))
+        p["n_sectors"] = n_sectors
+        p["sector_centers"] = rng.uniform(0.0, 2.0 * np.pi, n_sectors).tolist()
+
+    elif alg == "phi_band":   # wall only
+        p["phi_center"] = float(rng.uniform(0.0, 2.0 * np.pi))
+
+    elif alg == "pole":       # wall only
+        p["pole_pos"] = str(rng.choice(["top", "bottom"]))
+
     # Ensure all list-valued params are plain Python lists for JSON serialisation
-    for key in ("cluster_phi", "cluster_z", "cluster_r", "ring_z", "ring_radii"):
+    for key in ("cluster_phi", "cluster_z", "cluster_r", "ring_z", "ring_radii",
+                "sector_centers"):
         if key in p and not isinstance(p[key], list):
             p[key] = list(p[key])
 
