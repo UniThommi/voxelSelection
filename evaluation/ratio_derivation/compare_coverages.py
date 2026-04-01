@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ratio_analysis.raw_loading import (
     build_nc_truth,
     build_pmt_matrix,
+    check_all_files_integrity,
     count_vertices_by_run,
 )
 from ratio_analysis.coverage_analysis import (
@@ -992,6 +993,10 @@ def main() -> None:
     print(f"  m={args.m}, M=1..{args.M_max}, W=1..{args.W_max}")
     print(f"  M_default={M_default}, W_default={W_default}")
     print(f"  Output   : {args.output_dir}")
+    print()
+
+    # ── 0. Integrity pre-flight check ────────────────────────────────
+    check_all_files_integrity(args.muon_dir, args.sim_dirs, args.labels)
     print()
 
     # ── 1. Load shared NC truth ───────────────────────────────────────

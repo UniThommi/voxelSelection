@@ -121,6 +121,73 @@ def _count_vertices_run_dir(run_dir: str) -> int:
 # ──────────────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────────────
+def check_all_files_integrity(
+    nc_dir: str,
+    sim_dirs: list[str],
+    labels: list[str],
+) -> None:
+    """Check all output_t*.hdf5 files for corruption before any analysis.
+
+    For every run_* subdirectory in nc_dir and each sim_dir, attempts to
+    open every HDF5 file. If any file in a run directory is unreadable
+    (truncated, corrupt), the entire run is flagged — because all files
+    in a run belong to the same simulation and cannot be treated
+    individually.
+
+    Prints a full list of defective runs and raises RuntimeError if any
+    are found. If all files are intact, prints a confirmation and returns.
+
+    Parameters
+    ----------
+    nc_dir:
+        NC truth simulation directory (Sim 1).
+    sim_dirs:
+        List of optical simulation directories (Sim 2), one per setup.
+    labels:
+        Human-readable label for each entry in sim_dirs.
+    """
+    all_dirs = [(nc_dir, "nc_dir")] + list(zip(sim_dirs, labels))
+
+    # (dir_label, run_label) -> count of corrupt files in that run
+    defective_runs: dict[tuple[str, str], int] = {}
+    n_runs_checked = 0
+
+    print("Checking HDF5 file integrity ...")
+    for base_dir, dir_label in all_dirs:
+        try:
+            run_dirs = _list_run_dirs(base_dir)
+        except FileNotFoundError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        for run_dir in run_dirs:
+            n_runs_checked += 1
+            run_label = os.path.basename(run_dir)
+            files = sorted(glob.glob(os.path.join(run_dir, "output_t*.hdf5")))
+            n_corrupt = 0
+            for fpath in files:
+                try:
+                    with h5py.File(fpath, "r"):
+                        pass
+                except OSError:
+                    n_corrupt += 1
+            if n_corrupt > 0:
+                defective_runs[(dir_label, run_label)] = n_corrupt
+
+    if defective_runs:
+        n_bad_runs = len(defective_runs)
+        print(f"\n  [ERROR] Found corrupt/truncated file(s) in {n_bad_runs} run(s):\n")
+        for (dir_label, run_label), n_corrupt in sorted(defective_runs.items()):
+            print(f"    Setup: {dir_label}  |  Run: {run_label}  ({n_corrupt} corrupt file(s))")
+
+        raise RuntimeError(
+            f"Integrity check failed: {n_bad_runs} run(s) contain corrupt "
+            "HDF5 file(s). Fix or remove the defective runs before proceeding."
+        )
+
+    setup_names = "  +  ".join(lbl for _, lbl in all_dirs)
+    print(f"  All files intact — setups checked: [{setup_names}]  |  {n_runs_checked} runs total.")
+
+
 def build_nc_truth(muon_base_dir: str, verbose: bool = True) -> pd.DataFrame:
     """Load NC truth from Sim 1 across all run_NNN subdirs of muon_base_dir.
 
