@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -166,7 +167,8 @@ def _colors(n: int) -> list:
 
 
 def _annotate_bar(
-    ax: plt.Axes, bar, value: int, total: Optional[int] = None, fontsize: int = 8
+    ax: plt.Axes, bar, value: int, total: Optional[int] = None,
+    fontsize: int = 8, rotation: int = 0,
 ) -> None:
     text = f"{value:,}"
     if total and total > 0:
@@ -176,6 +178,7 @@ def _annotate_bar(
         bar.get_height(),
         text,
         ha="center", va="bottom", fontsize=fontsize, fontweight="bold",
+        rotation=rotation,
     )
 
 
@@ -234,8 +237,8 @@ def plot_nc_multiplicity_histogram(
     M_default: int,
     output_dir: str,
 ) -> None:
-    """Overlaid histogram of per-NC PMT multiplicity for all configs."""
-    fig, ax = plt.subplots(figsize=(12, 6))
+    """Overlaid histogram of per-NC PMT multiplicity: linear (left) + log (right)."""
+    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(20, 6))
     colors = _colors(len(results))
 
     all_mults = [r.nc["multiplicity_counts"] for r in results]
@@ -247,39 +250,44 @@ def plot_nc_multiplicity_histogram(
 
     for r, c, mult in zip(results, colors, all_mults):
         nonzero = mult[mult > 0]
-        ax.hist(
-            nonzero, bins=bins, alpha=0.5, label=r.label,
-            color=c, edgecolor="black", linewidth=0.4,
+        for ax in (ax_lin, ax_log):
+            ax.hist(
+                nonzero, bins=bins, alpha=0.5, label=r.label,
+                color=c, edgecolor="black", linewidth=0.4,
+            )
+
+    for ax, scale, scale_label in zip(
+        (ax_lin, ax_log), ("linear", "log"), ("Linear scale", "Log scale")
+    ):
+        ax.axvline(
+            M_default - 0.5, color="red", linestyle="--", linewidth=1.5,
+            label=f"M default = {M_default}",
         )
+        ax.set_xlabel("PMT multiplicity (# firing PMTs per NC)")
+        ax.set_ylabel("Number of NCs")
+        ax.set_title(
+            f"PMT Multiplicity Distribution per NC — {scale_label}\n"
+            "(# distinct PMTs with ≥m hits within 200 ns of NC; NCs with 0 excluded)"
+        )
+        ax.legend(fontsize=8)
+        ax.set_yscale(scale)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-    ax.axvline(
-        M_default - 0.5, color="red", linestyle="--", linewidth=1.5,
-        label=f"M default = {M_default}",
-    )
-    ax.set_xlabel("PMT multiplicity (# firing PMTs per NC)")
-    ax.set_ylabel("Number of NCs")
-    ax.set_title(
-        "PMT Multiplicity Distribution per NC\n"
-        "(# distinct PMTs with ≥m hits within 200 ns of NC; NCs with 0 excluded from bars)"
-    )
-    ax.legend()
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
-
-    # Mean and zero-multiplicity stats
+    # Mean and zero-multiplicity stats beneath the figure
     means = ", ".join(
         f"{r.label}: mean={np.mean(m):.2f}" for r, m in zip(results, all_mults)
     )
     zeros = ", ".join(
         f"{r.label}: {int((m == 0).sum()):,}" for r, m in zip(results, all_mults)
     )
-    ax.text(
-        0.5, -0.12,
+    fig.text(
+        0.5, 0.01,
         f"Mean multiplicity (all NCs): {means}\n"
         f"NCs with 0 firing PMTs: {zeros}",
-        transform=ax.transAxes, ha="center", fontsize=9, fontstyle="italic",
+        ha="center", fontsize=8, fontstyle="italic",
     )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.07, 1, 1])
     fname = "02_nc_multiplicity_histogram.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
@@ -368,7 +376,7 @@ def _draw_detectability_panels(
         offset = (i - (n - 1) / 2) * width
         bars   = ax_abs.bar(x + offset, vals, width, label=r.label, color=c)
         for bar, val in zip(bars, vals):
-            _annotate_bar(ax_abs, bar, val, total, fontsize=7)
+            _annotate_bar(ax_abs, bar, val, total, fontsize=6, rotation=90)
 
     ax_abs.set_xticks(x)
     ax_abs.set_xticklabels(abs_cat_labels, fontsize=9)
@@ -406,10 +414,17 @@ def _draw_detectability_panels(
             label=r.label, color=c,
         )
         for bar, delta in zip(bars, deltas):
-            if delta == 0:
-                continue
             pct  = 100.0 * delta / max(ref_total, 1)
             sign = "+" if pct >= 0 else ""
+            if delta == 0:
+                # Bar has zero width; annotate at x=0 to make it visible
+                ax_delta.text(
+                    0, bar.get_y() + bar.get_height() / 2,
+                    " =ref",
+                    va="center", ha="left", fontsize=6,
+                    color=c, fontstyle="italic",
+                )
+                continue
             txt  = f"{sign}{delta:,}\n({sign}{pct:.1f}%)"
             pad  = max(abs(delta) * 0.02, 1)
             ax_delta.text(
@@ -450,7 +465,7 @@ def _detectability_figure(
     """Create and save a two-panel detectability figure."""
     fig, (ax_abs, ax_delta) = plt.subplots(
         1, 2,
-        figsize=(20, 7),
+        figsize=(22, 9),
         gridspec_kw={"width_ratios": [3, 2]},
     )
     _draw_detectability_panels(
@@ -513,18 +528,19 @@ def _heatmap(
     M_values: list[int],
     W_values: list[int],
     title: str,
-    vmin: float = 0.0,
-    vmax: float = 1.0,
+    norm=None,
     cmap: str = "viridis",
 ) -> None:
-    """Draw a single (M rows, W cols) heatmap on ax."""
+    """Draw a single (M rows, W cols) heatmap on ax with LogNorm."""
+    if norm is None:
+        clip = np.clip(data, 1e-4, 1.0)
+        norm = mcolors.LogNorm(vmin=clip.min(), vmax=max(clip.max(), clip.min() * 10))
     im = ax.imshow(
-        data,
+        np.clip(data, 1e-4, None),
         origin="lower",
         aspect="auto",
         cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
+        norm=norm,
         extent=[
             W_values[0] - 0.5, W_values[-1] + 0.5,
             M_values[0] - 0.5, M_values[-1] + 0.5,
@@ -544,25 +560,57 @@ def plot_muon_heatmaps(
     W_values: list[int],
     output_dir: str,
 ) -> None:
-    """Per-config 3-panel heatmap: Recall, Precision, F2 over (M, W)."""
+    """One figure per M: 3-panel heatmap (Recall, Precision, F2) with x=setup, y=W.
+
+    All three metric panels share the same logarithmic colour scale.
+    """
     metrics_to_plot = ["Recall", "Precision", "F2"]
+    n_setups = len(results)
+    labels = [r.label for r in results]
 
-    for r in results:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        fig.suptitle(f"Ge-77 Classification — {r.label}", fontsize=13)
+    # Shared LogNorm across all M values and all metrics (0–1 range)
+    shared_norm = mcolors.LogNorm(vmin=1e-4, vmax=1.0)
 
-        for col, metric in enumerate(metrics_to_plot):
-            grid = np.zeros((len(M_values), len(W_values)))
-            for mi, M in enumerate(M_values):
-                for wi, W in enumerate(W_values):
+    for M in M_values:
+        # Build grids: shape (len(W_values), n_setups) for each metric
+        grids: dict[str, np.ndarray] = {}
+        for metric in metrics_to_plot:
+            grid = np.zeros((len(W_values), n_setups))
+            for wi, W in enumerate(W_values):
+                for si, r in enumerate(results):
                     conf = r.muon["confusion"][(M, W)]
                     m = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
-                    grid[mi, wi] = m[metric]
-            _heatmap(axes[col], grid, M_values, W_values, title=metric)
+                    grid[wi, si] = max(m[metric], 1e-4)
+            grids[metric] = grid
+
+        fig_w = max(8, 3 + 2 * n_setups)
+        fig, axes = plt.subplots(1, 3, figsize=(fig_w, 6))
+        fig.suptitle(f"Ge-77 Classification  M={M}", fontsize=13)
+
+        for col, metric in enumerate(metrics_to_plot):
+            ax = axes[col]
+            grid = grids[metric]
+            im = ax.imshow(
+                grid,
+                origin="lower",
+                aspect="auto",
+                cmap="viridis",
+                norm=shared_norm,
+                extent=[
+                    -0.5, n_setups - 0.5,
+                    W_values[0] - 0.5, W_values[-1] + 0.5,
+                ],
+            )
+            ax.set_xticks(range(n_setups))
+            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(W_values[::max(1, len(W_values) // 10)])
+            ax.set_xlabel("Setup")
+            ax.set_ylabel("W (min detected NCs per muon)")
+            ax.set_title(metric)
+            plt.colorbar(im, ax=ax, label=metric)
 
         fig.tight_layout()
-        safe_label = r.label.replace(" ", "_").replace("/", "-")
-        fname = f"05_muon_heatmap_{safe_label}.png"
+        fname = f"05_muon_heatmap_M{M:02d}.png"
         fig.savefig(os.path.join(output_dir, fname), dpi=150)
         plt.close(fig)
         print(f"  Saved {fname}")
@@ -590,17 +638,17 @@ def plot_confusion_bar(
     width = 0.8 / n
     colors = _colors(n)
 
-    fig, ax = plt.subplots(figsize=(14, 7))
+    fig, ax = plt.subplots(figsize=(16, 8))
     for i, (r, c) in enumerate(zip(results, colors)):
         conf = r.muon["confusion"][(M_default, W_default)]
         vals = [conf[k] for k in keys]
         offset = (i - (n - 1) / 2) * width
         bars = ax.bar(x + offset, vals, width, label=r.label, color=c)
         for bar, val in zip(bars, vals):
-            _annotate_bar(ax, bar, val)
+            _annotate_bar(ax, bar, val, fontsize=7, rotation=90)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(categories)
+    ax.set_xticklabels(categories, fontsize=9)
     ax.set_ylabel("Number of Muons")
     ax.set_title(
         f"Ge-77 Muon Classification (W≥{W_default}, M≥{M_default})\n"
@@ -609,7 +657,7 @@ def plot_confusion_bar(
     ax.legend()
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-    # Metrics per config
+    # Metrics per config — placed below the axis with extra room
     lines = []
     for r in results:
         conf = r.muon["confusion"][(M_default, W_default)]
@@ -618,13 +666,14 @@ def plot_confusion_bar(
             f"{r.label}: Precision={m['Precision']:.3f}  Recall={m['Recall']:.3f}  "
             f"F2={m['F2']:.3f}"
         )
-    ax.text(
-        0.5, -0.15, "\n".join(lines),
-        transform=ax.transAxes, ha="center", fontsize=9,
+    n_lines = len(lines)
+    fig.text(
+        0.5, 0.01, "\n".join(lines),
+        ha="center", fontsize=8,
         fontstyle="italic", family="monospace",
     )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04 + 0.025 * n_lines, 1, 1])
     fname = "06_confusion_bar.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
@@ -698,15 +747,18 @@ def _draw_w_panel(
     ax.axvline(w_bin_idx - 0.5, color="red", linestyle="--", linewidth=1.5,
                label=f"W threshold = {W}")
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(e) for e in bin_edges], rotation=45, ha="right", fontsize=7)
-    ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})")
+    # Show at most ~20 tick labels so the x axis stays readable
+    step = max(1, len(bin_edges) // 20)
+    shown = list(range(0, len(bin_edges), step))
+    ax.set_xticks([x[i] for i in shown])
+    ax.set_xticklabels([str(bin_edges[i]) for i in shown], rotation=45, ha="right", fontsize=8)
+    ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})", fontsize=9)
     ax.set_ylabel("Number of Muons")
     ax.set_title(
         f"Detected NC Count per {label} Muon\n"
         f"(time window [1µs, 200µs], M≥{M}; only muons with ≥1 NC)"
     )
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.set_yscale("log")
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
@@ -715,7 +767,7 @@ def _draw_w_panel(
         f"≥W ({100*sum(1 for v in d if v >= W)/max(len(d), 1):.1f}%)"
         for r, d in zip(results, all_data)
     )
-    ax.text(0.5, -0.16, stats, transform=ax.transAxes,
+    ax.text(0.5, -0.20, stats, transform=ax.transAxes,
             ha="center", fontsize=8, fontstyle="italic")
 
 
@@ -726,10 +778,10 @@ def plot_w_histogram(
     output_dir: str,
 ) -> None:
     """W-histogram at M_default: Ge77 and non-Ge77 muons side by side."""
-    fig, axes = plt.subplots(1, 2, figsize=(22, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(26, 8))
     _draw_w_panel(axes[0], results, M_default, W_default, ge77=True)
     _draw_w_panel(axes[1], results, M_default, W_default, ge77=False)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
     fname = "07_w_histogram.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
@@ -739,88 +791,109 @@ def plot_w_histogram(
 # ──────────────────────────────────────────────────────────────────────
 # Plot 08 — W2 vs NC coverage scatter (optional)
 # ──────────────────────────────────────────────────────────────────────
+def _w2_scatter_figure(
+    w2_results: list[SetupResult],
+    scatter_M: list[int],
+    M: int,
+    W: int,
+    output_dir: str,
+    fname: str,
+) -> None:
+    """Draw and save one W2 scatter figure for fixed (M, W)."""
+    w2_vals = np.array([r.w2 for r in w2_results])
+    colors_m = plt.cm.plasma(np.linspace(0.1, 0.9, len(scatter_M)))
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+    fig.suptitle(f"W2 homogeneity vs Performance  (M={M}, W={W})", fontsize=12)
+
+    # Panel 1: W2 vs NC coverage at multiple M values
+    ax = axes[0]
+    for sM, cm in zip(scatter_M, colors_m):
+        cov = np.array([
+            r.nc["nc_detected"][sM] / max(r.nc["nc_total"], 1)
+            for r in w2_results
+        ])
+        ax.scatter(w2_vals, cov, color=cm, label=f"M={sM}", zorder=3, s=60)
+        for r, w2v, c in zip(w2_results, w2_vals, cov):
+            ax.annotate(r.label, xy=(w2v, c), xytext=(4, 2),
+                        textcoords="offset points", fontsize=7, color=cm)
+    ax.set_xlabel("W2 (mm) — lower = more uniform")
+    ax.set_ylabel("NC detection fraction")
+    ax.set_title("W2 vs NC Coverage")
+    ax.legend(title="M", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: W2 vs Recall at (M, W)
+    ax = axes[1]
+    recalls = [
+        compute_metrics(
+            r.muon["confusion"][(M, W)]["TP"],
+            r.muon["confusion"][(M, W)]["FP"],
+            r.muon["confusion"][(M, W)]["TN"],
+            r.muon["confusion"][(M, W)]["FN"],
+        )["Recall"]
+        for r in w2_results
+    ]
+    ax.scatter(w2_vals, recalls, color="steelblue", s=80, zorder=3)
+    for r, w2v, rec in zip(w2_results, w2_vals, recalls):
+        ax.annotate(r.label, xy=(w2v, rec), xytext=(4, 2),
+                    textcoords="offset points", fontsize=8)
+    ax.set_xlabel("W2 (mm)")
+    ax.set_ylabel("Recall")
+    ax.set_title(f"W2 vs Recall (M={M}, W={W})")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: W2 vs F2 at (M, W)
+    ax = axes[2]
+    f2s = [
+        compute_metrics(
+            r.muon["confusion"][(M, W)]["TP"],
+            r.muon["confusion"][(M, W)]["FP"],
+            r.muon["confusion"][(M, W)]["TN"],
+            r.muon["confusion"][(M, W)]["FN"],
+        )["F2"]
+        for r in w2_results
+    ]
+    ax.scatter(w2_vals, f2s, color="darkorange", s=80, zorder=3)
+    for r, w2v, f2 in zip(w2_results, w2_vals, f2s):
+        ax.annotate(r.label, xy=(w2v, f2), xytext=(4, 2),
+                    textcoords="offset points", fontsize=8)
+    ax.set_xlabel("W2 (mm)")
+    ax.set_ylabel("F2 score")
+    ax.set_title(f"W2 vs F2 (M={M}, W={W})")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 def plot_w2_scatter(
     results: list[SetupResult],
     M_values: list[int],
     M_default: int,
     W_default: int,
+    W_values: list[int],
     output_dir: str,
 ) -> None:
-    """Scatter plots: W2 vs NC coverage and W2 vs Recall/F2."""
+    """W2 scatter plots for multiple (M, W) combinations — one file each."""
     w2_results = [r for r in results if r.w2 is not None]
     if len(w2_results) < 2:
-        print("  [SKIP] 09_w2_scatter.png: fewer than 2 configs have W2.")
+        print("  [SKIP] 09_w2_scatter*.png: fewer than 2 configs have W2.")
         return
 
-    scatter_M = [M for M in [1, 2, 4, M_default, max(M_values)] if M in M_values]
-    scatter_M = sorted(set(scatter_M))
+    # M values shown in the NC-coverage panel of every figure
+    scatter_M = sorted(set(M for M in [1, 2, 4, M_default, max(M_values)] if M in M_values))
 
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-    colors_m = plt.cm.plasma(np.linspace(0.1, 0.9, len(scatter_M)))
-    w2_vals  = np.array([r.w2 for r in w2_results])
+    # (M, W) combinations for which we generate separate files
+    candidate_M = sorted(set(M for M in [1, 2, 4, M_default] if M in M_values))
+    candidate_W = sorted(set(W for W in [1, 2, 5, W_default] if W in W_values))
+    mw_combos = [(M, W) for M in candidate_M for W in candidate_W]
 
-    # Panel 1: W2 vs NC coverage at multiple M
-    ax = axes[0]
-    for M, cm in zip(scatter_M, colors_m):
-        cov = np.array([
-            r.nc["nc_detected"][M] / max(r.nc["nc_total"], 1)
-            for r in w2_results
-        ])
-        ax.scatter(w2_vals, cov, color=cm, label=f"M={M}", zorder=3, s=60)
-        for r, w2, c in zip(w2_results, w2_vals, cov):
-            ax.annotate(r.label, xy=(w2, c), xytext=(4, 2),
-                        textcoords="offset points", fontsize=7, color=cm)
-    ax.set_xlabel("W2 (mm) — lower = more uniform")
-    ax.set_ylabel("NC detection fraction")
-    ax.set_title("W2 vs NC Coverage")
-    ax.legend(title="M")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: W2 vs Recall at (M_default, W_default)
-    ax = axes[1]
-    recalls = [
-        compute_metrics(
-            r.muon["confusion"][(M_default, W_default)]["TP"],
-            r.muon["confusion"][(M_default, W_default)]["FP"],
-            r.muon["confusion"][(M_default, W_default)]["TN"],
-            r.muon["confusion"][(M_default, W_default)]["FN"],
-        )["Recall"]
-        for r in w2_results
-    ]
-    ax.scatter(w2_vals, recalls, color="steelblue", s=80, zorder=3)
-    for r, w2, rec in zip(w2_results, w2_vals, recalls):
-        ax.annotate(r.label, xy=(w2, rec), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8)
-    ax.set_xlabel("W2 (mm)")
-    ax.set_ylabel("Recall")
-    ax.set_title(f"W2 vs Recall (M={M_default}, W={W_default})")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: W2 vs F2 at (M_default, W_default)
-    ax = axes[2]
-    f2s = [
-        compute_metrics(
-            r.muon["confusion"][(M_default, W_default)]["TP"],
-            r.muon["confusion"][(M_default, W_default)]["FP"],
-            r.muon["confusion"][(M_default, W_default)]["TN"],
-            r.muon["confusion"][(M_default, W_default)]["FN"],
-        )["F2"]
-        for r in w2_results
-    ]
-    ax.scatter(w2_vals, f2s, color="darkorange", s=80, zorder=3)
-    for r, w2, f2 in zip(w2_results, w2_vals, f2s):
-        ax.annotate(r.label, xy=(w2, f2), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8)
-    ax.set_xlabel("W2 (mm)")
-    ax.set_ylabel("F2 score")
-    ax.set_title(f"W2 vs F2 (M={M_default}, W={W_default})")
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    fname = "09_w2_scatter.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
-    plt.close(fig)
-    print(f"  Saved {fname}")
+    for M, W in mw_combos:
+        fname = f"09_w2_scatter_M{M:02d}_W{W:02d}.png"
+        _w2_scatter_figure(w2_results, scatter_M, M, W, output_dir, fname)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1087,7 +1160,7 @@ def main() -> None:
     plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     plot_w_histogram(results, M_default, W_default, args.output_dir)
-    plot_w2_scatter(results, M_values, M_default, W_default, args.output_dir)
+    plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
