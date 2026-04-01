@@ -18,11 +18,15 @@ For each of n_configs configurations the algorithm:
 Available algorithms per area
 ------------------------------
   fibonacci       Fibonacci-spiral reference distribution (no concentration)
-  phi_sector      Concentrate azimuthally into a sector of half-width phi_half
   z_band          Concentrate wall points into a horizontal z-band (wall only)
   radial          Power-law radial warping toward inner or outer edge (disk only)
-  multi_cluster   Place N in k tight Fibonacci-seeded clusters
-  superposition   Linear blend of Fibonacci + Gaussian blob at one point
+  multi_cluster   k clusters at random (phi, r/z) positions
+  superposition   Fibonacci blend + ring/band concentrated at one r or z value
+  multi_ring      n_rings rings at distinct r (disk) or z (wall) values, phi uniform
+
+All algorithms generate point-symmetric configurations: n//2 geometric points
+are produced internally and then mirrored at phi → phi+pi (C2 symmetry around
+the z-axis). Small deviations from perfect symmetry arise only from voxel snapping.
 
 Usage
 -----
@@ -67,8 +71,8 @@ _AREA_ORDER: list[str] = ["pit", "bot", "top", "wall"]
 _Z_WALL_MIN = float(Z_BASE_GLOBAL)
 _Z_WALL_MAX = float(Z_CUT_TOP)
 
-_ALG_DISK: list[str] = ["fibonacci", "phi_sector", "radial", "multi_cluster", "superposition"]
-_ALG_WALL: list[str] = ["fibonacci", "phi_sector", "z_band", "multi_cluster", "superposition"]
+_ALG_DISK: list[str] = ["fibonacci", "radial", "multi_cluster", "superposition", "multi_ring"]
+_ALG_WALL: list[str] = ["fibonacci", "z_band", "multi_cluster", "superposition", "multi_ring"]
 
 
 
@@ -119,25 +123,23 @@ def _gen_disk_points(
     alpha: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return (n, 3) geometric points on an annular disk at height z."""
-    phi_fib = _fib_angles(n)
-    r_fib = _fib_annulus_r(n, r_min, r_max)
+    """Return (n, 3) geometric points on an annular disk at height z.
+
+    All distributions are point-symmetric through the cylinder axis: each of the
+    n//2 generated points at (r, phi) is paired with a mirror at (r, phi+pi).
+    The odd remainder (if any) gets one extra point at the radial midpoint.
+    """
+    n_half = n // 2
+    phi_fib = _fib_angles(n_half)
+    r_fib = _fib_annulus_r(n_half, r_min, r_max)
 
     if alg == "fibonacci":
         r, phi = r_fib, phi_fib
 
-    elif alg == "phi_sector":
-        phi_center = params["phi_center"]
-        phi_half_min = 2.0 * np.pi / max(n, 1) * 3.0   # ~3 average spacings
-        phi_half = phi_half_min + (1.0 - alpha) * (np.pi - phi_half_min)
-        # Map [0, 2π) linearly into [phi_center − phi_half, phi_center + phi_half]
-        phi = phi_center + (phi_fib / (2.0 * np.pi) - 0.5) * 2.0 * phi_half
-        r = r_fib
-
     elif alg == "radial":
         beta_max = params["beta_max"]
         direction = params["radial_direction"]
-        t = (np.arange(n) + 0.5) / n
+        t = (np.arange(n_half) + 0.5) / n_half
         if direction == "inward":        # concentrate toward r_min
             beta = 1.0 + alpha * (beta_max - 1.0)
         else:                            # concentrate toward r_max
@@ -153,10 +155,10 @@ def _gen_disk_points(
         sigma_min = float(PMT_RADIUS) * 1.5
         sigma_max = max(
             sigma_min * 2.0,
-            min(r_max - r_min, np.pi * (r_min + r_max) / k) * 0.7,
+            min(r_max - r_min, np.pi * (r_min + r_max) / max(k, 1)) * 0.7,
         )
         sigma = sigma_min + (1.0 - alpha) * (sigma_max - sigma_min)
-        pts_per = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        pts_per = [n_half // k + (1 if i < n_half % k else 0) for i in range(k)]
         r_parts, phi_parts = [], []
         for ci, nc in enumerate(pts_per):
             if nc == 0:
@@ -164,7 +166,6 @@ def _gen_disk_points(
             r_off = rng.uniform(0.0, sigma, nc)
             a_off = rng.uniform(0.0, 2.0 * np.pi, nc)
             rc = np.clip(c_r[ci] + r_off * np.cos(a_off), r_min, r_max)
-            # angular offset divided by radius gives phi offset
             ref_r = max(float(c_r[ci]), r_min + 1e-6)
             pc = (c_phi[ci] + r_off * np.sin(a_off) / ref_r) % (2.0 * np.pi)
             r_parts.append(rc)
@@ -173,32 +174,56 @@ def _gen_disk_points(
         phi = np.concatenate(phi_parts)
 
     elif alg == "superposition":
-        n_conc = int(round(alpha * n))
-        n_uni = n - n_conc
-        c_phi = params["conc_phi"]
+        # Concentrated part is a ring at conc_r with uniform phi — no preferred direction.
+        n_conc = int(round(alpha * n_half))
+        n_uni = n_half - n_conc
         c_r = np.clip(params["conc_r"], r_min, r_max)
         blob = max(float(PMT_RADIUS) * 1.5,
-                   (r_max - r_min) / max(float(np.sqrt(n)), 1.0))
+                   (r_max - r_min) / max(float(np.sqrt(n_half)), 1.0))
         r_parts, phi_parts = [], []
         if n_uni > 0:
             r_parts.append(_fib_annulus_r(n_uni, r_min, r_max))
             phi_parts.append(_fib_angles(n_uni))
         if n_conc > 0:
-            r_off = rng.uniform(0.0, blob, n_conc)
-            a_off = rng.uniform(0.0, 2.0 * np.pi, n_conc)
-            rc = np.clip(c_r + r_off * np.cos(a_off), r_min, r_max)
-            ref_r = max(float(c_r), r_min + 1e-6)
-            pc = (c_phi + r_off * np.sin(a_off) / ref_r) % (2.0 * np.pi)
+            r_off = rng.uniform(-blob, blob, n_conc)
+            rc = np.clip(c_r + r_off, r_min, r_max)
+            pc = rng.uniform(0.0, 2.0 * np.pi, n_conc)
             r_parts.append(rc)
             phi_parts.append(pc)
+        r = np.concatenate(r_parts) if r_parts else r_fib
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+
+    elif alg == "multi_ring":
+        # Multiple annular rings at fixed radii, each with uniform phi.
+        # Few rings (high alpha) → concentrated; many rings → spread.
+        n_rings = params["n_rings"]
+        ring_radii = params["ring_radii"]
+        pts_per_ring = [n_half // n_rings + (1 if i < n_half % n_rings else 0)
+                        for i in range(n_rings)]
+        r_parts, phi_parts = [], []
+        for ri, np_r in enumerate(pts_per_ring):
+            if np_r == 0:
+                continue
+            rr = float(np.clip(ring_radii[ri], r_min, r_max))
+            r_parts.append(np.full(np_r, rr))
+            phi_parts.append(rng.uniform(0.0, 2.0 * np.pi, np_r))
         r = np.concatenate(r_parts) if r_parts else r_fib
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
 
     else:
         raise ValueError(f"Unknown disk algorithm: '{alg}'")
 
-    x = r * np.cos(phi)
-    y = r * np.sin(phi)
+    # Apply point symmetry: mirror each of the n_half points by phi + pi
+    r_full = np.concatenate([r, r])
+    phi_full = np.concatenate([phi, (phi + np.pi) % (2.0 * np.pi)])
+
+    # Odd n: one extra point at radial midpoint (small deviation allowed)
+    if n % 2:
+        r_full = np.append(r_full, (r_min + r_max) / 2.0)
+        phi_full = np.append(phi_full, float(rng.uniform(0.0, 2.0 * np.pi)))
+
+    x = r_full * np.cos(phi_full)
+    y = r_full * np.sin(phi_full)
     return np.column_stack([x, y, np.full(n, z)])
 
 
@@ -209,28 +234,26 @@ def _gen_wall_points(
     alpha: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return (n, 3) geometric points on the cylindrical wall."""
+    """Return (n, 3) geometric points on the cylindrical wall.
+
+    All distributions are point-symmetric through the cylinder axis: each of the
+    n//2 generated points at (phi, z) is paired with a mirror at (phi+pi, z).
+    The odd remainder (if any) gets one extra point at the z midpoint.
+    """
     z_min, z_max = _Z_WALL_MIN, _Z_WALL_MAX
-    phi_fib = (2.0 * np.pi * np.arange(n) / _GOLDEN) % (2.0 * np.pi)
-    z_fib = z_min + (np.arange(n) + 0.5) / n * (z_max - z_min)
+    n_half = n // 2
+    phi_fib = (2.0 * np.pi * np.arange(n_half) / _GOLDEN) % (2.0 * np.pi)
+    z_fib = z_min + (np.arange(n_half) + 0.5) / n_half * (z_max - z_min)
 
     if alg == "fibonacci":
         phi, z = phi_fib, z_fib
-
-    elif alg == "phi_sector":
-        phi_center = params["phi_center"]
-        phi_half_min = 2.0 * np.pi / max(n, 1) * 3.0
-        phi_half = phi_half_min + (1.0 - alpha) * (np.pi - phi_half_min)
-        phi = phi_center + (phi_fib / (2.0 * np.pi) - 0.5) * 2.0 * phi_half
-        z = z_fib
 
     elif alg == "z_band":
         z_center = params["z_center"]
         h_min = float(PMT_RADIUS)
         h_max = (z_max - z_min) / 2.0
         h_band = h_min + (1.0 - alpha) * (h_max - h_min)
-        # Map z_fib ∈ [z_min, z_max] → [z_center − h_band, z_center + h_band]
-        z_norm = (z_fib - z_min) / (z_max - z_min)   # ∈ [0, 1]
+        z_norm = (z_fib - z_min) / (z_max - z_min)
         z = np.clip(z_center + (z_norm - 0.5) * 2.0 * h_band, z_min, z_max)
         phi = phi_fib
 
@@ -238,13 +261,13 @@ def _gen_wall_points(
         k = params["k"]
         c_phi = params["cluster_phi"]
         c_z = params["cluster_z"]
-        sig_phi_min = 2.0 * np.pi / max(n, 1) * 3.0
-        sig_phi_max = max(sig_phi_min * 2.0, np.pi / k * 0.7)
+        sig_phi_min = 2.0 * np.pi / max(n_half, 1) * 3.0
+        sig_phi_max = max(sig_phi_min * 2.0, np.pi / max(k, 1) * 0.7)
         sig_z_min = float(PMT_RADIUS)
-        sig_z_max = max(sig_z_min * 2.0, (z_max - z_min) / (2.0 * k) * 0.7)
+        sig_z_max = max(sig_z_min * 2.0, (z_max - z_min) / (2.0 * max(k, 1)) * 0.7)
         sig_phi = sig_phi_min + (1.0 - alpha) * (sig_phi_max - sig_phi_min)
         sig_z = sig_z_min + (1.0 - alpha) * (sig_z_max - sig_z_min)
-        pts_per = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        pts_per = [n_half // k + (1 if i < n_half % k else 0) for i in range(k)]
         phi_parts, z_parts = [], []
         for ci, nc in enumerate(pts_per):
             if nc == 0:
@@ -257,31 +280,56 @@ def _gen_wall_points(
         z = np.concatenate(z_parts) if z_parts else z_fib
 
     elif alg == "superposition":
-        n_conc = int(round(alpha * n))
-        n_uni = n - n_conc
-        c_phi = params["conc_phi"]
+        # Concentrated part is a horizontal band at conc_z with uniform phi — no preferred direction.
+        n_conc = int(round(alpha * n_half))
+        n_uni = n_half - n_conc
         c_z = np.clip(params["conc_z"], z_min, z_max)
-        blob_phi = 2.0 * np.pi / max(float(np.sqrt(n)), 1.0)
         blob_z = max(float(PMT_RADIUS) * 1.5,
-                     (z_max - z_min) / max(float(np.sqrt(n)), 1.0))
+                     (z_max - z_min) / max(float(np.sqrt(n_half)), 1.0))
         phi_parts, z_parts = [], []
         if n_uni > 0:
             phi_parts.append(phi_fib[:n_uni])
             z_parts.append(z_fib[:n_uni])
         if n_conc > 0:
-            pc = (c_phi + rng.normal(0.0, blob_phi, n_conc)) % (2.0 * np.pi)
+            pc = rng.uniform(0.0, 2.0 * np.pi, n_conc)
             zc = np.clip(c_z + rng.normal(0.0, blob_z, n_conc), z_min, z_max)
             phi_parts.append(pc)
             z_parts.append(zc)
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
         z = np.concatenate(z_parts) if z_parts else z_fib
 
+    elif alg == "multi_ring":
+        # Multiple horizontal rings at fixed z levels, each with uniform phi.
+        # Few rings (high alpha) → concentrated; many rings → spread.
+        n_rings = params["n_rings"]
+        ring_z = params["ring_z"]
+        pts_per_ring = [n_half // n_rings + (1 if i < n_half % n_rings else 0)
+                        for i in range(n_rings)]
+        phi_parts, z_parts = [], []
+        for ri, np_r in enumerate(pts_per_ring):
+            if np_r == 0:
+                continue
+            zz = float(np.clip(ring_z[ri], z_min, z_max))
+            phi_parts.append(rng.uniform(0.0, 2.0 * np.pi, np_r))
+            z_parts.append(np.full(np_r, zz))
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+        z = np.concatenate(z_parts) if z_parts else z_fib
+
     else:
         raise ValueError(f"Unknown wall algorithm: '{alg}'")
 
-    x = R_ZYLINDER * np.cos(phi)
-    y = R_ZYLINDER * np.sin(phi)
-    return np.column_stack([x, y, z])
+    # Apply point symmetry: mirror each of the n_half points by phi + pi
+    phi_full = np.concatenate([phi, (phi + np.pi) % (2.0 * np.pi)])
+    z_full = np.concatenate([z, z])
+
+    # Odd n: one extra point at z midpoint (small deviation allowed)
+    if n % 2:
+        phi_full = np.append(phi_full, float(rng.uniform(0.0, 2.0 * np.pi)))
+        z_full = np.append(z_full, (z_min + z_max) / 2.0)
+
+    x = R_ZYLINDER * np.cos(phi_full)
+    y = R_ZYLINDER * np.sin(phi_full)
+    return np.column_stack([x, y, z_full])
 
 
 def _gen_area_points(
@@ -308,15 +356,18 @@ def _draw_surface_params(
     n_area: int,
     rng: np.random.Generator,
 ) -> dict:
-    """Draw random algorithm + geometric starting parameters for one area."""
+    """Draw random algorithm + geometric starting parameters for one area.
+
+    All algorithms are designed to produce point-symmetric distributions:
+    the generator uses n//2 points and mirrors them at phi+pi.  Parameters
+    therefore need no special phi symmetry constraints — the mirroring in
+    _gen_disk_points/_gen_wall_points handles that automatically.
+    """
     pool = _ALG_WALL if area == "wall" else _ALG_DISK
     alg = str(rng.choice(pool))
     p: dict = {"algorithm": alg}
 
-    if alg == "phi_sector":
-        p["phi_center"] = float(rng.uniform(0.0, 2.0 * np.pi))
-
-    elif alg == "z_band":                # wall only
+    if alg == "z_band":                  # wall only
         z_range = _Z_WALL_MAX - _Z_WALL_MIN
         margin = z_range * 0.25
         p["z_center"] = float(rng.uniform(_Z_WALL_MIN + margin, _Z_WALL_MAX - margin))
@@ -326,8 +377,11 @@ def _draw_surface_params(
         p["beta_max"] = float(rng.uniform(2.0, 6.0))
 
     elif alg == "multi_cluster":
-        max_k = max(2, min(8, n_area // 10))
-        k = int(rng.integers(2, max_k + 1))
+        # k clusters drawn with random phi and r/z — the generator uses only
+        # n//2 points and mirrors them, so any phi placement becomes symmetric.
+        n_half = max(1, n_area // 2)
+        max_k = max(1, min(6, n_half // 5))
+        k = int(rng.integers(1, max_k + 1))
         p["k"] = k
         p["cluster_phi"] = rng.uniform(0.0, 2.0 * np.pi, k).tolist()
         if area == "wall":
@@ -341,7 +395,8 @@ def _draw_surface_params(
             p["cluster_r"] = rng.uniform(r_min, r_max, k).tolist()
 
     elif alg == "superposition":
-        p["conc_phi"] = float(rng.uniform(0.0, 2.0 * np.pi))
+        # No conc_phi: concentrated part uses uniform phi (ring/band), making
+        # the half-distribution already azimuthally unbiased before mirroring.
         if area == "wall":
             p["conc_z"] = float(rng.uniform(
                 _Z_WALL_MIN + float(PMT_RADIUS),
@@ -351,8 +406,25 @@ def _draw_surface_params(
             r_min, r_max = _area_r_bounds(area)
             p["conc_r"] = float(rng.uniform(r_min, r_max))
 
-    # numpy arrays must be converted for JSON serialisation
-    for key in ("cluster_phi", "cluster_z", "cluster_r"):
+    elif alg == "multi_ring":
+        # n_rings rings at independent r (disk) or z (wall) positions.
+        # Fewer rings → more radially/vertically concentrated (higher W2).
+        n_half = max(1, n_area // 2)
+        max_rings = max(1, min(8, n_half // 4))
+        n_rings = int(rng.integers(1, max_rings + 1))
+        p["n_rings"] = n_rings
+        if area == "wall":
+            p["ring_z"] = rng.uniform(
+                _Z_WALL_MIN + float(PMT_RADIUS),
+                _Z_WALL_MAX - float(PMT_RADIUS),
+                n_rings,
+            ).tolist()
+        else:
+            r_min, r_max = _area_r_bounds(area)
+            p["ring_radii"] = rng.uniform(r_min, r_max, n_rings).tolist()
+
+    # Ensure all list-valued params are plain Python lists for JSON serialisation
+    for key in ("cluster_phi", "cluster_z", "cluster_r", "ring_z", "ring_radii"):
         if key in p and not isinstance(p[key], list):
             p[key] = list(p[key])
 
