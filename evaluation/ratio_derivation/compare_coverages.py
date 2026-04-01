@@ -329,6 +329,7 @@ def _draw_detectability_panels(
     M_default: int,
     title: str,
     total_key: str,
+    ylabel: str = "Number of NCs",
 ) -> None:
     """Draw the two-panel detectability figure on pre-created axes.
 
@@ -404,7 +405,7 @@ def _draw_detectability_panels(
 
     ax_abs.set_xticks(x)
     ax_abs.set_xticklabels(abs_cat_labels, fontsize=9)
-    ax_abs.set_ylabel("Number of NCs")
+    ax_abs.set_ylabel(ylabel)
     ax_abs.set_title(title)
     ax_abs.legend(fontsize=8)
     ax_abs.yaxis.set_major_formatter(
@@ -485,6 +486,8 @@ def _detectability_figure(
     total_key: str,
     fname: str,
     output_dir: str,
+    ylabel: str = "Number of NCs",
+    note: str = "",
 ) -> None:
     """Create and save a two-panel detectability figure."""
     fig, (ax_abs, ax_delta) = plt.subplots(
@@ -493,9 +496,18 @@ def _detectability_figure(
         gridspec_kw={"width_ratios": [3, 2]},
     )
     _draw_detectability_panels(
-        ax_abs, ax_delta, results, nc_key, M_default, title, total_key
+        ax_abs, ax_delta, results, nc_key, M_default, title, total_key,
+        ylabel=ylabel,
     )
-    fig.tight_layout()
+    if note:
+        fig.text(
+            0.5, 0.01, note,
+            ha="center", fontsize=8, fontstyle="italic",
+            color="#444444", wrap=True,
+        )
+        fig.tight_layout(rect=[0, 0.06, 1, 1])
+    else:
+        fig.tight_layout()
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -520,28 +532,139 @@ def plot_nc_detectability_overview(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Plot 04 — Ge77-muon NC detectability overview
+# Plot 04 — Ge77-muon detection funnel (muon-level, consistent with heatmap)
 # ──────────────────────────────────────────────────────────────────────
-def plot_ge77_nc_detectability_overview(
+def plot_ge77_muon_overview(
     results: list[SetupResult],
     M_default: int,
     W_default: int,
     output_dir: str,
 ) -> None:
-    """Two-panel figure: Ge77-NC detectability counts + Δ from reference."""
-    _detectability_figure(
-        results, nc_key="ge77_nc_", M_default=M_default,
-        title=(
-            f"Ge-77 Muon NC Detection Overview  [M={M_default}, W={W_default}]\n"
-            "(NCs belonging to muons with ≥1 Ge-77 producing NC; "
-            "only muons with ≥1 NC;\n"
-            f"'Detected' = NC has ≥{M_default} firing PMT(s); "
-            f"W threshold for muon classification = {W_default})"
-        ),
-        total_key="ge77_nc_total",
-        fname="04_ge77_nc_detectability_overview.png",
-        output_dir=output_dir,
+    """Two-panel figure: Ge77-muon detection funnel + Δ from reference.
+
+    Uses the same muon-level definition as the heatmap Recall:
+      - A muon is Ge77 if ANY of its NCs has flag_ge77 == 1.
+      - A muon is "detected" if it has ≥W NCs with ≥M firing PMTs
+        in the [1 µs, 200 µs] time window.
+
+    Bar categories (left to right):
+      Total Ge77 muons
+      → ≥1 NC has any photon   (upper bound, if detect_info available)
+      → ≥1 NC has photon ≤200 ns after NC (tighter bound)
+      → Detected (TP at M_default, W_default)  ← identical to heatmap TP
+    """
+    n = len(results)
+    colors = _colors(n)
+    has_photon_info = results[0].muon["ge77_muon_detectability"]["any_photon"] >= 0
+
+    if has_photon_info:
+        cat_labels = [
+            "Total\nGe77 muons",
+            "≥1 NC:\nany photon",
+            "≥1 NC:\nphoton ≤200 ns\nafter NC",
+            f"Detected\n(M≥{M_default}, W≥{W_default})\n= Recall TP",
+        ]
+        delta_cat_labels = cat_labels[1:]  # skip Total in delta panel
+
+        def _vals(r: SetupResult) -> list[int]:
+            gd = r.muon["ge77_muon_detectability"]
+            tp = r.muon["confusion"][(M_default, W_default)]["TP"]
+            return [r.muon["muon_stats"]["n_ge77"], gd["any_photon"], gd["within_200ns"], tp]
+    else:
+        cat_labels = [
+            "Total\nGe77 muons",
+            f"Detected\n(M≥{M_default}, W≥{W_default})\n= Recall TP",
+        ]
+        delta_cat_labels = cat_labels[1:]
+
+        def _vals(r: SetupResult) -> list[int]:
+            tp = r.muon["confusion"][(M_default, W_default)]["TP"]
+            return [r.muon["muon_stats"]["n_ge77"], tp]
+
+    x = np.arange(len(cat_labels))
+    width = min(0.8 / n, 0.30)
+
+    fig, (ax_abs, ax_delta) = plt.subplots(
+        1, 2, figsize=(22, 9), gridspec_kw={"width_ratios": [3, 2]},
     )
+
+    # ── Left panel: absolute grouped bars ────────────────────────────
+    for i, (r, c) in enumerate(zip(results, colors)):
+        vals   = _vals(r)
+        total  = r.muon["muon_stats"]["n_ge77"]
+        offset = (i - (n - 1) / 2) * width
+        bars   = ax_abs.bar(x + offset, vals, width, label=r.label, color=c)
+        for bar, val in zip(bars, vals):
+            _annotate_bar(ax_abs, bar, val, total, fontsize=6, rotation=90)
+
+    ax_abs.set_xticks(x)
+    ax_abs.set_xticklabels(cat_labels, fontsize=9)
+    ax_abs.set_ylabel("Number of Ge77 muons")
+    ax_abs.set_title(
+        f"Ge-77 Muon Detection Funnel  [M={M_default}, W={W_default}]\n"
+        "(muon is Ge77 if any NC has flag_ge77==1; "
+        "'Detected' = ≥W NCs with ≥M firing PMTs in [1 µs, 200 µs])"
+    )
+    ax_abs.legend(fontsize=8)
+    ax_abs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+
+    # ── Right panel: Δ horizontal diverging bars ──────────────────────
+    if n < 2:
+        ax_delta.text(
+            0.5, 0.5, "Single setup —\nno Δ to display",
+            transform=ax_delta.transAxes, ha="center", va="center",
+            fontsize=11, color="gray",
+        )
+        ax_delta.set_axis_off()
+    else:
+        n_non_ref  = n - 1
+        n_cats     = len(delta_cat_labels)
+        bar_h      = 0.8 / n_non_ref
+        y_base     = np.arange(n_cats, dtype=float)
+        ref_vals   = _vals(results[0])[1:]   # skip Total
+        ref_total  = results[0].muon["muon_stats"]["n_ge77"]
+
+        for j, (r, c) in enumerate(zip(results[1:], colors[1:])):
+            vals   = _vals(r)[1:]   # skip Total
+            deltas = [v - rv for v, rv in zip(vals, ref_vals)]
+            offset = (j - (n_non_ref - 1) / 2) * bar_h
+
+            bars = ax_delta.barh(y_base + offset, deltas, bar_h * 0.88, label=r.label, color=c)
+            for bar, delta in zip(bars, deltas):
+                pct  = 100.0 * delta / max(ref_total, 1)
+                sign = "+" if delta >= 0 else ""
+                if delta == 0:
+                    ax_delta.text(
+                        0, bar.get_y() + bar.get_height() / 2,
+                        " =ref", va="center", ha="left", fontsize=6,
+                        color=c, fontstyle="italic",
+                    )
+                    continue
+                txt = f"{sign}{delta:,}\n({sign}{pct:.1f}%)"
+                pad = max(abs(delta) * 0.02, 1)
+                ax_delta.text(
+                    delta + (pad if delta >= 0 else -pad),
+                    bar.get_y() + bar.get_height() / 2,
+                    txt, va="center",
+                    ha="left" if delta >= 0 else "right",
+                    fontsize=7, color=c, fontweight="bold",
+                )
+
+        ax_delta.axvline(0, color="black", linewidth=0.9)
+        ax_delta.set_yticks(y_base)
+        ax_delta.set_yticklabels(delta_cat_labels, fontsize=9)
+        ax_delta.set_xlabel(f"Δ muon count vs reference ({results[0].label})", fontsize=9)
+        ax_delta.set_title(f"Δ from reference: {results[0].label}", fontsize=10)
+        ax_delta.legend(fontsize=8, title="vs reference")
+        ax_delta.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):+,}"))
+        ax_delta.grid(True, axis="x", alpha=0.3)
+        ax_delta.invert_yaxis()
+
+    fig.tight_layout()
+    fname = "04_ge77_muon_overview.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -958,21 +1081,37 @@ def write_nc_summary(
                 f.write(
                     f"  Photons only >200 ns       : {nc['nc_only_outside_200ns']:,}\n"
                 )
-            f.write(f"  Ge77 NC total              : {nc['ge77_nc_total']:,}\n")
+            f.write(
+                f"  Ge77-producing NCs (flag_ge77=1): {nc['ge77_nc_total']:,}\n"
+                f"  NOTE: These are NCs inside Ge detectors, NOT all NCs of Ge77 muons.\n"
+                f"        A low detection fraction here does NOT imply low muon recall.\n"
+            )
             f.write("\n  NC detected by M threshold:\n")
             for M in M_values:
                 det  = nc["nc_detected"][M]
                 gdet = nc["ge77_nc_detected"][M]
                 frac = 100 * det / max(nc["nc_total"], 1)
+                gfrac = 100 * gdet / max(nc["ge77_nc_total"], 1)
                 f.write(
-                    f"    M={M:2d}:  {det:,}  ({frac:.1f}%)  "
-                    f"[Ge77: {gdet:,} / {nc['ge77_nc_total']:,}]\n"
+                    f"    M={M:2d}:  all NCs: {det:,}  ({frac:.1f}%)  "
+                    f"| Ge77-producing NCs: {gdet:,} / {nc['ge77_nc_total']:,}"
+                    f"  ({gfrac:.1f}%)\n"
                 )
             f.write(
                 f"\n  Muons: {ms['total']:,}  "
                 f"Ge77: {ms['n_ge77']:,}  "
                 f"non-Ge77: {ms['n_non_ge77']:,}\n"
             )
+            gd = r.muon["ge77_muon_detectability"]
+            if gd["any_photon"] >= 0:
+                f.write(
+                    f"\n  Ge77-muon detection funnel (consistent with heatmap Recall):\n"
+                    f"    Total Ge77 muons       : {ms['n_ge77']:,}\n"
+                    f"    ≥1 NC any photon       : {gd['any_photon']:,}  "
+                    f"({100*gd['any_photon']/max(ms['n_ge77'],1):.1f}%)\n"
+                    f"    ≥1 NC within 200 ns    : {gd['within_200ns']:,}  "
+                    f"({100*gd['within_200ns']/max(ms['n_ge77'],1):.1f}%)\n"
+                )
             if r.w2 is not None:
                 f.write(f"  W2 homogeneity: {r.w2:.2f} mm\n")
             f.write("\n")
@@ -1135,7 +1274,7 @@ def main() -> None:
         nc_res = evaluate_nc(B, nc_truth, M_values, detect_info=detect_info)
 
         print("  Evaluating muon classification ...")
-        muon_res = evaluate_muon(B, nc_truth, M_values, W_values)
+        muon_res = evaluate_muon(B, nc_truth, M_values, W_values, detect_info=detect_info)
 
         w2 = None
         if args.configs is not None:
@@ -1174,6 +1313,14 @@ def main() -> None:
             print(f"  Only >200 ns:       {nc['nc_only_outside_200ns']:,}")
         print(f"  Detected (M≥{M_default}):     {nc['nc_detected'][M_default]:,}  ({100*nc['nc_detected'][M_default]/max(nc['nc_total'],1):.1f}%)")
         print(f"  Muons: {ms['total']:,}  Ge77: {ms['n_ge77']:,}  non-Ge77: {ms['n_non_ge77']:,}")
+        gd = r.muon["ge77_muon_detectability"]
+        if gd["any_photon"] >= 0:
+            print(
+                f"  Ge77 muon funnel: "
+                f"any photon={gd['any_photon']:,}  "
+                f"within 200ns={gd['within_200ns']:,}  "
+                f"detected (TP)={conf['TP']:,}"
+            )
         print(f"  At (M={M_default}, W={W_default}): TP={conf['TP']}  FN={conf['FN']}  TN={conf['TN']}  FP={conf['FP']}")
         print(f"  Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}")
         if r.w2 is not None:
@@ -1186,7 +1333,7 @@ def main() -> None:
     plot_nc_coverage_line(results, M_values, args.output_dir)
     plot_nc_multiplicity_histogram(results, M_default, args.output_dir)
     plot_nc_detectability_overview(results, M_default, args.output_dir)
-    plot_ge77_nc_detectability_overview(results, M_default, W_default, args.output_dir)
+    plot_ge77_muon_overview(results, M_default, W_default, args.output_dir)
     plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     plot_w_histogram(results, M_default, W_default, args.output_dir)

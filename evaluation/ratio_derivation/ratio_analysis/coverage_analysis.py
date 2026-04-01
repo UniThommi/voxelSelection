@@ -134,6 +134,7 @@ def evaluate_muon(
     nc_truth: pd.DataFrame,
     M_values: list[int],
     W_values: list[int],
+    detect_info: dict | None = None,
 ) -> dict[str, Any]:
     """Compute muon Ge77 classification results for all (M, W) combinations.
 
@@ -148,14 +149,23 @@ def evaluate_muon(
     Parameters
     ----------
     B, nc_truth, M_values, W_values: see evaluate_nc.
+    detect_info : optional dict from build_pmt_matrix() with boolean arrays:
+        "nc_any_photon"   — NC has ≥1 photon at any time
+        "nc_within_200ns" — NC has ≥1 photon within the 200 ns time cut
+        When provided, muon-level detectability counts are included in the
+        returned dict under the key ``ge77_muon_detectability``.
 
     Returns
     -------
     dict with keys:
-        muon_stats : dict  — total, n_ge77, n_non_ge77 counts
-        confusion  : dict[(M, W) → {"TP", "FP", "TN", "FN"}]
-        w_hist     : dict[M → {"ge77": list[int], "non_ge77": list[int]}]
-                     — w_count per muon for W-histogram plots
+        muon_stats            : dict  — total, n_ge77, n_non_ge77 counts
+        confusion             : dict[(M, W) → {"TP", "FP", "TN", "FN"}]
+        w_hist                : dict[M → {"ge77": list[int], "non_ge77": list[int]}]
+        ge77_muon_detectability : dict with keys:
+            "any_photon"   — Ge77 muons where ≥1 NC has any photon (-1 if unknown)
+            "within_200ns" — Ge77 muons where ≥1 NC has a photon within 200 ns (-1 if unknown)
+            These are the theoretical upper bounds for muon-level detection,
+            consistent with the TP metric in ``confusion``.
     """
     mults = compute_nc_multiplicities(B)
 
@@ -215,8 +225,32 @@ def evaluate_muon(
             fn = int(( ge77_truth & ~classified_ge77).sum())
             confusion[(M, W)] = {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
 
+    # ── muon-level detectability upper bounds (requires detect_info) ─────
+    # For each Ge77 muon: does it have at least one NC with a photon?
+    # Uses the same muon ordering as the confusion matrix (unique_muons).
+    ge77_muon_detectability: dict[str, int] = {"any_photon": -1, "within_200ns": -1}
+    if detect_info is not None:
+        ph_df = pd.DataFrame({
+            "muon_id": nc_truth["muon_id"].values,
+            "any_ph":  detect_info["nc_any_photon"].astype(np.int8),
+            "within":  detect_info["nc_within_200ns"].astype(np.int8),
+        })
+        # max over NCs per muon: 1 if ANY NC in that muon has the flag
+        muon_ph = (
+            ph_df.groupby("muon_id")[["any_ph", "within"]]
+            .max()
+            .reindex(unique_muons, fill_value=0)
+        )
+        any_ph_muon = muon_ph["any_ph"].values.astype(bool)
+        within_muon = muon_ph["within"].values.astype(bool)
+        ge77_muon_detectability = {
+            "any_photon":   int((ge77_truth & any_ph_muon).sum()),
+            "within_200ns": int((ge77_truth & within_muon).sum()),
+        }
+
     return {
-        "muon_stats": muon_stats,
-        "confusion":  confusion,
-        "w_hist":     w_hist,
+        "muon_stats":              muon_stats,
+        "confusion":               confusion,
+        "w_hist":                  w_hist,
+        "ge77_muon_detectability": ge77_muon_detectability,
     }
