@@ -590,7 +590,7 @@ def _write_config_json(
     min_spacing: float,
     included_areas: list[str],
     surface_params: dict,
-    alpha: float,
+    alpha_by_area: dict[str, float],
     w2: float | None,
     w2_lo: float | None,
     w2_hi: float | None,
@@ -624,7 +624,7 @@ def _write_config_json(
             "min_spacing": min_spacing,
             "included_areas": included_areas,
             "algorithms": {a: surface_params[a]["algorithm"] for a in _AREA_ORDER},
-            "alpha": alpha,
+            "alpha_by_area": alpha_by_area,
             "w2": w2,
             "w2_probe_lo": w2_lo,
             "w2_probe_hi": w2_hi,
@@ -704,16 +704,15 @@ def sample_w2_range(
         # Separate seed stream for each config so probe runs do not pollute
         # the main rng or each other.
         cfg_seed = int(main_rng.integers(0, 2 ** 31))
-        alpha_draw = float(main_rng.uniform(0.0, 1.0))
 
         params_rng = np.random.default_rng([cfg_seed, 0])
         probe_rng_lo = np.random.default_rng([cfg_seed, 1])
         probe_rng_hi = np.random.default_rng([cfg_seed, 2])
         actual_rng = np.random.default_rng([cfg_seed, 3])
 
-        # ---- Draw included areas (at least one; each included with p=0.8) ----
+        # ---- Draw included areas (at least one; each included with p=0.65) ----
         allowed_areas = [a for a in _AREA_ORDER if a not in (exclude_areas or [])]
-        included = {a: bool(params_rng.random() < 0.8) for a in allowed_areas}
+        included = {a: bool(params_rng.random() < 0.65) for a in allowed_areas}
         if not any(included.values()):
             included[str(params_rng.choice(allowed_areas))] = True
         included_areas = [a for a in allowed_areas if included[a]]
@@ -730,14 +729,17 @@ def sample_w2_range(
             else:
                 surface_params[a] = {"algorithm": "fibonacci"}
 
-        # ---- Inner helper: run one alpha value ----
-        def _run(alpha_val: float, rng: np.random.Generator) -> tuple[list[int], float | None, bool]:
+        # ---- Draw per-area alpha independently ----
+        alpha_by_area = {a: float(main_rng.uniform(0.0, 1.0)) for a in included_areas}
+
+        # ---- Inner helper: run one alpha-per-area dict ----
+        def _run(alpha_map: dict[str, float], rng: np.random.Generator) -> tuple[list[int], float | None, bool]:
             geo_pts_by_area: dict[str, np.ndarray] = {}
             for a in _AREA_ORDER:
                 n_a = N_by_area.get(a, 0)
                 if n_a > 0:
                     geo_pts_by_area[a] = _gen_area_points(
-                        a, n_a, surface_params[a], alpha_val, rng
+                        a, n_a, surface_params[a], alpha_map[a], rng
                     )
             sel, ovf = _snap_to_voxels(
                 geo_pts_by_area, all_centers, all_layers, N_by_area, min_spacing,
@@ -749,9 +751,9 @@ def sample_w2_range(
             )["w2"]
             return sel, w2, ovf
 
-        # ---- Probe runs for W2 bounds ----
-        _, w2_lo, _ = _run(0.0, probe_rng_lo)
-        _, w2_hi, _ = _run(1.0, probe_rng_hi)
+        # ---- Probe runs for W2 bounds (all areas at 0 / all at 1) ----
+        _, w2_lo, _ = _run({a: 0.0 for a in included_areas}, probe_rng_lo)
+        _, w2_hi, _ = _run({a: 1.0 for a in included_areas}, probe_rng_hi)
 
         if w2_lo is None or w2_hi is None:
             if verbose:
@@ -759,7 +761,7 @@ def sample_w2_range(
             continue
 
         # ---- Actual run ----
-        sel_cols, w2_val, used_ovf = _run(alpha_draw, actual_rng)
+        sel_cols, w2_val, used_ovf = _run(alpha_by_area, actual_rng)
 
         if used_ovf:
             warnings.warn(
@@ -783,7 +785,7 @@ def sample_w2_range(
             min_spacing=min_spacing,
             included_areas=included_areas,
             surface_params=surface_params,
-            alpha=alpha_draw,
+            alpha_by_area=alpha_by_area,
             w2=w2_val,
             w2_lo=w2_lo,
             w2_hi=w2_hi,
@@ -793,6 +795,7 @@ def sample_w2_range(
         # ---- Save PNG ----
         sel_arr = np.array(sel_cols)
         w2_s = f"{w2_val:.1f}" if w2_val is not None else "N/A"
+        alpha_avg = sum(alpha_by_area.values()) / len(alpha_by_area)
         alg_tag = "|".join(surface_params[a]["algorithm"][:3] for a in included_areas)
         plot_selected_voxels(
             all_centers[sel_arr],
@@ -800,7 +803,7 @@ def sample_w2_range(
             [str(voxel_ids[c]) for c in sel_cols],
             output_path=output_dir / f"config_{cfg_idx:03d}.png",
             title_extra=(
-                f"W2={w2_s} mm  eff={eff:.4%}  α={alpha_draw:.3f}"
+                f"W2={w2_s} mm  eff={eff:.4%}  α_avg={alpha_avg:.2f}"
                 f"  [{alg_tag}]"
             ),
         )
@@ -811,7 +814,7 @@ def sample_w2_range(
             "w2": w2_val,
             "w2_probe_lo": w2_lo,
             "w2_probe_hi": w2_hi,
-            "alpha": alpha_draw,
+            "alpha_by_area": alpha_by_area,
             "efficiency": eff,
             "included_areas": included_areas,
             "algorithms": {a: surface_params[a]["algorithm"] for a in _AREA_ORDER},
@@ -820,10 +823,11 @@ def sample_w2_range(
         })
 
         if verbose:
+            alpha_str = " ".join(f"{a}:{v:.2f}" for a, v in alpha_by_area.items())
             print(
                 f"  config_{cfg_idx:03d}  W2={w2_s:>8} mm"
                 f"  [probe {w2_lo:.1f}–{w2_hi:.1f}]"
-                f"  eff={eff:.4%}  α={alpha_draw:.3f}"
+                f"  eff={eff:.4%}  α=[{alpha_str}]"
                 f"  areas={included_areas}"
                 f"  ({elapsed:.1f}s)"
             )
@@ -836,17 +840,18 @@ def sample_w2_range(
         sf.write(f"# W2-range sampling\n")
         sf.write(f"# N={N}, M={M}, m={m}, seed={seed}, n_configs={n_configs}\n\n")
         hdr = (f"{'Config':<14} {'W2 mm':>9} {'W2_lo':>7} {'W2_hi':>7}"
-               f" {'alpha':>6} {'Efficiency':>12}  Areas / Algorithms\n")
+               f" {'α_avg':>6} {'Efficiency':>12}  Areas / Algorithms\n")
         sf.write(hdr)
         sf.write("-" * 90 + "\n")
         for r in results:
             w2_s = f"{r['w2']:.1f}" if r["w2"] is not None else "N/A"
+            alpha_avg = sum(r["alpha_by_area"].values()) / len(r["alpha_by_area"])
             alg_str = "  ".join(
                 f"{a}:{r['algorithms'][a][:3]}" for a in r["included_areas"]
             )
             sf.write(
                 f"{r['name']:<14} {w2_s:>9} {r['w2_probe_lo']:>7.1f} {r['w2_probe_hi']:>7.1f}"
-                f" {r['alpha']:>6.3f} {r['efficiency']:>12.4%}  {alg_str}\n"
+                f" {alpha_avg:>6.3f} {r['efficiency']:>12.4%}  {alg_str}\n"
             )
 
     summary_json = output_dir / "config_summary.json"
