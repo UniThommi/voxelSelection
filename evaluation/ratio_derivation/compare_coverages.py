@@ -355,7 +355,7 @@ def _draw_detectability_panels(
         else nc_key + "only_outside"
     )
     detected_key = (nc_key + "detected", M_default)
-    has_detect = results[0].nc.get(nc_key + "any_photon", -1) >= 0
+    has_detect = all(r.nc.get(nc_key + "any_photon", -1) >= 0 for r in results)
 
     if has_detect:
         abs_cat_labels = [
@@ -557,7 +557,9 @@ def plot_ge77_muon_overview(
     """
     n = len(results)
     colors = _colors(n)
-    has_photon_info = results[0].muon["ge77_muon_detectability"]["any_photon"] >= 0
+    has_photon_info = all(
+        r.muon["ge77_muon_detectability"]["any_photon"] >= 0 for r in results
+    )
 
     if has_photon_info:
         cat_labels = [
