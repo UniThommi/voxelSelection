@@ -75,10 +75,15 @@ def _count_vertices_from_file(fpath: str) -> int:
 # ──────────────────────────────────────────────────────────────────────
 # Run-directory loaders
 # ──────────────────────────────────────────────────────────────────────
-def _list_run_dirs(base_dir: str) -> list[str]:
-    """Return sorted list of run_NNN subdirectories found in base_dir."""
+def _list_run_dirs(base_dir: str, omit_runs: set[str] | None = None) -> list[str]:
+    """Return sorted list of run_NNN subdirectories found in base_dir.
+
+    Directories whose basename appears in omit_runs are silently excluded.
+    """
     pattern = os.path.join(base_dir, "run_*")
     dirs = sorted(d for d in glob.glob(pattern) if os.path.isdir(d))
+    if omit_runs:
+        dirs = [d for d in dirs if os.path.basename(d) not in omit_runs]
     if not dirs:
         raise FileNotFoundError(
             f"No run_* subdirectories found in {base_dir!r}"
@@ -125,6 +130,7 @@ def check_all_files_integrity(
     nc_dir: str,
     sim_dirs: list[str],
     labels: list[str],
+    omit_runs: set[str] | None = None,
 ) -> None:
     """Check all output_t*.hdf5 files for corruption before any analysis.
 
@@ -155,7 +161,7 @@ def check_all_files_integrity(
     print("Checking HDF5 file integrity ...")
     for base_dir, dir_label in all_dirs:
         try:
-            run_dirs = _list_run_dirs(base_dir)
+            run_dirs = _list_run_dirs(base_dir, omit_runs=omit_runs)
         except FileNotFoundError as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -188,7 +194,7 @@ def check_all_files_integrity(
     print(f"  All files intact — setups checked: [{setup_names}]  |  {n_runs_checked} runs total.")
 
 
-def build_nc_truth(muon_base_dir: str, verbose: bool = True) -> pd.DataFrame:
+def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str] | None = None) -> pd.DataFrame:
     """Load NC truth from Sim 1 across all run_NNN subdirs of muon_base_dir.
 
     Returns a deduplicated DataFrame with columns:
@@ -199,7 +205,7 @@ def build_nc_truth(muon_base_dir: str, verbose: bool = True) -> pd.DataFrame:
     build_pmt_matrix(); pass the same DataFrame to every setup so that
     all B matrices share consistent row indices.
     """
-    run_dirs = _list_run_dirs(muon_base_dir)
+    run_dirs = _list_run_dirs(muon_base_dir, omit_runs=omit_runs)
     if verbose:
         print(f"  Loading NC truth from {len(run_dirs)} run(s) in {muon_base_dir!r}")
 
@@ -244,14 +250,14 @@ def build_nc_truth(muon_base_dir: str, verbose: bool = True) -> pd.DataFrame:
     return nc_truth
 
 
-def count_vertices_by_run(base_dir: str) -> dict[str, int]:
+def count_vertices_by_run(base_dir: str, omit_runs: set[str] | None = None) -> dict[str, int]:
     """Return vertex count per run label for all run_NNN subdirs of base_dir.
 
     Returns dict mapping run label (e.g. "run_001") to total vertex count
     summed across all output_t*.hdf5 files in that run directory.
     Used for cross-setup vertex count validation.
     """
-    run_dirs = _list_run_dirs(base_dir)
+    run_dirs = _list_run_dirs(base_dir, omit_runs=omit_runs)
     result = {}
     for rd in run_dirs:
         run_label = os.path.basename(rd)
@@ -266,6 +272,7 @@ def build_pmt_matrix(
     time_cut_ns: float = TIME_CUT_NC_NS,
     float_tol_ns: float = FLOAT_TOL_NS,
     verbose: bool = True,
+    omit_runs: set[str] | None = None,
 ) -> tuple[sp.csr_matrix, np.ndarray, dict]:
     """Build a sparse NC×PMT binary detection matrix from Sim 2 optical data.
 
@@ -304,7 +311,7 @@ def build_pmt_matrix(
         "nc_within_200ns" — NC has ≥1 photon hit within time_cut_ns
         (nc_only_outside_200ns = nc_any_photon & ~nc_within_200ns)
     """
-    run_dirs = _list_run_dirs(sim_base_dir)
+    run_dirs = _list_run_dirs(sim_base_dir, omit_runs=omit_runs)
     if verbose:
         print(
             f"  Loading optical data from {len(run_dirs)} run(s) "

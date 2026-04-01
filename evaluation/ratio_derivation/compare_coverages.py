@@ -103,7 +103,7 @@ def _try_compute_w2(config_json: str) -> Optional[float]:
 _MAX_DET_UIDS = 300
 
 
-def validate_vertex_counts(sim_dirs: list[str], labels: list[str]) -> None:
+def validate_vertex_counts(sim_dirs: list[str], labels: list[str], omit_runs: set[str] | None = None) -> None:
     """Verify all setups were simulated from the same primaries.
 
     Checks that vertex counts per run match across all N setups.
@@ -114,7 +114,7 @@ def validate_vertex_counts(sim_dirs: list[str], labels: list[str]) -> None:
     all_counts: list[dict[str, int]] = []
     for sim_dir, label in zip(sim_dirs, labels):
         try:
-            all_counts.append(count_vertices_by_run(sim_dir))
+            all_counts.append(count_vertices_by_run(sim_dir, omit_runs=omit_runs))
         except FileNotFoundError as exc:
             print(f"  [WARN] {label}: {exc}")
             all_counts.append({})
@@ -955,6 +955,13 @@ def parse_args() -> argparse.Namespace:
         "--output-dir", default="./coverage_results",
         help="Output directory (default: ./coverage_results).",
     )
+    parser.add_argument(
+        "--omit-runs", nargs="+", default=[], metavar="RUN",
+        help=(
+            "Run directory names to skip across all setups and the NC dir "
+            "(e.g. --omit-runs run_002 run_003)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -977,10 +984,11 @@ def main() -> None:
         )
         sys.exit(1)
 
-    M_values  = list(range(1, args.M_max + 1))
-    W_values  = list(range(1, args.W_max + 1))
-    M_default = min(max(args.M_default, 1), args.M_max)
-    W_default = min(max(args.W_default, 1), args.W_max)
+    M_values   = list(range(1, args.M_max + 1))
+    W_values   = list(range(1, args.W_max + 1))
+    M_default  = min(max(args.M_default, 1), args.M_max)
+    W_default  = min(max(args.W_default, 1), args.W_max)
+    omit_runs  = set(args.omit_runs) if args.omit_runs else None
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -992,20 +1000,22 @@ def main() -> None:
         print(f"  Setup {i+1}  : {lbl}  ({d})")
     print(f"  m={args.m}, M=1..{args.M_max}, W=1..{args.W_max}")
     print(f"  M_default={M_default}, W_default={W_default}")
+    if omit_runs:
+        print(f"  Omitting : {sorted(omit_runs)}")
     print(f"  Output   : {args.output_dir}")
     print()
 
     # ── 0. Integrity pre-flight check ────────────────────────────────
-    check_all_files_integrity(args.muon_dir, args.sim_dirs, args.labels)
+    check_all_files_integrity(args.muon_dir, args.sim_dirs, args.labels, omit_runs=omit_runs)
     print()
 
     # ── 1. Load shared NC truth ───────────────────────────────────────
     print("Loading NC truth ...")
-    nc_truth = build_nc_truth(args.muon_dir, verbose=True)
+    nc_truth = build_nc_truth(args.muon_dir, verbose=True, omit_runs=omit_runs)
     print()
 
     # ── 2. Vertex count validation ────────────────────────────────────
-    validate_vertex_counts(args.sim_dirs, args.labels)
+    validate_vertex_counts(args.sim_dirs, args.labels, omit_runs=omit_runs)
     print()
 
     # ── 3. Process each setup ─────────────────────────────────────────
@@ -1015,7 +1025,7 @@ def main() -> None:
         print(f"[{i+1}/{len(args.sim_dirs)}] Processing: {label}")
 
         B, pmt_uids, detect_info = build_pmt_matrix(
-            sim_dir, nc_truth, m_threshold=args.m, verbose=True
+            sim_dir, nc_truth, m_threshold=args.m, verbose=True, omit_runs=omit_runs
         )
 
         print("  Evaluating NC coverage ...")
