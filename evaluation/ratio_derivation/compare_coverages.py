@@ -910,7 +910,86 @@ def plot_w_histogram(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Plot 08 — W2 vs NC coverage scatter (optional)
+# Plots 10/11 — Recall / Precision line across all (M, W) combinations
+# ──────────────────────────────────────────────────────────────────────
+def plot_mw_sweep(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+) -> None:
+    """One line plot per metric (Recall, Precision) across all (M, W) pairs.
+
+    X-axis order: M1W1, M1W2, …, M1W_max, M2W1, … (M outer, W inner).
+    Each setup is a line in its consistent palette colour.
+    Vertical separators mark M-group boundaries; the M value is annotated
+    above each group.  Y-axis shows percentage values (0 %–100 %).
+    """
+    colors  = _colors(len(results))
+    mw_pairs = [(M, W) for M in M_values for W in W_values]
+    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
+    x        = np.arange(len(mw_pairs))
+    n_w      = len(W_values)
+
+    for metric, fname_part, plot_num in [
+        ("Recall",    "recall",    "10"),
+        ("Precision", "precision", "11"),
+    ]:
+        # Wide enough to give each tick ~0.18 inches; minimum 30 inches
+        fig_w = max(30, len(mw_pairs) * 0.18)
+        fig, ax = plt.subplots(figsize=(fig_w, 9))
+
+        for r, c in zip(results, colors):
+            vals = [
+                compute_metrics(
+                    r.muon["confusion"][(M, W)]["TP"],
+                    r.muon["confusion"][(M, W)]["FP"],
+                    r.muon["confusion"][(M, W)]["TN"],
+                    r.muon["confusion"][(M, W)]["FN"],
+                )[metric]
+                for M, W in mw_pairs
+            ]
+            ax.plot(x, vals, color=c, label=r.label,
+                    linewidth=1.2, marker=".", markersize=4)
+
+        # Vertical separators + M-group labels at the top of the axes
+        for gi, M in enumerate(M_values):
+            group_start = gi * n_w
+            group_mid   = group_start + (n_w - 1) / 2
+            if gi > 0:
+                ax.axvline(group_start - 0.5, color="gray",
+                           linewidth=0.6, linestyle="--", alpha=0.5)
+            ax.text(
+                group_mid, 1.02, f"M={M}",
+                transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color="dimgray",
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=90, fontsize=7)
+        ax.set_ylabel(metric, fontsize=12)
+        ax.set_ylim(-0.02, 1.08)
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
+        )
+        ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
+        ax.set_title(
+            f"Ge-77 Muon Classification — {metric} across all (M, W) combinations",
+            fontsize=13, pad=20,
+        )
+        ax.legend(fontsize=9, loc="upper right")
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.set_xlim(-0.5, len(mw_pairs) - 0.5)
+
+        fig.tight_layout()
+        fname = f"{plot_num}_mw_sweep_{fname_part}.png"
+        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        plt.close(fig)
+        print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 12 — W2 vs NC coverage scatter (optional)
 # ──────────────────────────────────────────────────────────────────────
 def _w2_scatter_figure(
     w2_results: list[SetupResult],
@@ -1309,6 +1388,7 @@ def main() -> None:
     plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     plot_w_histogram(results, M_default, W_default, args.output_dir)
+    plot_mw_sweep(results, M_values, W_values, args.output_dir)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
     # ── 7. Write text files ───────────────────────────────────────────
