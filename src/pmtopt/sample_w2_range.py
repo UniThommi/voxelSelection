@@ -656,6 +656,7 @@ def sample_w2_range(
     sensitivity: bool,
     deltas: list[float] | None,
     verbose: bool,
+    exclude_areas: list[str] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     main_rng = np.random.default_rng(seed)
@@ -711,10 +712,11 @@ def sample_w2_range(
         actual_rng = np.random.default_rng([cfg_seed, 3])
 
         # ---- Draw included areas (at least one; each included with p=0.8) ----
-        included = {a: bool(params_rng.random() < 0.8) for a in _AREA_ORDER}
+        allowed_areas = [a for a in _AREA_ORDER if a not in (exclude_areas or [])]
+        included = {a: bool(params_rng.random() < 0.8) for a in allowed_areas}
         if not any(included.values()):
-            included[str(params_rng.choice(_AREA_ORDER))] = True
-        included_areas = [a for a in _AREA_ORDER if included[a]]
+            included[str(params_rng.choice(allowed_areas))] = True
+        included_areas = [a for a in allowed_areas if included[a]]
 
         # ---- N allocation across included areas ----
         N_by_area = compute_per_area_N(N, areas=included_areas, verbose=False)
@@ -937,6 +939,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                              "sensitivity analysis (e.g. '-0.10,0.10'). "
                              "Default: -0.20,-0.10,-0.05,+0.05,+0.10,+0.20.")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--exclude-areas", nargs="+", default=[],
+        choices=["pit", "bot", "top", "wall"], metavar="AREA",
+        help="Areas to exclude from voxel selection (e.g. --exclude-areas pit bot).",
+    )
     return parser.parse_args(argv)
 
 
@@ -947,6 +954,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.bot  is not None: area_ratios["bot"]  = args.bot
     if args.top  is not None: area_ratios["top"]  = args.top
     if args.wall is not None: area_ratios["wall"] = args.wall
+
+    exclude_areas = args.exclude_areas or []
+    if set(exclude_areas) >= set(_AREA_ORDER):
+        raise ValueError("--exclude-areas cannot exclude all areas.")
 
     deltas = None
     if args.deltas is not None:
@@ -965,6 +976,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         sensitivity=args.sensitivity,
         deltas=deltas,
         verbose=not args.quiet,
+        exclude_areas=exclude_areas or None,
     )
 
 
