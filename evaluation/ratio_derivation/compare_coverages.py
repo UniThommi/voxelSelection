@@ -17,7 +17,7 @@ Usage
         --labels    Homogeneous Optimized1 Optimized2 \\
         [--configs  hom.json opt1.json opt2.json]  # optional, for W2 \\
         [--m 1] [--M-max 10] [--W-max 20] \\
-        [--M-default 6] [--W-default 6] \\
+        [--M-default 1] [--W-default 1] \\
         [--output-dir ./coverage_results]
 
 Author: Thomas Buerger (University of Tübingen)
@@ -946,10 +946,10 @@ def parse_args() -> argparse.Namespace:
                         help="Max M for sweep (default: 10).")
     parser.add_argument("--W-max", type=int, default=20,
                         help="Max W for sweep (default: 20).")
-    parser.add_argument("--M-default", type=int, default=6,
-                        help="Fixed M for confusion/W plots (default: 6).")
-    parser.add_argument("--W-default", type=int, default=6,
-                        help="Fixed W for confusion plot (default: 6).")
+    parser.add_argument("--M-default", type=int, default=1,
+                        help="Fixed M for confusion/W plots (default: 1).")
+    parser.add_argument("--W-default", type=int, default=1,
+                        help="Fixed W for confusion plot (default: 1).")
     parser.add_argument(
         "--output-dir", default="./coverage_results",
         help="Output directory (default: ./coverage_results).",
