@@ -125,7 +125,8 @@ def validate_vertex_counts(sim_dirs: list[str], labels: list[str], omit_runs: se
     for run_label in all_run_labels:
         counts = {labels[i]: all_counts[i].get(run_label) for i in range(len(labels))}
         present = [v for v in counts.values() if v is not None]
-        if len(set(present)) > 1:
+        # Flag if any setup is missing the run OR if counts differ across setups.
+        if len(present) < len(counts) or len(set(present)) > 1:
             mismatches.append((run_label, counts))
 
     if mismatches:
@@ -299,14 +300,15 @@ def plot_nc_multiplicity_histogram(
 
     # Mean and zero-multiplicity stats beneath the figure
     means = ", ".join(
-        f"{r.label}: mean={np.mean(m):.2f}" for r, m in zip(results, all_mults)
+        f"{r.label}: mean={np.mean(m[m > 0]):.2f}" if (m > 0).any() else f"{r.label}: mean=N/A"
+        for r, m in zip(results, all_mults)
     )
     zeros = ", ".join(
         f"{r.label}: {int((m == 0).sum()):,}" for r, m in zip(results, all_mults)
     )
     fig.text(
         0.5, 0.01,
-        f"Mean multiplicity (all NCs): {means}\n"
+        f"Mean multiplicity (non-zero NCs only): {means}\n"
         f"NCs with 0 firing PMTs: {zeros}",
         ha="center", fontsize=8, fontstyle="italic",
     )
@@ -672,38 +674,6 @@ def plot_ge77_muon_overview(
 # Plot 05 — Multiplicity histogram  — plot 02
 # Now: Plot 05 — Muon heatmaps
 # ──────────────────────────────────────────────────────────────────────
-def _heatmap(
-    ax: plt.Axes,
-    data: np.ndarray,
-    M_values: list[int],
-    W_values: list[int],
-    title: str,
-    norm=None,
-    cmap: str = "viridis",
-) -> None:
-    """Draw a single (M rows, W cols) heatmap on ax with LogNorm."""
-    if norm is None:
-        clip = np.clip(data, 1e-4, 1.0)
-        norm = mcolors.LogNorm(vmin=clip.min(), vmax=max(clip.max(), clip.min() * 10))
-    im = ax.imshow(
-        np.clip(data, 1e-4, None),
-        origin="lower",
-        aspect="auto",
-        cmap=cmap,
-        norm=norm,
-        extent=[
-            W_values[0] - 0.5, W_values[-1] + 0.5,
-            M_values[0] - 0.5, M_values[-1] + 0.5,
-        ],
-    )
-    ax.set_xlabel("W (min detected NCs per muon in [1µs, 200µs])")
-    ax.set_ylabel("M (min firing PMTs per NC)")
-    ax.set_title(title)
-    ax.set_xticks(W_values[::max(1, len(W_values) // 10)])
-    ax.set_yticks(M_values)
-    plt.colorbar(im, ax=ax)
-
-
 def plot_muon_heatmaps(
     results: list[SetupResult],
     M_values: list[int],
@@ -1135,7 +1105,7 @@ def write_confusion_matrices(
             f"{'Recall':>7} {'Prec':>7}\n"
         )
         f.write(hdr)
-        f.write("-" * len(hdr) + "\n")
+        f.write("-" * (len(hdr) - 1) + "\n")
         for r in results:
             for M in M_values:
                 for W in W_values:
