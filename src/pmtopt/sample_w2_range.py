@@ -71,8 +71,8 @@ _AREA_ORDER: list[str] = ["pit", "bot", "top", "wall"]
 _Z_WALL_MIN = float(Z_BASE_GLOBAL)
 _Z_WALL_MAX = float(Z_CUT_TOP)
 
-_ALG_DISK: list[str] = ["fibonacci", "radial", "multi_cluster", "superposition", "multi_ring", "phi_sectors"]
-_ALG_WALL: list[str] = ["fibonacci", "z_band", "multi_cluster", "superposition", "multi_ring", "phi_sectors", "phi_band", "pole"]
+_ALG_DISK: list[str] = ["fibonacci", "radial", "multi_cluster", "superposition", "multi_ring", "phi_sectors", "clustered_surface"]
+_ALG_WALL: list[str] = ["fibonacci", "z_band", "multi_cluster", "superposition", "multi_ring", "phi_sectors", "phi_band", "pole", "clustered_surface"]
 
 
 
@@ -232,6 +232,60 @@ def _gen_disk_points(
         r = np.concatenate(r_parts) if r_parts else r_fib
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
 
+    elif alg == "clustered_surface":
+        # Many small clusters whose centers are Fibonacci-distributed over the annulus.
+        # The Fibonacci placement guarantees even global coverage regardless of n_clusters.
+        # W2 diversity comes from two independent knobs:
+        #   - n_clusters (random, drawn in _draw_surface_params): few → large gaps → high W2;
+        #     many → surface covered with clusters → lower W2.
+        #   - alpha: controls intra-cluster spread; alpha=1 → tight (highest W2 contribution),
+        #     alpha=0 → widest-before-merge (lowest W2 contribution).
+        # Hard separation: sigma is capped at half the minimum Fibonacci center distance so
+        # that even at alpha=0 clusters remain geometrically distinct.
+
+        n_clusters = min(params["n_clusters"], n_half)  # guard against tiny n_half
+
+        # Fibonacci cluster centers on the annulus
+        c_phi = _fib_angles(n_clusters)
+        c_r = _fib_annulus_r(n_clusters, r_min, r_max)
+
+        # Minimum pairwise Euclidean distance between cluster centers (flat disk)
+        if n_clusters >= 2:
+            cx = c_r * np.cos(c_phi)
+            cy = c_r * np.sin(c_phi)
+            diff_x = cx[:, None] - cx[None, :]   # (k, k)
+            diff_y = cy[:, None] - cy[None, :]
+            center_dists = np.sqrt(diff_x ** 2 + diff_y ** 2)
+            np.fill_diagonal(center_dists, np.inf)
+            min_center_dist = float(center_dists.min())
+        else:
+            min_center_dist = r_max - r_min  # single cluster: full radial extent
+
+        # sigma range: tight (1.5 × PMT footprint) to hard-separation limit (half of min gap)
+        sigma_min = float(PMT_RADIUS) * 1.5
+        sigma_max = max(sigma_min * 1.01, min_center_dist * 0.5)
+        sigma = sigma_min + (1.0 - alpha) * (sigma_max - sigma_min)
+
+        # Distribute n_half points evenly across clusters
+        pts_per = [n_half // n_clusters + (1 if i < n_half % n_clusters else 0)
+                   for i in range(n_clusters)]
+        r_parts, phi_parts = [], []
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            # Uniform draw in a disk of radius sigma around the cluster center.
+            # r_off ∈ [0, sigma] with uniform linear sampling (slightly edge-weighted),
+            # matching the style of multi_cluster.
+            r_off = rng.uniform(0.0, sigma, nc)
+            a_off = rng.uniform(0.0, 2.0 * np.pi, nc)
+            rc = np.clip(c_r[ci] + r_off * np.cos(a_off), r_min, r_max)
+            ref_r = max(float(c_r[ci]), r_min + 1e-6)
+            pc = (c_phi[ci] + r_off * np.sin(a_off) / ref_r) % (2.0 * np.pi)
+            r_parts.append(rc)
+            phi_parts.append(pc)
+        r = np.concatenate(r_parts)
+        phi = np.concatenate(phi_parts)
+
     else:
         raise ValueError(f"Unknown disk algorithm: '{alg}'")
 
@@ -383,6 +437,55 @@ def _gen_wall_points(
             z = z_max - t * h_pole
         phi = phi_fib
 
+    elif alg == "clustered_surface":
+        # Analogue of the disk clustered_surface algorithm for the cylindrical wall.
+        # Cluster centers: Fibonacci phi + uniformly-spaced z — covers the cylinder evenly.
+        # Intra-cluster offsets are drawn in the (arc-length, z) plane so that sigma
+        # has consistent physical units (mm) on both axes.
+
+        n_clusters = min(params["n_clusters"], n_half)
+
+        # Cluster centers: Fibonacci azimuth + uniform z
+        c_phi = (2.0 * np.pi * np.arange(n_clusters) / _GOLDEN) % (2.0 * np.pi)
+        c_z = z_min + (np.arange(n_clusters) + 0.5) / max(n_clusters, 1) * (z_max - z_min)
+
+        # Minimum pairwise distance between cluster centers in 3D Cartesian space.
+        # Using chord distance (≤ arc-length) is conservative: sigma_max is slightly
+        # smaller than it would be under arc-length, so the hard-separation guarantee
+        # holds with margin.
+        if n_clusters >= 2:
+            cx = float(R_ZYLINDER) * np.cos(c_phi)
+            cy = float(R_ZYLINDER) * np.sin(c_phi)
+            diff_x = cx[:, None] - cx[None, :]
+            diff_y = cy[:, None] - cy[None, :]
+            diff_z = c_z[:, None] - c_z[None, :]
+            center_dists = np.sqrt(diff_x ** 2 + diff_y ** 2 + diff_z ** 2)
+            np.fill_diagonal(center_dists, np.inf)
+            min_center_dist = float(center_dists.min())
+        else:
+            min_center_dist = z_max - z_min
+
+        sigma_min = float(PMT_RADIUS) * 1.5
+        sigma_max = max(sigma_min * 1.01, min_center_dist * 0.5)
+        sigma = sigma_min + (1.0 - alpha) * (sigma_max - sigma_min)
+
+        pts_per = [n_half // n_clusters + (1 if i < n_half % n_clusters else 0)
+                   for i in range(n_clusters)]
+        phi_parts, z_parts = [], []
+        for ci, nc in enumerate(pts_per):
+            if nc == 0:
+                continue
+            # Uniform disk in (arc-length, z) space: r_off is the spatial radius,
+            # converted to Δphi via Δphi = r_off * cos(a) / R.
+            r_off = rng.uniform(0.0, sigma, nc)
+            a_off = rng.uniform(0.0, 2.0 * np.pi, nc)
+            pc = (c_phi[ci] + r_off * np.cos(a_off) / float(R_ZYLINDER)) % (2.0 * np.pi)
+            zc = np.clip(c_z[ci] + r_off * np.sin(a_off), z_min, z_max)
+            phi_parts.append(pc)
+            z_parts.append(zc)
+        phi = np.concatenate(phi_parts) if phi_parts else phi_fib
+        z = np.concatenate(z_parts) if z_parts else z_fib
+
     else:
         raise ValueError(f"Unknown wall algorithm: '{alg}'")
 
@@ -423,6 +526,7 @@ def _draw_surface_params(
     area: str,
     n_area: int,
     rng: np.random.Generator,
+    allowed_algorithms: list[str] | None = None,
 ) -> dict:
     """Draw random algorithm + geometric starting parameters for one area.
 
@@ -430,8 +534,20 @@ def _draw_surface_params(
     the generator uses n//2 points and mirrors them at phi+pi.  Parameters
     therefore need no special phi symmetry constraints — the mirroring in
     _gen_disk_points/_gen_wall_points handles that automatically.
+
+    Parameters
+    ----------
+    allowed_algorithms : list of str, optional
+        If given, restrict selection to algorithms that appear in both this list
+        and the area's natural pool.  If the intersection is empty the full pool
+        is used as fallback so generation never fails silently.
     """
     pool = _ALG_WALL if area == "wall" else _ALG_DISK
+    if allowed_algorithms is not None:
+        filtered = [a for a in pool if a in allowed_algorithms]
+        if filtered:
+            pool = filtered
+        # else: silently fall back to the full pool
     alg = str(rng.choice(pool))
     p: dict = {"algorithm": alg}
 
@@ -503,6 +619,15 @@ def _draw_surface_params(
 
     elif alg == "pole":       # wall only
         p["pole_pos"] = str(rng.choice(["top", "bottom"]))
+
+    elif alg == "clustered_surface":
+        # n_clusters: number of Fibonacci-distributed cluster centers (for one half; mirrored
+        # to 2*n_clusters after C2 symmetry).  Range 2..max ensures at least 2 points per
+        # cluster on average and keeps max clusters physically sensible.
+        n_half = max(1, n_area // 2)
+        max_clusters = max(2, min(n_half // 2, 40))
+        n_clusters = int(rng.integers(2, max_clusters + 1))
+        p["n_clusters"] = n_clusters
 
     # Ensure all list-valued params are plain Python lists for JSON serialisation
     for key in ("cluster_phi", "cluster_z", "cluster_r", "ring_z", "ring_radii",
@@ -739,6 +864,7 @@ def sample_w2_range(
     deltas: list[float] | None,
     verbose: bool,
     exclude_areas: list[str] | None = None,
+    allowed_algorithms: list[str] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     main_rng = np.random.default_rng(seed)
@@ -807,7 +933,9 @@ def sample_w2_range(
         for a in _AREA_ORDER:
             n_a = N_by_area.get(a, 0)
             if n_a > 0:
-                surface_params[a] = _draw_surface_params(a, n_a, params_rng)
+                surface_params[a] = _draw_surface_params(
+                    a, n_a, params_rng, allowed_algorithms=allowed_algorithms
+                )
             else:
                 surface_params[a] = {"algorithm": "fibonacci"}
 
@@ -1031,6 +1159,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         choices=["pit", "bot", "top", "wall"], metavar="AREA",
         help="Areas to exclude from voxel selection (e.g. --exclude-areas pit bot).",
     )
+    all_algs = sorted(set(_ALG_DISK) | set(_ALG_WALL))
+    parser.add_argument(
+        "--algorithms", nargs="+", default=None,
+        metavar="ALG",
+        choices=all_algs,
+        help=(
+            "Restrict algorithm selection to this subset, applied globally to all areas "
+            "(e.g. --algorithms clustered_surface fibonacci).  Algorithms not valid for a "
+            "given area type are silently ignored; if none match, the full pool is used. "
+            f"Available: {', '.join(all_algs)}."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1064,6 +1204,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         deltas=deltas,
         verbose=not args.quiet,
         exclude_areas=exclude_areas or None,
+        allowed_algorithms=args.algorithms or None,
     )
 
 
