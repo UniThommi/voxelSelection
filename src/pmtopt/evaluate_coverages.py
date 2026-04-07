@@ -475,6 +475,345 @@ def plot_nc_coverage(
         print(f"  Saved: {out_path}")
 
 
+# ===================================================================
+# Plotting: NC coverage bar chart (additional)
+# ===================================================================
+
+def plot_nc_coverage_bars(
+    configs: list[ConfigResult],
+    M_max: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Grouped bar chart of NC detection coverage — one bar per setup per M.
+
+    Two panels (one figure):
+    - Left: linear scale, all configs except all-voxels reference.
+    - Right: log scale, all configs including all-voxels reference.
+
+    Bar height = number of detected NCs at that M threshold.
+    Text above each bar (rotated 90°): count and percentage of total NCs.
+    """
+    M_range = list(range(1, M_max + 1))
+
+    ordered = _sorted_by_w2(configs)
+    no_all  = [c for c in ordered if c.name != "all_voxels"]
+
+    colors_all = _get_colors(len(ordered))
+    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+
+    x = np.arange(len(M_range))
+
+    # --- figure sizing ---
+    # width: enough room for grouped bars + annotations at all M values
+    n_max = max(len(no_all), len(ordered))
+    bar_width = min(0.8 / n_max, 0.18)
+    fig_w = max(18, len(M_range) * (n_max * bar_width + 0.6) + 3)
+    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(fig_w, 8))
+
+    def _draw_bars(ax: plt.Axes, cfg_list: list[ConfigResult], scale: str) -> None:
+        n = len(cfg_list)
+        if n == 0:
+            return
+        bw = min(0.8 / n, 0.18)
+        for i, cfg in enumerate(cfg_list):
+            offset = (i - (n - 1) / 2) * bw
+            vals  = [cfg.num_detected.get(M, 0) for M in M_range]
+            total = cfg.num_ncs if cfg.num_ncs > 0 else 1
+            bars  = ax.bar(
+                x + offset, vals, bw,
+                label=_config_label(cfg),
+                color=color_map[cfg.name],
+            )
+            for bar, val in zip(bars, vals):
+                pct   = 100.0 * val / total
+                y_pos = max(bar.get_height(), 1) if scale == "log" else bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    y_pos,
+                    f"{val:,}\n({pct:.1f}%)",
+                    ha="center", va="bottom",
+                    fontsize=5, rotation=90, fontweight="bold",
+                )
+
+    _draw_bars(ax_lin, no_all,  "linear")
+    _draw_bars(ax_log, ordered, "log")
+
+    for ax, scale, title in [
+        (ax_lin, "linear", "NC Detection Coverage (linear scale)"),
+        (ax_log, "log",    "NC Detection Coverage (log scale)"),
+    ]:
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"M≥{M}" for M in M_range], fontsize=9)
+        ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+        ax.set_ylabel("Detected NCs", fontsize=11)
+        ax.set_title(title, fontsize=12)
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(axis="y", alpha=0.3)
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
+        )
+        if scale == "log":
+            ax.set_yscale("log")
+        # extra headroom so rotated annotations don't get clipped
+        ax.margins(y=0.35)
+
+    ax_lin.set_title("NC Detection Coverage (linear scale,\nexcl. all-voxels reference)", fontsize=11)
+    ax_log.set_title("NC Detection Coverage (log scale,\nincl. all-voxels reference)", fontsize=11)
+
+    plt.tight_layout()
+    out_path = output_dir / "nc_coverage_bars.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plotting: NC Detectability Overview (Plot 03)
+# ===================================================================
+
+def plot_nc_detectability_overview(
+    configs: list[ConfigResult],
+    M_default: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Two-panel NC detectability overview (Plot 03).
+
+    Left panel — absolute grouped bars:
+        "Total NCs" and "Detected (M≥M_default)" for every config.
+    Right panel — Δ diverging horizontal bars:
+        Difference vs. the Baseline config for all other configs.
+
+    Annotations above each bar (rotated 90°): count and percentage of
+    total NCs.  Total NCs is identical for all setups (shared truth), so
+    the Δ panel only shows the 'Detected' category.
+    """
+    # Identify baseline reference (first config with label "Baseline")
+    baseline_cfg = next(
+        (c for c in configs if c.label == "Baseline"),
+        configs[1] if len(configs) > 1 else configs[0],
+    )
+
+    ordered = _sorted_by_w2(configs)
+    n = len(ordered)
+    colors_all = _get_colors(n)
+    color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+
+    cat_labels = ["Total NCs", f"Detected\n(M≥{M_default})"]
+    x = np.arange(len(cat_labels))
+    width = min(0.8 / n, 0.18)
+
+    fig, (ax_abs, ax_delta) = plt.subplots(
+        1, 2,
+        figsize=(max(14, n * 3 + 4), 8),
+        gridspec_kw={"width_ratios": [3, 2]},
+    )
+
+    # ── Left panel: absolute grouped bars ────────────────────────────
+    for i, cfg in enumerate(ordered):
+        offset = (i - (n - 1) / 2) * width
+        vals  = [cfg.num_ncs, cfg.num_detected.get(M_default, 0)]
+        total = cfg.num_ncs if cfg.num_ncs > 0 else 1
+        bars  = ax_abs.bar(
+            x + offset, vals, width,
+            label=_config_label(cfg), color=color_map[cfg.name],
+        )
+        for bar, val in zip(bars, vals):
+            pct = 100.0 * val / total
+            ax_abs.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{val:,}\n({pct:.1f}%)",
+                ha="center", va="bottom",
+                fontsize=6, rotation=90, fontweight="bold",
+            )
+
+    ax_abs.set_xticks(x)
+    ax_abs.set_xticklabels(cat_labels, fontsize=10)
+    ax_abs.set_ylabel("Number of NCs", fontsize=11)
+    ax_abs.set_title(
+        f"NC Detectability Overview  [M_default = {M_default}]\n"
+        "(Total NCs is identical for all setups — shared NC truth)",
+        fontsize=11,
+    )
+    ax_abs.legend(fontsize=8)
+    ax_abs.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
+    )
+    ax_abs.margins(y=0.30)
+
+    # ── Right panel: Δ vs Baseline ────────────────────────────────────
+    non_ref = [c for c in ordered if c.name != baseline_cfg.name]
+
+    if not non_ref:
+        ax_delta.text(
+            0.5, 0.5, "Single setup —\nno Δ to display",
+            transform=ax_delta.transAxes, ha="center", va="center",
+            fontsize=11, color="gray",
+        )
+        ax_delta.set_axis_off()
+    else:
+        n_nr     = len(non_ref)
+        bar_h    = 0.8 / n_nr
+        y_base   = np.array([0.0])          # one category: 'Detected'
+        ref_val  = baseline_cfg.num_detected.get(M_default, 0)
+        ref_tot  = baseline_cfg.num_ncs if baseline_cfg.num_ncs > 0 else 1
+
+        for j, cfg in enumerate(non_ref):
+            val    = cfg.num_detected.get(M_default, 0)
+            delta  = val - ref_val
+            offset = (j - (n_nr - 1) / 2) * bar_h
+
+            bars = ax_delta.barh(
+                y_base + offset, [delta], bar_h * 0.88,
+                label=_config_label(cfg), color=color_map[cfg.name],
+            )
+            for bar in bars:
+                pct  = 100.0 * delta / max(ref_tot, 1)
+                sign = "+" if delta >= 0 else ""
+                if delta == 0:
+                    ax_delta.text(
+                        0, bar.get_y() + bar.get_height() / 2,
+                        " =ref", va="center", ha="left", fontsize=7,
+                        color=color_map[cfg.name], fontstyle="italic",
+                    )
+                    continue
+                txt = f"{sign}{delta:,}\n({sign}{pct:.1f}%)"
+                pad = max(abs(delta) * 0.02, 1)
+                ax_delta.text(
+                    delta + (pad if delta >= 0 else -pad),
+                    bar.get_y() + bar.get_height() / 2,
+                    txt, va="center",
+                    ha="left" if delta >= 0 else "right",
+                    fontsize=7, color=color_map[cfg.name], fontweight="bold",
+                )
+
+        ax_delta.axvline(0, color="black", linewidth=0.9)
+        ax_delta.set_yticks(y_base)
+        ax_delta.set_yticklabels([f"Detected (M≥{M_default})"], fontsize=10)
+        ax_delta.set_xlabel(
+            f"Δ count vs Baseline ({baseline_cfg.label})", fontsize=10
+        )
+        ax_delta.set_title(
+            f"Δ from Baseline: {baseline_cfg.label}", fontsize=11
+        )
+        ax_delta.legend(fontsize=8, title="vs Baseline")
+        ax_delta.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{int(v):+,}")
+        )
+        ax_delta.grid(True, axis="x", alpha=0.3)
+        ax_delta.invert_yaxis()
+
+    plt.tight_layout()
+    out_path = output_dir / "nc_detectability_overview.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plotting: Recall / Precision M×W sweep (Plots 10 & 11)
+# ===================================================================
+
+def plot_mw_sweep(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    One figure per metric (Recall, Precision) sweeping all (M, W) pairs.
+
+    X-axis order: M1W1, M1W2, …, M1W_max, M2W1, … (M outer, W inner).
+    Each config is one line in its palette colour.  Vertical dashed
+    separators mark M-group boundaries; the M value is labelled above
+    each group.  Y-axis shows percentage values (0 %–100 %).
+
+    Recall    = TP / (TP + FN)
+    Precision = TP / (TP + FP)
+    """
+    ordered    = _sorted_by_w2(configs)
+    colors_all = _get_colors(len(ordered))
+    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+
+    mw_pairs = [(M, W) for M in M_values for W in W_values]
+    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
+    x        = np.arange(len(mw_pairs))
+    n_w      = len(W_values)
+
+    for metric_name, fname_suffix in [
+        ("Recall",    "recall"),
+        ("Precision", "precision"),
+    ]:
+        fig_w = max(30, len(mw_pairs) * 0.18)
+        fig, ax = plt.subplots(figsize=(fig_w, 9))
+
+        for cfg in ordered:
+            vals = []
+            for M, W in mw_pairs:
+                cm = cfg.confusion.get((M, W))
+                if cm is None:
+                    vals.append(0.0)
+                    continue
+                TP, FP, FN = cm["TP"], cm["FP"], cm["FN"]
+                if metric_name == "Recall":
+                    denom = TP + FN
+                    vals.append(TP / denom if denom > 0 else 0.0)
+                else:
+                    denom = TP + FP
+                    vals.append(TP / denom if denom > 0 else 0.0)
+
+            ax.plot(
+                x, vals,
+                color=color_map[cfg.name],
+                label=_config_label(cfg),
+                linewidth=1.2, marker=".", markersize=4,
+            )
+
+        # Vertical separators + M-group labels above the axes
+        for gi, M in enumerate(M_values):
+            group_start = gi * n_w
+            group_mid   = group_start + (n_w - 1) / 2
+            if gi > 0:
+                ax.axvline(
+                    group_start - 0.5, color="gray",
+                    linewidth=0.6, linestyle="--", alpha=0.5,
+                )
+            ax.text(
+                group_mid, 1.02, f"M={M}",
+                transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color="dimgray",
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=90, fontsize=7)
+        ax.set_ylabel(metric_name, fontsize=12)
+        ax.set_ylim(-0.02, 1.08)
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v * 100:.0f}%")
+        )
+        ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
+        ax.set_title(
+            f"Ge-77 Muon Classification — {metric_name} across all (M, W) combinations",
+            fontsize=13, pad=20,
+        )
+        ax.legend(fontsize=9, loc="upper right")
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.set_xlim(-0.5, len(mw_pairs) - 0.5)
+
+        fig.tight_layout()
+        out_path = output_dir / f"mw_sweep_{fname_suffix}.png"
+        plt.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        if verbose:
+            print(f"  Saved: {out_path}")
+
 
 # ===================================================================
 # Plotting: Muon Ge77 heatmaps
@@ -677,9 +1016,7 @@ def plot_w2_coverage_scatter(
     colors = _get_colors(len(w2_cfgs))
     color_map = {cfg.name: colors[i] for i, cfg in enumerate(w2_cfgs)}
 
-    scatter_ms = [M for M in _SCATTER_M_VALUES if M in set(M_values)]
-    if not scatter_ms:
-        scatter_ms = M_values[:6]
+    scatter_ms = list(M_values)
 
     ncols = 3
     nrows = (len(scatter_ms) + ncols - 1) // ncols
@@ -774,11 +1111,13 @@ def plot_muon_w2_scatter(
 
     ncols = 3
     nrows = (len(selected_mw) + ncols - 1) // ncols
-    # Extra vertical space per panel for precision text below axes
+    # hspace scales with number of configs so the per-panel text box
+    # (one line per config) does not overlap the next row's axes.
+    hspace = max(0.55, 0.09 * (len(w2_cfgs) + 2))
     fig, axes = plt.subplots(
         nrows, ncols,
         figsize=(ncols * 5, nrows * 5.5),
-        gridspec_kw={"hspace": 0.55},
+        gridspec_kw={"hspace": hspace},
     )
     axes_flat = np.array(axes).flatten()
 
@@ -813,14 +1152,20 @@ def plot_muon_w2_scatter(
         ax.grid(alpha=0.3)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-        # Precision text below each subplot
-        prec_text = "Precision:  " + "   ".join(precision_lines)
+        # Precision text below each subplot — one config per line, inside a bbox
+        prec_text = "Precision:\n" + "\n".join(f"  {line}" for line in precision_lines)
         ax.text(
-            0.5, -0.22, prec_text,
+            0.5, -0.02, prec_text,
             transform=ax.transAxes,
             ha="center", va="top",
             fontsize=7, family="monospace",
-            wrap=True,
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="lightyellow",
+                edgecolor="gray",
+                alpha=0.85,
+                linewidth=0.6,
+            ),
         )
 
     for pi in range(len(selected_mw), len(axes_flat)):
@@ -881,6 +1226,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Random seed for stochastic rounding.")
     parser.add_argument("--M-max", type=int, default=10,
                         help="Maximum M value to evaluate.")
+    parser.add_argument("--M-default", type=int, default=1,
+                        help="Default M threshold used in the NC detectability "
+                             "overview plot (Plot 03).")
     parser.add_argument("--W-max", type=int, default=20,
                         help="Maximum W value to evaluate.")
 
@@ -1097,6 +1445,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     # NC coverage line plot (log + linear, two panels)
     plot_nc_coverage(all_configs, args.M_max, output_dir, verbose=verbose)
 
+    # NC coverage bar chart (additional, same data as bar groups per M)
+    plot_nc_coverage_bars(all_configs, args.M_max, output_dir, verbose=verbose)
+
+    # NC detectability overview — absolute + Δ vs Baseline (Plot 03)
+    plot_nc_detectability_overview(
+        all_configs, args.M_default, output_dir, verbose=verbose
+    )
+
     # Muon heatmaps
     plot_muon_heatmaps(
         all_configs, M_values, W_values, output_dir,
@@ -1118,6 +1474,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         verbose=verbose,
         ratio_override_warning=ratio_override_warning,
     )
+
+    # Recall / Precision M×W sweep (Plots 10 & 11)
+    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
 
     # W2 vs coverage plots
     plot_w2_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
