@@ -44,6 +44,11 @@ import numpy as np
 # Ensure ratio_analysis package is importable when run from any directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Also make src/pmtopt importable (needed for the shared W2 plotting helper).
+_pmtopt_src = Path(__file__).resolve().parents[2] / "src"
+if _pmtopt_src.is_dir() and str(_pmtopt_src) not in sys.path:
+    sys.path.insert(0, str(_pmtopt_src))
+
 from ratio_analysis.raw_loading import (
     build_nc_truth,
     build_pmt_matrix,
@@ -57,6 +62,11 @@ from ratio_analysis.coverage_analysis import (
     MUON_WINDOW_LO_NS,
     MUON_WINDOW_HI_NS,
 )
+
+from scipy import stats as scipy_stats
+
+# Shared W2-correlation plotting helper (identical across both pipelines).
+from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -1102,6 +1112,414 @@ def plot_w2_scatter(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# W2 correlation analysis (Plots A–E)  — mirrors evaluate_coverages.py
+# ──────────────────────────────────────────────────────────────────────
+
+# ── data-extraction helpers (SetupResult equivalents of _nc_frac etc.) ─
+
+def _cc_nc_frac(r: SetupResult, M: int) -> float:
+    return r.nc["nc_detected"][M] / max(r.nc["nc_total"], 1)
+
+
+def _cc_recall(r: SetupResult, M: int, W: int) -> float:
+    cm = r.muon["confusion"].get((M, W))
+    if cm is None:
+        return 0.0
+    return compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])["Recall"]
+
+
+def _cc_precision(r: SetupResult, M: int, W: int) -> float:
+    cm = r.muon["confusion"].get((M, W))
+    if cm is None:
+        return 0.0
+    return compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])["Precision"]
+
+
+def _sorted_by_w2_cc(results: list[SetupResult]) -> list[SetupResult]:
+    """Return results sorted by W2 descending (None W2 last)."""
+    return sorted(results, key=lambda r: (r.w2 is None, -(r.w2 or 0.0)))
+
+
+# ── Plot A — W2 × NC coverage correlation scatter ──────────────────────
+
+def plot_w2_nc_correlation(
+    results: list[SetupResult],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """
+    Plot A — W2 vs NC detection fraction for every M threshold.
+
+    4 rows × 3 cols grid (one panel per M, two extra panels hidden).
+    Each panel: scatter + OLS + 95 % CI (top), residuals (bottom).
+    Pearson r and Spearman ρ with p-values annotated per panel.
+    """
+    w2_res = [r for r in results if r.w2 is not None]
+    if len(w2_res) < 2:
+        print("  [SKIP] w2_nc_correlation: fewer than 2 setups have W2.")
+        return
+
+    ordered    = _sorted_by_w2_cc(w2_res)
+    colors_all = _colors(len(ordered))
+    color_map  = {r.label: colors_all[i] for i, r in enumerate(ordered)}
+    w2_arr     = np.array([r.w2 for r in ordered])
+    labels     = [r.label for r in ordered]
+    color_pts  = [color_map[r.label] for r in ordered]
+
+    ncols = 3
+    nrows = (len(M_values) + ncols - 1) // ncols
+
+    fig = plt.figure(figsize=(ncols * 5, nrows * 6))
+    fig.suptitle(
+        "W2 Homogeneity vs NC Detection Fraction\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        col = pi % ncols
+        row = pi // ncols
+        ax_scatter = fig.add_subplot(nrows * 2, ncols,
+                                     row * 2 * ncols + col + 1)
+        ax_resid   = fig.add_subplot(nrows * 2, ncols,
+                                     (row * 2 + 1) * ncols + col + 1,
+                                     sharex=ax_scatter)
+
+        y_arr = np.array([_cc_nc_frac(r, M) for r in ordered])
+        _regression_overlay(ax_scatter, ax_resid, w2_arr, y_arr,
+                            color_pts, labels,
+                            y_label=f"NC fraction (M≥{M})")
+        ax_scatter.set_title(f"M ≥ {M}", fontsize=9)
+        ax_scatter.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+        ax_resid.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+        plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fname = "13_w2_nc_correlation.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ── Plot B — W2 × Muon metrics correlation scatter ─────────────────────
+
+def plot_w2_muon_correlation(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_default: int,
+    output_dir: str,
+) -> None:
+    """
+    Plot B — W2 vs Ge-77 Recall and Precision at W=W_default for every M.
+
+    Left 3 cols = Recall, right 3 cols = Precision.
+    Each cell: scatter + regression (top) + residuals (bottom).
+    """
+    w2_res = [r for r in results if r.w2 is not None]
+    if len(w2_res) < 2:
+        print("  [SKIP] w2_muon_correlation: fewer than 2 setups have W2.")
+        return
+
+    ordered    = _sorted_by_w2_cc(w2_res)
+    colors_all = _colors(len(ordered))
+    color_map  = {r.label: colors_all[i] for i, r in enumerate(ordered)}
+    w2_arr     = np.array([r.w2 for r in ordered])
+    labels     = [r.label for r in ordered]
+    color_pts  = [color_map[r.label] for r in ordered]
+
+    ncols_half = 3
+    nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
+    total_rows = nrows_M * 2
+    total_cols = ncols_half * 2
+
+    fig = plt.figure(figsize=(total_cols * 4.5, total_rows * 3))
+    fig.suptitle(
+        f"W2 Homogeneity vs Ge-77 Recall / Precision  (W = {W_default})\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        logical_col = pi % ncols_half
+        logical_row = pi // ncols_half
+
+        for metric_fn, metric_name, col_offset in [
+            (_cc_recall,    "Recall",    0),
+            (_cc_precision, "Precision", ncols_half),
+        ]:
+            col = logical_col + col_offset
+            ax_scatter = fig.add_subplot(
+                total_rows, total_cols,
+                logical_row * 2 * total_cols + col + 1,
+            )
+            ax_resid = fig.add_subplot(
+                total_rows, total_cols,
+                (logical_row * 2 + 1) * total_cols + col + 1,
+                sharex=ax_scatter,
+            )
+
+            y_arr = np.array([metric_fn(r, M, W_default) for r in ordered])
+            _regression_overlay(ax_scatter, ax_resid, w2_arr, y_arr,
+                                color_pts, labels,
+                                y_label=f"{metric_name} (M≥{M}, W≥{W_default})")
+            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=8)
+            ax_scatter.set_ylim(-0.05, 1.05)
+            ax_scatter.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+            ax_resid.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+            plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fname = "14_w2_muon_correlation.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ── Plot C — Correlation matrix (Pearson + Spearman) ───────────────────
+
+def plot_w2_correlation_matrix(
+    results: list[SetupResult],
+    M_values: list[int],
+    M_default: int,
+    W_default: int,
+    output_dir: str,
+) -> None:
+    """
+    Plot C — Pearson and Spearman correlation matrices.
+
+    Variables: W2, NC_frac_M1..M_max, Recall and Precision at
+    (M_default, W_default).  Two heatmaps side-by-side.
+    Cell annotations include significance stars (* p<0.05, ** p<0.01).
+    """
+    w2_res = [r for r in results if r.w2 is not None]
+    if len(w2_res) < 3:
+        print("  [SKIP] w2_correlation_matrix: fewer than 3 setups have W2.")
+        return
+
+    var_names = ["W2"] + [f"NC_M{M}" for M in M_values] + [
+        f"Recall\nM{M_default}W{W_default}",
+        f"Precision\nM{M_default}W{W_default}",
+    ]
+    data_rows = []
+    for r in w2_res:
+        row = [r.w2]
+        row += [_cc_nc_frac(r, M) for M in M_values]
+        row += [_cc_recall(r, M_default, W_default),
+                _cc_precision(r, M_default, W_default)]
+        data_rows.append(row)
+
+    X  = np.array(data_rows)
+    nv = len(var_names)
+    pearson_mat  = np.full((nv, nv), np.nan)
+    spearman_mat = np.full((nv, nv), np.nan)
+    pval_p_mat   = np.full((nv, nv), np.nan)
+    pval_s_mat   = np.full((nv, nv), np.nan)
+
+    for i in range(nv):
+        for j in range(nv):
+            if i == j:
+                pearson_mat[i, j] = spearman_mat[i, j] = 1.0
+                pval_p_mat[i, j]  = pval_s_mat[i, j]  = 0.0
+                continue
+            r_val, pr  = scipy_stats.pearsonr(X[:, i],  X[:, j])
+            rho,   prs = scipy_stats.spearmanr(X[:, i], X[:, j])
+            pearson_mat[i, j]  = r_val
+            spearman_mat[i, j] = rho
+            pval_p_mat[i, j]   = pr
+            pval_s_mat[i, j]   = prs
+
+    fig, (ax_p, ax_s) = plt.subplots(
+        1, 2,
+        figsize=(max(14, nv * 1.1) * 2, max(10, nv * 1.0)),
+    )
+    fig.suptitle(
+        f"Correlation Matrices  (n = {len(w2_res)} setups)\n"
+        f"Muon metrics at M={M_default}, W={W_default}",
+        fontsize=12,
+    )
+
+    for ax, mat, pmat, title in [
+        (ax_p, pearson_mat,  pval_p_mat,  "Pearson r"),
+        (ax_s, spearman_mat, pval_s_mat,  "Spearman ρ"),
+    ]:
+        im = ax.imshow(mat, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
+        plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        for i in range(nv):
+            for j in range(nv):
+                val = mat[i, j]
+                if np.isnan(val):
+                    continue
+                p   = pmat[i, j]
+                sig = "**" if p < 0.01 else ("*" if p < 0.05 else "")
+                tc  = "white" if abs(val) > 0.6 else "black"
+                ax.text(j, i, f"{val:+.2f}{sig}",
+                        ha="center", va="center",
+                        fontsize=7, color=tc, fontweight="bold")
+        ax.set_xticks(range(nv))
+        ax.set_yticks(range(nv))
+        ax.set_xticklabels(var_names, rotation=45, ha="right", fontsize=8)
+        ax.set_yticklabels(var_names, fontsize=8)
+        ax.set_title(title, fontsize=11)
+
+    fig.text(0.5, 0.01, "* p<0.05   ** p<0.01",
+             ha="center", fontsize=8, fontstyle="italic")
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fname = "15_w2_correlation_matrix.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ── Plot D — Coverage profile colored by W2 ────────────────────────────
+
+def plot_w2_coverage_profile(
+    results: list[SetupResult],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """
+    Plot D — NC detection fraction vs M, one line per setup colored by W2.
+
+    Blue = low W2 (uniform); red = high W2 (clustered).
+    Setups without W2 are drawn in gray dashed.
+    """
+    w2_res   = [r for r in results if r.w2 is not None]
+    gray_res = [r for r in results if r.w2 is None]
+
+    if not w2_res:
+        print("  [SKIP] w2_coverage_profile: no setups have W2.")
+        return
+
+    w2_vals = np.array([r.w2 for r in w2_res])
+    w2_min, w2_max = w2_vals.min(), w2_vals.max()
+    cmap = plt.cm.coolwarm_r
+    norm = plt.Normalize(vmin=w2_min,
+                         vmax=w2_max if w2_max > w2_min else w2_min + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for r in gray_res:
+        ys = [_cc_nc_frac(r, M) for M in M_values]
+        ax.plot(M_values, ys, color="gray", linewidth=1.0,
+                linestyle="--", alpha=0.6, label=r.label)
+
+    for r in w2_res:
+        color = cmap(norm(r.w2))
+        ys = [_cc_nc_frac(r, M) for M in M_values]
+        ax.plot(M_values, ys, color=color, linewidth=1.8,
+                marker="o", markersize=4, label=r.label)
+        ax.annotate(r.label, xy=(M_values[-1], ys[-1]),
+                    xytext=(4, 0), textcoords="offset points",
+                    fontsize=6, color=color, va="center")
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, pad=0.01)
+    cbar.set_label("Global W2 (mm)  [blue=uniform, red=clustered]", fontsize=9)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("NC detection fraction", fontsize=11)
+    ax.set_title(
+        "NC Coverage Profile Colored by W2 Homogeneity\n"
+        "(systematic shift reveals W2–coverage relationship)",
+        fontsize=12,
+    )
+    ax.set_xticks(M_values)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fname = "16_w2_coverage_profile.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ── Plot E — Spearman ρ vs M ────────────────────────────────────────────
+
+def plot_w2_spearman_vs_m(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_default: int,
+    output_dir: str,
+) -> None:
+    """
+    Plot E — Spearman ρ(W2, metric) as a function of M threshold.
+
+    Three lines: NC fraction, Recall (W_default), Precision (W_default).
+    Filled markers = p<0.05; hollow = not significant.
+    Gray band marks weak |ρ|<0.3 zone.
+    """
+    w2_res = [r for r in results if r.w2 is not None]
+    if len(w2_res) < 3:
+        print("  [SKIP] w2_spearman_vs_m: fewer than 3 setups have W2.")
+        return
+
+    w2_arr = np.array([r.w2 for r in w2_res])
+
+    rho_nc, rho_rec, rho_prec = [], [], []
+    p_nc,   p_rec,   p_prec   = [], [], []
+
+    for M in M_values:
+        nc_arr   = np.array([_cc_nc_frac(r, M) for r in w2_res])
+        rec_arr  = np.array([_cc_recall(r, M, W_default) for r in w2_res])
+        prec_arr = np.array([_cc_precision(r, M, W_default) for r in w2_res])
+
+        r1, p1 = scipy_stats.spearmanr(w2_arr, nc_arr)
+        r2, p2 = scipy_stats.spearmanr(w2_arr, rec_arr)
+        r3, p3 = scipy_stats.spearmanr(w2_arr, prec_arr)
+
+        rho_nc.append(r1);   p_nc.append(p1)
+        rho_rec.append(r2);  p_rec.append(p2)
+        rho_prec.append(r3); p_prec.append(p3)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.array(M_values)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axhspan(-0.3, 0.3, color="gray", alpha=0.08, label="weak |ρ|<0.3")
+
+    for rhos, ps, label, color, marker in [
+        (rho_nc,   p_nc,   "NC fraction",              "#1f77b4", "o"),
+        (rho_rec,  p_rec,  f"Recall (W={W_default})",  "#d62728", "s"),
+        (rho_prec, p_prec, f"Precision (W={W_default})","#2ca02c", "^"),
+    ]:
+        rhos = np.array(rhos)
+        ps   = np.array(ps)
+        sig  = ps < 0.05
+        ax.plot(x, rhos, color=color, linewidth=1.5, label=label)
+        if sig.any():
+            ax.scatter(x[sig],  rhos[sig],  color=color, s=60,
+                       marker=marker, zorder=4, label=f"{label} (p<0.05)")
+        if (~sig).any():
+            ax.scatter(x[~sig], rhos[~sig], facecolors="none",
+                       edgecolors=color, s=60, marker=marker,
+                       linewidth=1.2, zorder=4)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("Spearman ρ  (W2 vs metric)", fontsize=11)
+    ax.set_title(
+        f"Spearman Correlation between W2 and Coverage Metrics vs M\n"
+        f"(filled = p<0.05 significant | W_default = {W_default})",
+        fontsize=12,
+    )
+    ax.set_xticks(M_values)
+    ax.set_ylim(-1.1, 1.1)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fname = "17_w2_spearman_vs_m.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Text output
 # ──────────────────────────────────────────────────────────────────────
 def write_nc_summary(
@@ -1390,6 +1808,13 @@ def main() -> None:
     plot_w_histogram(results, M_default, W_default, args.output_dir)
     plot_mw_sweep(results, M_values, W_values, args.output_dir)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
+
+    # W2 correlation analysis (Plots A–E)
+    plot_w2_nc_correlation(results, M_values, args.output_dir)
+    plot_w2_muon_correlation(results, M_values, W_default, args.output_dir)
+    plot_w2_correlation_matrix(results, M_values, M_default, W_default, args.output_dir)
+    plot_w2_coverage_profile(results, M_values, args.output_dir)
+    plot_w2_spearman_vs_m(results, M_values, W_default, args.output_dir)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")

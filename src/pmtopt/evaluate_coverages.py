@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 from scipy import sparse
+from scipy import stats as scipy_stats
 
 from pmtopt.geometry import (
     DEFAULT_AREA_RATIOS,
@@ -1194,6 +1195,483 @@ def plot_muon_w2_scatter(
 
 
 # ===================================================================
+# W2 correlation analysis helpers
+# ===================================================================
+
+# Core regression/residual overlay is shared with compare_coverages.py
+# via src/pmtopt/w2_plot_helpers.py to ensure identical visual style.
+from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
+
+
+def _nc_frac(cfg: ConfigResult, M: int) -> float:
+    """NC detection fraction for config at threshold M."""
+    return cfg.num_detected.get(M, 0) / cfg.num_ncs if cfg.num_ncs > 0 else 0.0
+
+
+def _recall(cfg: ConfigResult, M: int, W: int) -> float:
+    cm = cfg.confusion.get((M, W))
+    if cm is None:
+        return 0.0
+    denom = cm["TP"] + cm["FN"]
+    return cm["TP"] / denom if denom > 0 else 0.0
+
+
+def _precision(cfg: ConfigResult, M: int, W: int) -> float:
+    cm = cfg.confusion.get((M, W))
+    if cm is None:
+        return 0.0
+    denom = cm["TP"] + cm["FP"]
+    return cm["TP"] / denom if denom > 0 else 0.0
+
+
+# ===================================================================
+# Plot A — W2 × NC coverage correlation scatter
+# ===================================================================
+
+def plot_w2_nc_correlation(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot A — W2 vs NC detection fraction for every M threshold.
+
+    Layout: 4 rows × 3 cols (one panel per M=1..10, 2 empty).
+    Each panel has a scatter subplot (top) and a residual subplot (bottom),
+    sharing the x-axis.  OLS regression line with 95 % CI is overlaid.
+    Pearson r and Spearman ρ with p-values are annotated.
+    """
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    if len(w2_cfgs) < 2:
+        if verbose:
+            print("  w2_nc_correlation: fewer than 2 configs have W2 — skipped.")
+        return
+
+    colors_all = _get_colors(len(w2_cfgs))
+    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
+    w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
+    labels     = [cfg.label for cfg in w2_cfgs]
+    color_pts  = [color_map[cfg.name] for cfg in w2_cfgs]
+
+    ncols = 3
+    nrows = (len(M_values) + ncols - 1) // ncols   # e.g. 4 for M=1..10
+
+    # Each M panel = 2 matplotlib rows (scatter + residual)
+    fig = plt.figure(figsize=(ncols * 5, nrows * 6))
+    fig.suptitle(
+        "W2 Homogeneity vs NC Detection Fraction\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        col = pi % ncols
+        row = pi // ncols
+
+        # Two gridspec rows per logical panel row (scatter + residual)
+        gs_row_top    = row * 2
+        gs_row_bottom = row * 2 + 1
+
+        ax_scatter = fig.add_subplot(nrows * 2, ncols,
+                                     gs_row_top * ncols + col + 1)
+        ax_resid   = fig.add_subplot(nrows * 2, ncols,
+                                     gs_row_bottom * ncols + col + 1,
+                                     sharex=ax_scatter)
+
+        y_arr = np.array([_nc_frac(cfg, M) for cfg in w2_cfgs])
+
+        _regression_overlay(
+            ax_scatter, ax_resid,
+            w2_arr, y_arr,
+            color_pts, labels,
+            y_label=f"NC fraction (M≥{M})",
+        )
+        ax_scatter.set_title(f"M ≥ {M}", fontsize=9)
+        ax_scatter.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+        )
+        ax_resid.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%")
+        )
+        plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    out_path = output_dir / "w2_nc_correlation.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot B — W2 × Muon metrics correlation scatter
+# ===================================================================
+
+def plot_w2_muon_correlation(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_default: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot B — W2 vs Ge-77 Recall and Precision at W=W_default for every M.
+
+    Layout: 4 rows × 6 cols (Recall on left 3 cols, Precision on right 3 cols).
+    Each cell = scatter (top) + residual (bottom).
+    """
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    if len(w2_cfgs) < 2:
+        if verbose:
+            print("  w2_muon_correlation: fewer than 2 configs have W2 — skipped.")
+        return
+
+    colors_all = _get_colors(len(w2_cfgs))
+    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
+    w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
+    labels     = [cfg.label for cfg in w2_cfgs]
+    color_pts  = [color_map[cfg.name] for cfg in w2_cfgs]
+
+    ncols_half = 3                                   # cols per metric
+    nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
+
+    # 2 matplotlib sub-rows per logical row, 2*ncols_half cols total
+    total_rows = nrows_M * 2
+    total_cols = ncols_half * 2
+
+    fig = plt.figure(figsize=(total_cols * 4.5, total_rows * 3))
+    fig.suptitle(
+        f"W2 Homogeneity vs Ge-77 Recall / Precision  (W = {W_default})\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        logical_col = pi % ncols_half
+        logical_row = pi // ncols_half
+
+        for mi, (metric_fn, metric_name, col_offset) in enumerate([
+            (_recall,    "Recall",    0),
+            (_precision, "Precision", ncols_half),
+        ]):
+            col = logical_col + col_offset
+            scatter_row = logical_row * 2
+            resid_row   = logical_row * 2 + 1
+
+            ax_scatter = fig.add_subplot(
+                total_rows, total_cols,
+                scatter_row * total_cols + col + 1,
+            )
+            ax_resid = fig.add_subplot(
+                total_rows, total_cols,
+                resid_row * total_cols + col + 1,
+                sharex=ax_scatter,
+            )
+
+            y_arr = np.array([metric_fn(cfg, M, W_default) for cfg in w2_cfgs])
+
+            _regression_overlay(
+                ax_scatter, ax_resid,
+                w2_arr, y_arr,
+                color_pts, labels,
+                y_label=f"{metric_name} (M≥{M}, W≥{W_default})",
+            )
+            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=8)
+            ax_scatter.set_ylim(-0.05, 1.05)
+            ax_scatter.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
+            )
+            ax_resid.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+            )
+            plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    out_path = output_dir / "w2_muon_correlation.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot C — Correlation matrix (Pearson + Spearman)
+# ===================================================================
+
+def plot_w2_correlation_matrix(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    M_default: int,
+    W_default: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot C — Pearson and Spearman correlation matrices.
+
+    Variables: W2, NC_frac at each M, Recall and Precision at
+    (M_default, W_default).  Two heatmap subplots side-by-side.
+    """
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    if len(w2_cfgs) < 3:
+        if verbose:
+            print("  w2_correlation_matrix: fewer than 3 configs have W2 — skipped.")
+        return
+
+    # Build variable matrix
+    var_names = ["W2"] + [f"NC_M{M}" for M in M_values] + [
+        f"Recall\nM{M_default}W{W_default}",
+        f"Precision\nM{M_default}W{W_default}",
+    ]
+    data_rows = []
+    for cfg in w2_cfgs:
+        row = [cfg.w2]
+        row += [_nc_frac(cfg, M) for M in M_values]
+        row += [_recall(cfg, M_default, W_default),
+                _precision(cfg, M_default, W_default)]
+        data_rows.append(row)
+
+    X = np.array(data_rows)   # shape (n_cfgs, n_vars)
+    nv = len(var_names)
+
+    pearson_mat  = np.full((nv, nv), np.nan)
+    spearman_mat = np.full((nv, nv), np.nan)
+    pval_p_mat   = np.full((nv, nv), np.nan)
+    pval_s_mat   = np.full((nv, nv), np.nan)
+
+    for i in range(nv):
+        for j in range(nv):
+            if i == j:
+                pearson_mat[i, j] = spearman_mat[i, j] = 1.0
+                pval_p_mat[i, j]  = pval_s_mat[i, j]  = 0.0
+                continue
+            r,   pr  = scipy_stats.pearsonr(X[:, i],  X[:, j])
+            rho, prs = scipy_stats.spearmanr(X[:, i], X[:, j])
+            pearson_mat[i, j]  = r
+            spearman_mat[i, j] = rho
+            pval_p_mat[i, j]   = pr
+            pval_s_mat[i, j]   = prs
+
+    fig, (ax_p, ax_s) = plt.subplots(
+        1, 2,
+        figsize=(max(14, nv * 1.1) * 2, max(10, nv * 1.0)),
+    )
+    fig.suptitle(
+        f"Correlation Matrices  (n = {len(w2_cfgs)} configs)\n"
+        f"Muon metrics at M={M_default}, W={W_default}",
+        fontsize=12,
+    )
+
+    for ax, mat, pmat, title in [
+        (ax_p, pearson_mat,  pval_p_mat,  "Pearson r"),
+        (ax_s, spearman_mat, pval_s_mat,  "Spearman ρ"),
+    ]:
+        im = ax.imshow(mat, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
+        plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+
+        for i in range(nv):
+            for j in range(nv):
+                val = mat[i, j]
+                if np.isnan(val):
+                    continue
+                p   = pmat[i, j]
+                sig = "**" if p < 0.01 else ("*" if p < 0.05 else "")
+                txt = f"{val:+.2f}{sig}"
+                tc  = "white" if abs(val) > 0.6 else "black"
+                ax.text(j, i, txt, ha="center", va="center",
+                        fontsize=7, color=tc, fontweight="bold")
+
+        ax.set_xticks(range(nv))
+        ax.set_yticks(range(nv))
+        ax.set_xticklabels(var_names, rotation=45, ha="right", fontsize=8)
+        ax.set_yticklabels(var_names, fontsize=8)
+        ax.set_title(title, fontsize=11)
+
+    fig.text(0.5, 0.01, "* p<0.05   ** p<0.01",
+             ha="center", fontsize=8, fontstyle="italic")
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    out_path = output_dir / "w2_correlation_matrix.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot D — Coverage profile colored by W2
+# ===================================================================
+
+def plot_w2_coverage_profile(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot D — NC detection fraction vs M, one line per config colored by W2.
+
+    Lines are colored on a continuous blue→red colormap (blue = low W2 =
+    uniform; red = high W2 = clustered).  Configs without W2 are drawn
+    in gray with a dashed line.  A colorbar on the right shows the W2
+    scale.
+    """
+    w2_cfgs  = [cfg for cfg in configs if cfg.w2 is not None]
+    gray_cfgs = [cfg for cfg in configs if cfg.w2 is None]
+
+    if not w2_cfgs:
+        if verbose:
+            print("  w2_coverage_profile: no configs have W2 — skipped.")
+        return
+
+    w2_vals = np.array([cfg.w2 for cfg in w2_cfgs])
+    w2_min, w2_max = w2_vals.min(), w2_vals.max()
+    cmap = plt.cm.coolwarm_r   # blue=low W2, red=high W2
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    norm = plt.Normalize(vmin=w2_min, vmax=w2_max if w2_max > w2_min else w2_min + 1)
+
+    for cfg in gray_cfgs:
+        ys = [_nc_frac(cfg, M) for M in M_values]
+        ax.plot(M_values, ys, color="gray", linewidth=1.0,
+                linestyle="--", alpha=0.6, label=cfg.label)
+
+    for cfg in w2_cfgs:
+        color = cmap(norm(cfg.w2))
+        ys = [_nc_frac(cfg, M) for M in M_values]
+        ax.plot(M_values, ys, color=color, linewidth=1.8,
+                marker="o", markersize=4, label=cfg.label)
+        # Label at rightmost point
+        ax.annotate(
+            cfg.label, xy=(M_values[-1], ys[-1]),
+            xytext=(4, 0), textcoords="offset points",
+            fontsize=6, color=color, va="center",
+        )
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, pad=0.01)
+    cbar.set_label("Global W2 (mm)  [blue=uniform, red=clustered]", fontsize=9)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("NC detection fraction", fontsize=11)
+    ax.set_title(
+        "NC Coverage Profile Colored by W2 Homogeneity\n"
+        "(systematic shift reveals W2–coverage relationship)",
+        fontsize=12,
+    )
+    ax.set_xticks(M_values)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+    )
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    out_path = output_dir / "w2_coverage_profile.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot E — Spearman ρ vs M
+# ===================================================================
+
+def plot_w2_spearman_vs_m(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_default: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot E — Spearman ρ between W2 and each metric as a function of M.
+
+    Three lines on one axes:
+      - ρ(W2, NC_fraction_M)
+      - ρ(W2, Recall at (M, W_default))
+      - ρ(W2, Precision at (M, W_default))
+
+    A shaded band marks the ±0.3 'weak correlation' zone.
+    Markers are filled for p<0.05, hollow for p≥0.05.
+    """
+    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    if len(w2_cfgs) < 3:
+        if verbose:
+            print("  w2_spearman_vs_m: fewer than 3 configs have W2 — skipped.")
+        return
+
+    w2_arr = np.array([cfg.w2 for cfg in w2_cfgs])
+
+    rho_nc   = []
+    rho_rec  = []
+    rho_prec = []
+    p_nc   = []
+    p_rec  = []
+    p_prec = []
+
+    for M in M_values:
+        nc_arr   = np.array([_nc_frac(cfg, M) for cfg in w2_cfgs])
+        rec_arr  = np.array([_recall(cfg, M, W_default) for cfg in w2_cfgs])
+        prec_arr = np.array([_precision(cfg, M, W_default) for cfg in w2_cfgs])
+
+        r1, p1 = scipy_stats.spearmanr(w2_arr, nc_arr)
+        r2, p2 = scipy_stats.spearmanr(w2_arr, rec_arr)
+        r3, p3 = scipy_stats.spearmanr(w2_arr, prec_arr)
+
+        rho_nc.append(r1);   p_nc.append(p1)
+        rho_rec.append(r2);  p_rec.append(p2)
+        rho_prec.append(r3); p_prec.append(p3)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    x = np.array(M_values)
+    ax.axhline(0,  color="black", linewidth=0.8)
+    ax.axhspan(-0.3, 0.3, color="gray", alpha=0.08, label="weak |ρ|<0.3")
+
+    for rhos, ps, label, color, marker in [
+        (rho_nc,   p_nc,   "NC fraction",              "#1f77b4", "o"),
+        (rho_rec,  p_rec,  f"Recall (W={W_default})",  "#d62728", "s"),
+        (rho_prec, p_prec, f"Precision (W={W_default})","#2ca02c", "^"),
+    ]:
+        rhos = np.array(rhos)
+        ps   = np.array(ps)
+        sig_mask  = ps < 0.05
+        # Filled markers for significant, hollow for non-significant
+        ax.plot(x, rhos, color=color, linewidth=1.5, label=label)
+        if sig_mask.any():
+            ax.scatter(x[sig_mask],  rhos[sig_mask],
+                       color=color, s=60, marker=marker,
+                       zorder=4, label=f"{label} (p<0.05)")
+        if (~sig_mask).any():
+            ax.scatter(x[~sig_mask], rhos[~sig_mask],
+                       facecolors="none", edgecolors=color,
+                       s=60, marker=marker, linewidth=1.2,
+                       zorder=4)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("Spearman ρ  (W2 vs metric)", fontsize=11)
+    ax.set_title(
+        f"Spearman Correlation between W2 and Coverage Metrics vs M\n"
+        f"(filled = p<0.05 significant | W_default = {W_default})",
+        fontsize=12,
+    )
+    ax.set_xticks(M_values)
+    ax.set_ylim(-1.1, 1.1)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    out_path = output_dir / "w2_spearman_vs_m.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
@@ -1229,6 +1707,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--M-default", type=int, default=1,
                         help="Default M threshold used in the NC detectability "
                              "overview plot (Plot 03).")
+    parser.add_argument("--W-default", type=int, default=6,
+                        help="Default W threshold used in muon correlation "
+                             "and matrix plots.")
     parser.add_argument("--W-max", type=int, default=20,
                         help="Maximum W value to evaluate.")
 
@@ -1478,12 +1959,30 @@ def main(argv: Optional[list[str]] = None) -> None:
     # Recall / Precision M×W sweep (Plots 10 & 11)
     plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
 
-    # W2 vs coverage plots
+    # W2 vs coverage plots (existing stem plots)
     plot_w2_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
     plot_muon_w2_scatter(
         all_configs, M_values, W_values, output_dir,
         num_ge77_muons=ed.num_ge77_muons,
         verbose=verbose,
+    )
+
+    # W2 correlation analysis (Plots A–E)
+    plot_w2_nc_correlation(
+        all_configs, M_values, output_dir, verbose=verbose,
+    )
+    plot_w2_muon_correlation(
+        all_configs, M_values, args.W_default, output_dir, verbose=verbose,
+    )
+    plot_w2_correlation_matrix(
+        all_configs, M_values, args.M_default, args.W_default,
+        output_dir, verbose=verbose,
+    )
+    plot_w2_coverage_profile(
+        all_configs, M_values, output_dir, verbose=verbose,
+    )
+    plot_w2_spearman_vs_m(
+        all_configs, M_values, args.W_default, output_dir, verbose=verbose,
     )
 
     if verbose:
