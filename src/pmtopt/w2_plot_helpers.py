@@ -49,15 +49,22 @@ def regression_overlay(
         )
 
     # ── correlation statistics ────────────────────────────────────────
-    if n >= 3:
-        r_val,  p_r   = scipy_stats.pearsonr(w2_arr,  y_arr)
-        rho,    p_rho = scipy_stats.spearmanr(w2_arr, y_arr)
-        ann = (
-            f"Pearson  r = {r_val:+.3f}  (p={p_r:.3g})\n"
-            f"Spearman ρ = {rho:+.3f}  (p={p_rho:.3g})"
-        )
-    else:
+    # Guard against constant arrays: pearsonr raises ValueError in scipy≥1.9
+    # when either input has zero variance; spearmanr returns NaN with a warning.
+    if n >= 3 and np.std(w2_arr) > 0 and np.std(y_arr) > 0:
+        try:
+            r_val, p_r   = scipy_stats.pearsonr(w2_arr,  y_arr)
+            rho,   p_rho = scipy_stats.spearmanr(w2_arr, y_arr)
+            ann = (
+                f"Pearson  r = {r_val:+.3f}  (p={p_r:.3g})\n"
+                f"Spearman ρ = {rho:+.3f}  (p={p_rho:.3g})"
+            )
+        except ValueError:
+            ann = "constant data — no stats"
+    elif n < 3:
         ann = "n < 3 — no stats"
+    else:
+        ann = "constant data — no stats"
 
     ax_scatter.text(
         0.03, 0.97, ann,
@@ -68,7 +75,7 @@ def regression_overlay(
     )
 
     # ── OLS regression line + 95 % CI ────────────────────────────────
-    if n >= 3:
+    if n >= 3 and np.std(w2_arr) > 0 and np.std(y_arr) > 0:
         slope, intercept, *_ = scipy_stats.linregress(w2_arr, y_arr)
         x_fit  = np.linspace(w2_arr.min(), w2_arr.max(), 200)
         y_fit  = slope * x_fit + intercept

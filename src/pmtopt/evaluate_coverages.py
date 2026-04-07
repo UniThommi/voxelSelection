@@ -1446,8 +1446,13 @@ def plot_w2_correlation_matrix(
                 pearson_mat[i, j] = spearman_mat[i, j] = 1.0
                 pval_p_mat[i, j]  = pval_s_mat[i, j]  = 0.0
                 continue
-            r,   pr  = scipy_stats.pearsonr(X[:, i],  X[:, j])
-            rho, prs = scipy_stats.spearmanr(X[:, i], X[:, j])
+            if np.std(X[:, i]) == 0 or np.std(X[:, j]) == 0:
+                continue  # constant column — leave as NaN
+            try:
+                r,   pr  = scipy_stats.pearsonr(X[:, i],  X[:, j])
+                rho, prs = scipy_stats.spearmanr(X[:, i], X[:, j])
+            except ValueError:
+                continue
             pearson_mat[i, j]  = r
             spearman_mat[i, j] = rho
             pval_p_mat[i, j]   = pr
