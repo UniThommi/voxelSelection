@@ -781,11 +781,13 @@ def plot_confusion_bar(
 
     ax.set_xticks(x)
     ax.set_xticklabels(categories, fontsize=9)
-    ax.set_ylabel("Number of Muons")
+    ax.set_ylabel("Number of Muons (log scale)")
     ax.set_title(
         f"Ge-77 Muon Classification (W≥{W_default}, M≥{M_default})\n"
         "(only muons with ≥1 NC)"
     )
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=1)
     ax.legend()
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
@@ -1793,19 +1795,26 @@ def main() -> None:
     # ── 6. Generate plots ─────────────────────────────────────────────
     print("Generating plots ...")
     plot_nc_coverage_line(results, M_values, args.output_dir)
-    plot_nc_multiplicity_histogram(results, M_default, args.output_dir)
+    # Multiplicity histogram — secondary diagnostic, omitted from main output:
+    # plot_nc_multiplicity_histogram(results, M_default, args.output_dir)
     plot_nc_detectability_overview(results, M_default, args.output_dir)
     plot_ge77_muon_overview(results, M_default, W_default, args.output_dir)
-    plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
+    # Heatmaps: only M=1,3,5,10 — sufficient to show the (M,W) trade-off.
+    _heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
+    plot_muon_heatmaps(results, _heatmap_ms, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
-    plot_w_histogram(results, M_default, W_default, args.output_dir)
+    # W histogram — too noisy at this scale, omitted:
+    # plot_w_histogram(results, M_default, W_default, args.output_dir)
     # M×W sweep (omitted — heatmaps provide a clearer 2D view):
     # plot_mw_sweep(results, M_values, W_values, args.output_dir)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
-    # W2 correlation analysis (Plots A–E)
-    plot_w2_nc_correlation(results, M_values, args.output_dir)
-    plot_w2_muon_correlation(results, M_values, W_default, args.output_dir)
+    # W2 correlation analysis
+    # nc_correlation: only M=1..4 where the relationship is statistically significant.
+    _corr_ms = [m for m in M_values if m <= 4]
+    plot_w2_nc_correlation(results, _corr_ms, args.output_dir)
+    # muon_correlation: large 30-panel grid — omitted; Spearman summary covers it.
+    # plot_w2_muon_correlation(results, M_values, W_default, args.output_dir)
     plot_w2_correlation_matrix(results, M_values, M_default, W_default, args.output_dir)
     plot_w2_coverage_profile(results, M_values, args.output_dir)
     plot_w2_spearman_vs_m(results, M_values, W_default, args.output_dir)

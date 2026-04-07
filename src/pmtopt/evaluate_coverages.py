@@ -1968,17 +1968,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     # NC coverage line plot (log + linear, two panels)
     plot_nc_coverage(all_configs, args.M_max, output_dir, verbose=verbose)
 
-    # NC coverage bar chart (additional, same data as bar groups per M)
-    plot_nc_coverage_bars(all_configs, args.M_max, output_dir, verbose=verbose)
+    # NC coverage bar chart — redundant with line plot, omitted:
+    # plot_nc_coverage_bars(all_configs, args.M_max, output_dir, verbose=verbose)
 
     # NC detectability overview — absolute + Δ vs Baseline (Plot 03)
     plot_nc_detectability_overview(
         all_configs, args.M_default, output_dir, verbose=verbose
     )
 
-    # Muon heatmaps
+    # Muon heatmaps: only M=1,3,5,10 — sufficient to show the (M,W) trade-off.
+    _heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
     plot_muon_heatmaps(
-        all_configs, M_values, W_values, output_dir,
+        all_configs, _heatmap_ms, W_values, output_dir,
         num_ge77_muons=ed.num_ge77_muons,
         total_muons=ed.total_muons,
         verbose=verbose,
@@ -2005,13 +2006,16 @@ def main(argv: Optional[list[str]] = None) -> None:
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,
                     verbose=verbose)
 
-    # W2 correlation analysis (Plots A–E)
+    # W2 correlation analysis
+    # nc_correlation: only M=1..4 where the relationship is statistically significant.
+    _corr_ms = [m for m in M_values if m <= 4]
     plot_w2_nc_correlation(
-        all_configs, M_values, output_dir, verbose=verbose,
+        all_configs, _corr_ms, output_dir, verbose=verbose,
     )
-    plot_w2_muon_correlation(
-        all_configs, M_values, args.W_default, output_dir, verbose=verbose,
-    )
+    # muon_correlation: large grid — omitted; Spearman summary covers it.
+    # plot_w2_muon_correlation(
+    #     all_configs, M_values, args.W_default, output_dir, verbose=verbose,
+    # )
     plot_w2_correlation_matrix(
         all_configs, M_values, args.M_default, args.W_default,
         output_dir, verbose=verbose,
