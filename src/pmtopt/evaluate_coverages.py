@@ -65,6 +65,11 @@ W_VALUES = list(range(1, 21))   # W = 1..20
 # Scatter plot selection — always include M=4,5,6
 _SCATTER_M_VALUES = [1, 2, 4, 5, 6, 8, 10]
 
+# Name of the "all voxels" reference config — excluded from all statistical
+# evaluations (regression, Spearman, Pearson, correlation matrices).
+# It may appear only as a visual reference line in profile/line plots.
+_ALL_VOXELS_NAME = "all_voxels"
+
 
 # ===================================================================
 # Data structures
@@ -1001,72 +1006,89 @@ def write_nc_summary_txt(
 # ===================================================================
 
 
-def plot_w2_coverage_scatter(
+def plot_w2_scatter(
     configs: list[ConfigResult],
     M_values: list[int],
     output_dir: Path,
+    M_fixed: int = 1,
+    W_fixed: int = 1,
     verbose: bool = True,
 ) -> None:
-    """One subplot per selected M — global W2 (x) vs detected NCs (y).
-    Each setup shown as a vertical stem + dot. Shared legend with setup names."""
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    """Three-panel W2 scatter figure at fixed (M_fixed, W_fixed).
 
+    Panel 1 — W2 vs NC coverage fraction for multiple M thresholds
+               (colored by M value; individual setups annotated).
+    Panel 2 — W2 vs Recall at (M_fixed, W_fixed), per-setup colours.
+    Panel 3 — W2 vs Precision at (M_fixed, W_fixed), per-setup colours.
+
+    The "all_voxels" reference config is excluded from all panels
+    (it has no W2 and would bias any visual trend).  OLS regression
+    lines are overlaid on panels 2 and 3.
+    """
+    w2_cfgs = [cfg for cfg in configs
+               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
     if len(w2_cfgs) < 2:
+        if verbose:
+            print("  w2_scatter: fewer than 2 configs with W2 — skipped.")
         return
 
-    colors = _get_colors(len(w2_cfgs))
-    color_map = {cfg.name: colors[i] for i, cfg in enumerate(w2_cfgs)}
+    w2_vals = np.array([cfg.w2 for cfg in w2_cfgs])
+    setup_colors = _get_colors(len(w2_cfgs))
+    color_map = {cfg.name: setup_colors[i] for i, cfg in enumerate(w2_cfgs)}
 
-    scatter_ms = list(M_values)
+    # M values shown in panel 1 (NC coverage across multiple thresholds)
+    panel1_ms = sorted({M for M in [1, 2, 4, 5, 10] if M in M_values})
+    m_colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(panel1_ms)))
 
-    ncols = 3
-    nrows = (len(scatter_ms) + ncols - 1) // ncols
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 4.5))
-    axes_flat = np.array(axes).flatten()
-
-    legend_handles = []
-
-    for pi, M in enumerate(scatter_ms):
-        ax = axes_flat[pi]
-
-        for cfg in w2_cfgs:
-            color = color_map[cfg.name]
-            w2 = cfg.w2
-            count = cfg.num_detected.get(M, 0)
-            ax.plot([w2, w2], [0, count], color=color, linewidth=1.8, alpha=0.7)
-            ax.scatter([w2], [count], color=color, s=60, zorder=3)
-            if pi == 0:
-                legend_handles.append(
-                    plt.Line2D([0], [0], color=color, marker="o", markersize=6,
-                               label=_config_label(cfg), linewidth=1.5)
-                )
-
-        ax.set_xlabel("Global W2 (mm)", fontsize=9)
-        ax.set_ylabel("Detected NCs", fontsize=9)
-        ax.set_title(f"M ≥ {M}", fontsize=10)
-        ax.set_ylim(bottom=0)
-        ax.grid(alpha=0.3)
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
-
-    for pi in range(len(scatter_ms), len(axes_flat)):
-        axes_flat[pi].set_visible(False)
-
-    fig.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=min(len(w2_cfgs), 4),
-        fontsize=8,
-        bbox_to_anchor=(0.5, 0.0),
-        framealpha=0.9,
-    )
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
     fig.suptitle(
-        "NC Coverage vs Global W2 Homogeneity\n"
-        "(vertical stem per setup, one panel per M threshold)",
-        fontsize=12,
+        f"W2 Homogeneity vs Performance  (M={M_fixed}, W={W_fixed})",
+        fontsize=13, fontweight="bold",
     )
-    plt.tight_layout(rect=[0, 0.06, 1, 1])
-    out_path = output_dir / "w2_coverage_scatter.png"
+
+    # ── Panel 1: W2 vs NC fraction for multiple M thresholds ─────────
+    ax = axes[0]
+    for sM, cm in zip(panel1_ms, m_colors):
+        fracs = np.array([_nc_frac(cfg, sM) for cfg in w2_cfgs])
+        ax.scatter(w2_vals, fracs, color=cm, s=55, zorder=3, label=f"M={sM}")
+        for cfg, w2v, frac in zip(w2_cfgs, w2_vals, fracs):
+            ax.annotate(cfg.label, xy=(w2v, frac), xytext=(4, 2),
+                        textcoords="offset points", fontsize=6, color=cm)
+    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=10)
+    ax.set_ylabel("NC detection fraction", fontsize=10)
+    ax.set_title("W2 vs NC Coverage", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.legend(title="M threshold", fontsize=8, title_fontsize=8)
+    ax.grid(alpha=0.3)
+
+    # ── Panels 2 & 3: W2 vs Recall / Precision with OLS line ─────────
+    for ax, metric_fn, ylabel, title in [
+        (axes[1], _recall,    "Recall",    f"W2 vs Recall  (M={M_fixed}, W={W_fixed})"),
+        (axes[2], _precision, "Precision", f"W2 vs Precision  (M={M_fixed}, W={W_fixed})"),
+    ]:
+        y_vals = np.array([metric_fn(cfg, M_fixed, W_fixed) for cfg in w2_cfgs])
+        for cfg, w2v, yv in zip(w2_cfgs, w2_vals, y_vals):
+            c = color_map[cfg.name]
+            ax.scatter([w2v], [yv], color=c, s=70, zorder=3)
+            ax.annotate(cfg.label, xy=(w2v, yv), xytext=(4, 3),
+                        textcoords="offset points", fontsize=7, color=c)
+
+        # OLS regression line (if enough variance)
+        if len(w2_vals) >= 3 and np.std(w2_vals) > 0 and np.std(y_vals) > 0:
+            slope, intercept, *_ = scipy_stats.linregress(w2_vals, y_vals)
+            x_fit = np.linspace(w2_vals.min(), w2_vals.max(), 200)
+            ax.plot(x_fit, slope * x_fit + intercept,
+                    color="black", linewidth=1.2, linestyle="--", zorder=2,
+                    label="OLS fit")
+
+        ax.set_xlabel("Global W2 (mm)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+        ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    out_path = output_dir / f"w2_scatter_M{M_fixed}_W{W_fixed}.png"
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
     if verbose:
@@ -1242,7 +1264,8 @@ def plot_w2_nc_correlation(
     sharing the x-axis.  OLS regression line with 95 % CI is overlaid.
     Pearson r and Spearman ρ with p-values are annotated.
     """
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    w2_cfgs = [cfg for cfg in configs
+               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
     if len(w2_cfgs) < 2:
         if verbose:
             print("  w2_nc_correlation: fewer than 2 configs have W2 — skipped.")
@@ -1321,7 +1344,8 @@ def plot_w2_muon_correlation(
     Layout: 4 rows × 6 cols (Recall on left 3 cols, Precision on right 3 cols).
     Each cell = scatter (top) + residual (bottom).
     """
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    w2_cfgs = [cfg for cfg in configs
+               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
     if len(w2_cfgs) < 2:
         if verbose:
             print("  w2_muon_correlation: fewer than 2 configs have W2 — skipped.")
@@ -1413,7 +1437,8 @@ def plot_w2_correlation_matrix(
     Variables: W2, NC_frac at each M, Recall and Precision at
     (M_default, W_default).  Two heatmap subplots side-by-side.
     """
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    w2_cfgs = [cfg for cfg in configs
+               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
     if len(w2_cfgs) < 3:
         if verbose:
             print("  w2_correlation_matrix: fewer than 3 configs have W2 — skipped.")
@@ -1521,8 +1546,13 @@ def plot_w2_coverage_profile(
     in gray with a dashed line.  A colorbar on the right shows the W2
     scale.
     """
-    w2_cfgs  = [cfg for cfg in configs if cfg.w2 is not None]
-    gray_cfgs = [cfg for cfg in configs if cfg.w2 is None]
+    # "all_voxels" is drawn as a distinct black reference line — not included
+    # in the colormap scaling or any statistical computation.
+    ref_cfg   = next((cfg for cfg in configs if cfg.name == _ALL_VOXELS_NAME), None)
+    w2_cfgs   = [cfg for cfg in configs
+                 if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
+    gray_cfgs = [cfg for cfg in configs
+                 if cfg.w2 is None and cfg.name != _ALL_VOXELS_NAME]
 
     if not w2_cfgs:
         if verbose:
@@ -1536,6 +1566,12 @@ def plot_w2_coverage_profile(
     fig, ax = plt.subplots(figsize=(10, 6))
 
     norm = plt.Normalize(vmin=w2_min, vmax=w2_max if w2_max > w2_min else w2_min + 1)
+
+    # All-voxels reference line (visual upper bound only)
+    if ref_cfg is not None:
+        ys_ref = [_nc_frac(ref_cfg, M) for M in M_values]
+        ax.plot(M_values, ys_ref, color="black", linewidth=2.0,
+                linestyle="--", alpha=0.7, label="All voxels (max. reference)", zorder=5)
 
     for cfg in gray_cfgs:
         ys = [_nc_frac(cfg, M) for M in M_values]
@@ -1602,7 +1638,8 @@ def plot_w2_spearman_vs_m(
     A shaded band marks the ±0.3 'weak correlation' zone.
     Markers are filled for p<0.05, hollow for p≥0.05.
     """
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+    w2_cfgs = [cfg for cfg in configs
+               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
     if len(w2_cfgs) < 3:
         if verbose:
             print("  w2_spearman_vs_m: fewer than 3 configs have W2 — skipped.")
@@ -1961,16 +1998,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         ratio_override_warning=ratio_override_warning,
     )
 
-    # Recall / Precision M×W sweep (Plots 10 & 11)
-    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
+    # M×W sweep (omitted — heatmaps provide a clearer 2D view):
+    # plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
 
-    # W2 vs coverage plots (existing stem plots)
-    plot_w2_coverage_scatter(all_configs, M_values, output_dir, verbose=verbose)
-    plot_muon_w2_scatter(
-        all_configs, M_values, W_values, output_dir,
-        num_ge77_muons=ed.num_ge77_muons,
-        verbose=verbose,
-    )
+    # W2 vs performance scatter (three-panel, M=1/W=1 only)
+    plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,
+                    verbose=verbose)
 
     # W2 correlation analysis (Plots A–E)
     plot_w2_nc_correlation(

@@ -1001,89 +1001,6 @@ def plot_mw_sweep(
 # ──────────────────────────────────────────────────────────────────────
 # Plot 12 — W2 vs NC coverage scatter (optional)
 # ──────────────────────────────────────────────────────────────────────
-def _w2_scatter_figure(
-    w2_results: list[SetupResult],
-    all_results: list[SetupResult],
-    scatter_M: list[int],
-    M: int,
-    W: int,
-    output_dir: str,
-    fname: str,
-) -> None:
-    """Draw and save one W2 scatter figure for fixed (M, W).
-
-    Panel 1 — W2 vs NC coverage for multiple M values (M-series colours).
-    Panel 2 — W2 vs Recall at (M, W) with per-setup palette colours.
-    Panel 3 — W2 vs Precision at (M, W) with per-setup palette colours.
-    """
-    w2_vals = np.array([r.w2 for r in w2_results])
-    # Per-setup colours derived from the global results list so they match
-    # every other non-heatmap plot.
-    setup_colors = [_setup_color(all_results, r) for r in w2_results]
-    colors_m = plt.cm.plasma(np.linspace(0.1, 0.9, len(scatter_M)))
-
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-    fig.suptitle(f"W2 homogeneity vs Performance  (M={M}, W={W})", fontsize=12)
-
-    # Panel 1: W2 vs NC coverage at multiple M values
-    ax = axes[0]
-    for sM, cm in zip(scatter_M, colors_m):
-        cov = np.array([
-            r.nc["nc_detected"][sM] / max(r.nc["nc_total"], 1)
-            for r in w2_results
-        ])
-        ax.scatter(w2_vals, cov, color=cm, label=f"M={sM}", zorder=3, s=60)
-        for r, w2v, c in zip(w2_results, w2_vals, cov):
-            ax.annotate(r.label, xy=(w2v, c), xytext=(4, 2),
-                        textcoords="offset points", fontsize=7, color=cm)
-    ax.set_xlabel("W2 (mm) — lower = more uniform")
-    ax.set_ylabel("NC detection fraction")
-    ax.set_title("W2 vs NC Coverage")
-    ax.legend(title="M", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: W2 vs Recall at (M, W) — per-setup colours
-    ax = axes[1]
-    for r, w2v, c in zip(w2_results, w2_vals, setup_colors):
-        m = compute_metrics(
-            r.muon["confusion"][(M, W)]["TP"],
-            r.muon["confusion"][(M, W)]["FP"],
-            r.muon["confusion"][(M, W)]["TN"],
-            r.muon["confusion"][(M, W)]["FN"],
-        )
-        ax.scatter([w2v], [m["Recall"]], color=c, s=80, zorder=3, label=r.label)
-        ax.annotate(r.label, xy=(w2v, m["Recall"]), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8, color=c)
-    ax.set_xlabel("W2 (mm)")
-    ax.set_ylabel("Recall")
-    ax.set_title(f"W2 vs Recall (M={M}, W={W})")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: W2 vs Precision at (M, W) — per-setup colours
-    ax = axes[2]
-    for r, w2v, c in zip(w2_results, w2_vals, setup_colors):
-        m = compute_metrics(
-            r.muon["confusion"][(M, W)]["TP"],
-            r.muon["confusion"][(M, W)]["FP"],
-            r.muon["confusion"][(M, W)]["TN"],
-            r.muon["confusion"][(M, W)]["FN"],
-        )
-        ax.scatter([w2v], [m["Precision"]], color=c, s=80, zorder=3, label=r.label)
-        ax.annotate(r.label, xy=(w2v, m["Precision"]), xytext=(4, 2),
-                    textcoords="offset points", fontsize=8, color=c)
-    ax.set_xlabel("W2 (mm)")
-    ax.set_ylabel("Precision")
-    ax.set_title(f"W2 vs Precision (M={M}, W={W})")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
-    plt.close(fig)
-    print(f"  Saved {fname}")
-
-
 def plot_w2_scatter(
     results: list[SetupResult],
     M_values: list[int],
@@ -1091,24 +1008,95 @@ def plot_w2_scatter(
     W_default: int,
     W_values: list[int],
     output_dir: str,
+    M_fixed: int = 1,
+    W_fixed: int = 1,
 ) -> None:
-    """W2 scatter plots for multiple (M, W) combinations — one file each."""
+    """Three-panel W2 scatter figure at fixed (M_fixed, W_fixed) — one file.
+
+    Panel 1 — W2 vs NC coverage fraction for multiple M thresholds
+               (colored by M; per-setup point annotations).
+    Panel 2 — W2 vs Recall at (M_fixed, W_fixed), per-setup colours + OLS.
+    Panel 3 — W2 vs Precision at (M_fixed, W_fixed), per-setup colours + OLS.
+    """
     w2_results = [r for r in results if r.w2 is not None]
     if len(w2_results) < 2:
-        print("  [SKIP] 09_w2_scatter*.png: fewer than 2 configs have W2.")
+        print("  [SKIP] 09_w2_scatter*.png: fewer than 2 setups have W2.")
         return
 
-    # M values shown in the NC-coverage panel of every figure
-    scatter_M = sorted(set(M for M in [1, 2, 4, M_default, max(M_values)] if M in M_values))
+    w2_vals = np.array([r.w2 for r in w2_results])
+    setup_colors = [_setup_color(results, r) for r in w2_results]
 
-    # (M, W) combinations for which we generate separate files
-    candidate_M = sorted(set(M for M in [1, 2, 4, M_default] if M in M_values))
-    candidate_W = sorted(set(W for W in [1, 2, 5, W_default] if W in W_values))
-    mw_combos = [(M, W) for M in candidate_M for W in candidate_W]
+    # M values shown in panel 1 (NC coverage across multiple thresholds)
+    panel1_ms = sorted({M for M in [1, 2, 4, 5, 10] if M in M_values})
+    m_colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(panel1_ms)))
 
-    for M, W in mw_combos:
-        fname = f"09_w2_scatter_M{M:02d}_W{W:02d}.png"
-        _w2_scatter_figure(w2_results, results, scatter_M, M, W, output_dir, fname)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    fig.suptitle(
+        f"W2 Homogeneity vs Performance  (M={M_fixed}, W={W_fixed})",
+        fontsize=13, fontweight="bold",
+    )
+
+    # ── Panel 1: W2 vs NC fraction for multiple M thresholds ──────────
+    ax = axes[0]
+    for sM, cm in zip(panel1_ms, m_colors):
+        fracs = np.array([
+            r.nc["nc_detected"][sM] / max(r.nc["nc_total"], 1)
+            for r in w2_results
+        ])
+        ax.scatter(w2_vals, fracs, color=cm, s=55, zorder=3, label=f"M={sM}")
+        for r, w2v, frac in zip(w2_results, w2_vals, fracs):
+            ax.annotate(r.label, xy=(w2v, frac), xytext=(4, 2),
+                        textcoords="offset points", fontsize=6, color=cm)
+    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=10)
+    ax.set_ylabel("NC detection fraction", fontsize=10)
+    ax.set_title("W2 vs NC Coverage", fontsize=11)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.legend(title="M threshold", fontsize=8, title_fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # ── Panels 2 & 3: W2 vs Recall / Precision with OLS line ──────────
+    for ax, metric_key, ylabel, title in [
+        (axes[1], "Recall",    "Recall",
+         f"W2 vs Recall  (M={M_fixed}, W={W_fixed})"),
+        (axes[2], "Precision", "Precision",
+         f"W2 vs Precision  (M={M_fixed}, W={W_fixed})"),
+    ]:
+        y_vals = np.array([
+            compute_metrics(
+                r.muon["confusion"][(M_fixed, W_fixed)]["TP"],
+                r.muon["confusion"][(M_fixed, W_fixed)]["FP"],
+                r.muon["confusion"][(M_fixed, W_fixed)]["TN"],
+                r.muon["confusion"][(M_fixed, W_fixed)]["FN"],
+            )[metric_key]
+            for r in w2_results
+        ])
+
+        for r, w2v, yv, c in zip(w2_results, w2_vals, y_vals, setup_colors):
+            ax.scatter([w2v], [yv], color=c, s=70, zorder=3)
+            ax.annotate(r.label, xy=(w2v, yv), xytext=(4, 3),
+                        textcoords="offset points", fontsize=7, color=c)
+
+        # OLS regression line
+        if len(w2_vals) >= 3 and np.std(w2_vals) > 0 and np.std(y_vals) > 0:
+            slope, intercept, *_ = scipy_stats.linregress(w2_vals, y_vals)
+            x_fit = np.linspace(w2_vals.min(), w2_vals.max(), 200)
+            ax.plot(x_fit, slope * x_fit + intercept,
+                    color="black", linewidth=1.2, linestyle="--", zorder=2,
+                    label="OLS fit")
+
+        ax.set_xlabel("Global W2 (mm)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11)
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+        ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fname = f"09_w2_scatter_M{M_fixed:02d}_W{W_fixed:02d}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {fname}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1811,7 +1799,8 @@ def main() -> None:
     plot_muon_heatmaps(results, M_values, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     plot_w_histogram(results, M_default, W_default, args.output_dir)
-    plot_mw_sweep(results, M_values, W_values, args.output_dir)
+    # M×W sweep (omitted — heatmaps provide a clearer 2D view):
+    # plot_mw_sweep(results, M_values, W_values, args.output_dir)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
     # W2 correlation analysis (Plots A–E)
