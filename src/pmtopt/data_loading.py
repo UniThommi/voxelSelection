@@ -272,9 +272,22 @@ def load_muon_data(
         phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
 
         phi_matrix = f["phi_matrix"]
-        global_muon_id = phi_matrix[:, phi_col_idx["global_muon_id"]].astype(np.int64)
-        nc_time_ns = phi_matrix[:, phi_col_idx["nC_time_in_ns"]].astype(np.float64)
+        nc_time_ns   = phi_matrix[:, phi_col_idx["nC_time_in_ns"]].astype(np.float64)
         nc_flag_ge77 = phi_matrix[:, phi_col_idx["nC_flag_Ge77"]].astype(bool)
+
+        # Muon IDs live in event_ids.
+        # Build a globally unique muon ID from (run_id, muon_id) pairs so that
+        # the ID is unique across runs even when muon_id restarts each run.
+        event_id_cols = [c.decode() if isinstance(c, bytes) else str(c)
+                         for c in f["event_id_columns"][:]]
+        event_ids = f["event_ids"][:]
+        run_col  = event_id_cols.index("run_id")
+        muon_col = event_id_cols.index("muon_id")
+        pairs = np.stack(
+            [event_ids[:, run_col], event_ids[:, muon_col]], axis=1
+        )
+        _, global_muon_id = np.unique(pairs, axis=0, return_inverse=True)
+        global_muon_id = global_muon_id.astype(np.int64)
 
     if len(global_muon_id) != num_ncs:
         raise ValueError(
@@ -381,11 +394,17 @@ def load_nc_muon_ids(
     unique_muon_ids : np.ndarray, dtype int64
     """
     with h5py.File(filepath, "r") as f:
-        phi_columns = [c.decode() if isinstance(c, bytes) else str(c)
-                       for c in f["phi_columns"][:]]
-        phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
-        phi_matrix = f["phi_matrix"]
-        nc_global_muon_id = phi_matrix[:, phi_col_idx["global_muon_id"]].astype(np.int64)
+        # Muon IDs live in event_ids, not phi_matrix.
+        event_id_cols = [c.decode() if isinstance(c, bytes) else str(c)
+                         for c in f["event_id_columns"][:]]
+        event_ids = f["event_ids"][:]
+        run_col  = event_id_cols.index("run_id")
+        muon_col = event_id_cols.index("muon_id")
+        pairs = np.stack(
+            [event_ids[:, run_col], event_ids[:, muon_col]], axis=1
+        )
+        _, nc_global_muon_id = np.unique(pairs, axis=0, return_inverse=True)
+        nc_global_muon_id = nc_global_muon_id.astype(np.int64)
 
     if len(nc_global_muon_id) != num_ncs:
         raise RuntimeError(

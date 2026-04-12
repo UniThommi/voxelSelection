@@ -34,8 +34,14 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(args.ssd_file, "r") as f:
-        voxel_ids = sorted(f["target"].keys())
-        total_hits = np.array([np.sum(f["target"][v][:]) for v in voxel_ids])
+        voxel_ids = [c.decode() if isinstance(c, bytes) else str(c)
+                     for c in f["target_columns"][:]]
+        mat = f["target_matrix"]
+        num_ncs, num_voxels = mat.shape
+        total_hits = np.zeros(num_voxels, dtype=np.int64)
+        _BATCH = 1000
+        for _rs in range(0, num_ncs, _BATCH):
+            total_hits += mat[_rs:min(_rs + _BATCH, num_ncs), :].astype(np.int64).sum(axis=0)
 
     print(f"Total voxels: {len(total_hits)}")
     print(f"Voxels with 0 hits: {np.sum(total_hits == 0)}")

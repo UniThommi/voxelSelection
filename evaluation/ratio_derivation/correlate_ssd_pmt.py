@@ -211,11 +211,22 @@ def align_ssd_to_pmt(hdf5_path: str, nc_truth: pd.DataFrame) -> dict:
         phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
 
         phi = f["phi_matrix"]
-        global_muon_id = phi[:, phi_col_idx["global_muon_id"]].astype(np.int64)
-        nc_time_ns     = phi[:, phi_col_idx["nC_time_in_ns"]].astype(np.float64)
-        nc_flag_ge77   = phi[:, phi_col_idx["nC_flag_Ge77"]].astype(bool)
+        nc_time_ns   = phi[:, phi_col_idx["nC_time_in_ns"]].astype(np.float64)
+        nc_flag_ge77 = phi[:, phi_col_idx["nC_flag_Ge77"]].astype(bool)
 
-        # TODO: update column names when HDF5 phi_matrix schema is finalised
+        # Muon IDs live in event_ids, not phi_matrix.
+        # Build a globally unique muon ID from (run_id, muon_id) pairs.
+        event_id_cols = [c.decode() if isinstance(c, bytes) else str(c)
+                         for c in f["event_id_columns"][:]]
+        event_ids = f["event_ids"][:]
+        run_col  = event_id_cols.index("run_id")
+        muon_col = event_id_cols.index("muon_id")
+        pairs = np.stack(
+            [event_ids[:, run_col], event_ids[:, muon_col]], axis=1
+        )
+        _, global_muon_id = np.unique(pairs, axis=0, return_inverse=True)
+        global_muon_id = global_muon_id.astype(np.int64)
+
         # Key-based alignment (future): join SSD rows to nc_truth by
         # (run_id, local_muon_id, nc_id) for a bijective 1-to-1 row mapping.
         has_alignment_cols = all(

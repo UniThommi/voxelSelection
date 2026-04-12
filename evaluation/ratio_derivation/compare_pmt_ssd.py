@@ -193,8 +193,11 @@ def load_ssd_voxel_hits(voxel_ids: list) -> dict:
     hits_per_voxel: dict = {}
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        target = f["target"]
-        available_voxels = set(target.keys())
+        all_col_ids = [c.decode() if isinstance(c, bytes) else str(c)
+                       for c in f["target_columns"][:]]
+        voxel_to_col = {v: i for i, v in enumerate(all_col_ids)}
+        available_voxels = set(all_col_ids)
+        mat = f["target_matrix"]
 
         missing = [v for v in voxel_ids if v not in available_voxels]
         if missing:
@@ -205,9 +208,9 @@ def load_ssd_voxel_hits(voxel_ids: list) -> dict:
                 print(f"    ... and {len(missing) - 10} more")
 
         for voxel_id in voxel_ids:
-            if voxel_id in available_voxels:
-                hits = target[voxel_id][:]
-                hits_per_voxel[voxel_id] = int(np.sum(hits))
+            if voxel_id in voxel_to_col:
+                col = voxel_to_col[voxel_id]
+                hits_per_voxel[voxel_id] = int(mat[:, col].sum())
             else:
                 hits_per_voxel[voxel_id] = 0
 
@@ -286,10 +289,14 @@ def load_ssd_hits_per_nc(voxel_ids: list) -> dict:
     per_nc: dict = {}
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        target = f["target"]
+        all_col_ids = [c.decode() if isinstance(c, bytes) else str(c)
+                       for c in f["target_columns"][:]]
+        voxel_to_col = {v: i for i, v in enumerate(all_col_ids)}
+        mat = f["target_matrix"]
         for voxel_id in voxel_ids:
-            if voxel_id in target:
-                per_nc[voxel_id] = target[voxel_id][:]
+            if voxel_id in voxel_to_col:
+                col = voxel_to_col[voxel_id]
+                per_nc[voxel_id] = mat[:, col][:]
 
     return per_nc
 
@@ -654,23 +661,30 @@ def plot5_event_matched_correlation(
     print("  Preloading SSD target arrays...")
     ssd_target_arrays: dict = {}
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        target = f["target"]
+        all_col_ids = [c.decode() if isinstance(c, bytes) else str(c)
+                       for c in f["target_columns"][:]]
+        voxel_to_col = {v: i for i, v in enumerate(all_col_ids)}
+        mat = f["target_matrix"]
         for v in voxel_ids:
-            if v in target:
-                ssd_target_arrays[v] = target[v][:]
+            if v in voxel_to_col:
+                col = voxel_to_col[v]
+                ssd_target_arrays[v] = mat[:, col][:]
 
     print("  Preloading SSD phi arrays for NC matching...")
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        phi_grp = f["phi"]
-        ssd_x = phi_grp["xNC_mm"][:]
-        ssd_y = phi_grp["yNC_mm"][:]
-        ssd_z = phi_grp["zNC_mm"][:]
-        ssd_ngamma = phi_grp["#gamma"][:]
-        ssd_etot = phi_grp["E_gamma_tot_keV"][:]
-        ssd_e1 = phi_grp["gammaE1_keV"][:]
-        ssd_e2 = phi_grp["gammaE2_keV"][:]
-        ssd_e3 = phi_grp["gammaE3_keV"][:]
-        ssd_e4 = phi_grp["gammaE4_keV"][:]
+        phi_cols_list = [c.decode() if isinstance(c, bytes) else str(c)
+                         for c in f["phi_columns"][:]]
+        phi_col = {n: i for i, n in enumerate(phi_cols_list)}
+        phi_mat = f["phi_matrix"][:]
+        ssd_x      = phi_mat[:, phi_col["xNC_mm"]]
+        ssd_y      = phi_mat[:, phi_col["yNC_mm"]]
+        ssd_z      = phi_mat[:, phi_col["zNC_mm"]]
+        ssd_ngamma = phi_mat[:, phi_col["#gamma"]]
+        ssd_etot   = phi_mat[:, phi_col["E_gamma_tot_keV"]]
+        ssd_e1     = phi_mat[:, phi_col["gammaE1_keV"]]
+        ssd_e2     = phi_mat[:, phi_col["gammaE2_keV"]]
+        ssd_e3     = phi_mat[:, phi_col["gammaE3_keV"]]
+        ssd_e4     = phi_mat[:, phi_col["gammaE4_keV"]]
 
     matched_pmt_totals = []
     matched_ssd_totals = []
@@ -804,8 +818,7 @@ def main() -> None:
     n_pmt_events = len(all_evtids)
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        first_key = next(iter(f["target"].keys()))
-        n_ssd_events = f["target"][first_key].shape[0]
+        n_ssd_events = f["target_matrix"].shape[0]
 
     print(f"  Unique evtids in PMT vertices: {n_pmt_events}")
     print(f"  NC entries in SSD postprocessed: {n_ssd_events}")
@@ -820,11 +833,16 @@ def main() -> None:
     # --- Cross-check: zero-hit NC events ---
     print("\nComparing zero-hit NC events...")
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        ssd_voxel_keys = sorted(f["target"].keys())
-        n_ncs = f["target"][ssd_voxel_keys[0]].shape[0]
+        ssd_voxel_keys = [c.decode() if isinstance(c, bytes) else str(c)
+                          for c in f["target_columns"][:]]
+        mat = f["target_matrix"]
+        n_ncs = mat.shape[0]
+        # Sum hits per NC across all voxels in batches to avoid huge allocation
         total_per_nc = np.zeros(n_ncs, dtype=np.int64)
-        for v in ssd_voxel_keys:
-            total_per_nc += f["target"][v][:]
+        _BATCH = 1000
+        for _rs in range(0, n_ncs, _BATCH):
+            _re = min(_rs + _BATCH, n_ncs)
+            total_per_nc[_rs:_re] = mat[_rs:_re, :].sum(axis=1)
         ssd_zero_ncs = int(np.sum(total_per_nc == 0))
 
     optical_evtids = set()
@@ -844,7 +862,10 @@ def main() -> None:
     voxel_ids = sorted(pmt_hits.keys())
 
     with h5py.File(SSD_POSTPROCESSED_FILE, "r") as f:
-        ssd_target_keys = set(f["target"].keys())
+        ssd_target_keys = set(
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        )
     matched_ids = [v for v in voxel_ids if v in ssd_target_keys]
     unmatched_ids = [v for v in voxel_ids if v not in ssd_target_keys]
     print(f"\n  PMT voxel IDs matched in SSD target: {len(matched_ids)}/{len(voxel_ids)}")

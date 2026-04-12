@@ -194,13 +194,16 @@ def process_ssd_postprocessed(pp_dir: str) -> Tuple[int, int]:
     for fpath in hdf5_files:
         fname = os.path.basename(fpath)
         with h5py.File(fpath, "r") as f:
-            target     = f["target"]
-            voxel_keys = list(target.keys())
-            n_ncs      = target[voxel_keys[0]].shape[0]
+            mat = f["target_matrix"]
+            n_ncs = mat.shape[0]
+            num_voxels = mat.shape[1]
             total_nc_events += n_ncs
-            file_hits = sum(int(np.sum(target[v][:])) for v in voxel_keys)
+            _BATCH = 1000
+            file_hits = 0
+            for _rs in range(0, n_ncs, _BATCH):
+                file_hits += int(mat[_rs:min(_rs + _BATCH, n_ncs), :].sum())
             total_hits += file_hits
-            print(f"  {fname}: {n_ncs:,} NCs, {len(voxel_keys)} voxels, {file_hits:,} hits")
+            print(f"  {fname}: {n_ncs:,} NCs, {num_voxels} voxels, {file_hits:,} hits")
 
     print(f"  Total NC events: {total_nc_events:,}")
     print(f"  Total postprocessed hits: {total_hits:,}")
@@ -218,8 +221,7 @@ def sample_nc_from_postprocessed(pp_dir: str, n_samples: int = 5) -> List[Dict]:
     file_nc_counts = []
     for fpath in hdf5_files:
         with h5py.File(fpath, "r") as f:
-            first_key = next(iter(f["target"].keys()))
-            file_nc_counts.append((fpath, f["target"][first_key].shape[0]))
+            file_nc_counts.append((fpath, f["target_matrix"].shape[0]))
 
     total_ncs = sum(n for _, n in file_nc_counts)
     print(f"  Total NCs across files: {total_ncs:,}")
@@ -239,20 +241,23 @@ def sample_nc_from_postprocessed(pp_dir: str, n_samples: int = 5) -> List[Dict]:
         while sample_ptr < len(global_indices) and global_indices[sample_ptr] < offset + n_ncs:
             local_idx = global_indices[sample_ptr] - offset
             with h5py.File(fpath, "r") as f:
-                phi = f["phi"]
+                phi_cols_list = [c.decode() if isinstance(c, bytes) else str(c)
+                                 for c in f["phi_columns"][:]]
+                phi_col = {n: i for i, n in enumerate(phi_cols_list)}
+                phi_row = f["phi_matrix"][local_idx, :]
                 props = {
                     "pp_file": fpath, "pp_index": int(local_idx),
-                    "x_mm": float(phi["xNC_mm"][local_idx]),
-                    "y_mm": float(phi["yNC_mm"][local_idx]),
-                    "z_mm": float(phi["zNC_mm"][local_idx]),
-                    "ngamma": int(phi["#gamma"][local_idx]),
-                    "etot_keV": float(phi["E_gamma_tot_keV"][local_idx]),
-                    "e1_keV": float(phi["gammaE1_keV"][local_idx]),
-                    "e2_keV": float(phi["gammaE2_keV"][local_idx]),
-                    "e3_keV": float(phi["gammaE3_keV"][local_idx]),
-                    "e4_keV": float(phi["gammaE4_keV"][local_idx]),
+                    "x_mm":     float(phi_row[phi_col["xNC_mm"]]),
+                    "y_mm":     float(phi_row[phi_col["yNC_mm"]]),
+                    "z_mm":     float(phi_row[phi_col["zNC_mm"]]),
+                    "ngamma":   int(phi_row[phi_col["#gamma"]]),
+                    "etot_keV": float(phi_row[phi_col["E_gamma_tot_keV"]]),
+                    "e1_keV":   float(phi_row[phi_col["gammaE1_keV"]]),
+                    "e2_keV":   float(phi_row[phi_col["gammaE2_keV"]]),
+                    "e3_keV":   float(phi_row[phi_col["gammaE3_keV"]]),
+                    "e4_keV":   float(phi_row[phi_col["gammaE4_keV"]]),
                 }
-                pp_total = sum(int(f["target"][v][local_idx]) for v in f["target"].keys())
+                pp_total = int(f["target_matrix"][local_idx, :].sum())
                 props["pp_total_hits"] = pp_total
             samples.append(props)
             sample_ptr += 1
@@ -280,9 +285,10 @@ def find_nc_in_raw_and_count_hits(
 
             nc_evtids = nc_out["evtid"]["pages"][:]
             nc_ids    = nc_out["nC_track_id"]["pages"][:]
-            nc_x = nc_out["nC_x_position_in_m"]["pages"][:]
-            nc_y = nc_out["nC_y_position_in_m"]["pages"][:]
-            nc_z = nc_out["nC_z_position_in_m"]["pages"][:]
+            # Raw positions are in metres; nc_sample stores mm — convert to mm.
+            nc_x = nc_out["nC_x_position_in_m"]["pages"][:] * 1000.0
+            nc_y = nc_out["nC_y_position_in_m"]["pages"][:] * 1000.0
+            nc_z = nc_out["nC_z_position_in_m"]["pages"][:] * 1000.0
             nc_ngamma   = nc_out["nC_gamma_amount"]["pages"][:]
             nc_etot_arr = nc_out["nC_gamma_total_energy_in_keV"]["pages"][:]
             nc_e1_arr   = nc_out["gamma1_E_in_keV"]["pages"][:]
