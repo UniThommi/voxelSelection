@@ -91,8 +91,27 @@ def _list_run_dirs(base_dir: str, omit_runs: set[str] | None = None) -> list[str
     return dirs
 
 
-def _load_nc_from_run_dir(run_dir: str) -> pd.DataFrame:
-    """Concatenate NC truth DataFrames from all output_t*.hdf5 in run_dir."""
+def _run_id_from_dir(run_dir: str) -> int:
+    """Extract integer run ID from a run_NNN directory name (e.g. run_001 → 1)."""
+    try:
+        return int(os.path.basename(run_dir).split("_", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot extract integer run ID from {run_dir!r}. "
+            "Expected directory name of the form run_NNN."
+        ) from exc
+
+
+def _load_nc_from_run_dir(run_dir: str, run_id: int) -> pd.DataFrame:
+    """Concatenate NC truth DataFrames from all output_t*.hdf5 in run_dir.
+
+    Raises RuntimeError if the same (muon_id, nc_id) appears in more than
+    one output_t file within this run — such duplicates indicate a simulation
+    output bug and must not be silently dropped.
+
+    Adds a ``run_id`` column (integer extracted from the directory name) so
+    that NCs from different runs can be distinguished after concatenation.
+    """
     files = sorted(glob.glob(os.path.join(run_dir, "output_t*.hdf5")))
     if not files:
         raise FileNotFoundError(f"No output_t*.hdf5 in {run_dir!r}")
@@ -100,11 +119,31 @@ def _load_nc_from_run_dir(run_dir: str) -> pd.DataFrame:
     frames = [df for df in frames if df is not None]
     if not frames:
         raise ValueError(f"No NC entries in {run_dir!r}")
-    return pd.concat(frames, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
+
+    # Detect cross-file duplicates within this run — must never be silently dropped.
+    dup_mask = df.duplicated(subset=["muon_id", "nc_id"], keep=False)
+    if dup_mask.any():
+        dup_df = df.loc[dup_mask, ["muon_id", "nc_id"]].drop_duplicates()
+        n_dup_pairs = len(dup_df)
+        sample = dup_df.head(5).to_dict(orient="records")
+        raise RuntimeError(
+            f"Run {os.path.basename(run_dir)!r} (run_id={run_id}): "
+            f"{n_dup_pairs} NC(s) appear in more than one output_t file. "
+            f"This is a simulation output bug — NCs must not be silently dropped. "
+            f"Sample duplicates (muon_id, nc_id): {sample}"
+        )
+
+    df["run_id"] = run_id
+    return df
 
 
-def _load_optical_from_run_dir(run_dir: str) -> pd.DataFrame:
-    """Concatenate optical DataFrames from all output_t*.hdf5 in run_dir."""
+def _load_optical_from_run_dir(run_dir: str, run_id: int) -> pd.DataFrame:
+    """Concatenate optical DataFrames from all output_t*.hdf5 in run_dir.
+
+    Adds a ``run_id`` column so that optical hits can be matched to NC truth
+    rows by (run_id, muon_track_id, nC_track_id).
+    """
     files = sorted(glob.glob(os.path.join(run_dir, "output_t*.hdf5")))
     if not files:
         raise FileNotFoundError(f"No output_t*.hdf5 in {run_dir!r}")
@@ -112,9 +151,11 @@ def _load_optical_from_run_dir(run_dir: str) -> pd.DataFrame:
     frames = [df for df in frames if df is not None]
     if not frames:
         return pd.DataFrame(
-            columns=["muon_track_id", "nC_track_id", "det_uid", "time_in_ns"]
+            columns=["run_id", "muon_track_id", "nC_track_id", "det_uid", "time_in_ns"]
         )
-    return pd.concat(frames, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
+    df["run_id"] = run_id
+    return df
 
 
 def _count_vertices_run_dir(run_dir: str) -> int:
@@ -197,13 +238,21 @@ def check_all_files_integrity(
 def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str] | None = None) -> pd.DataFrame:
     """Load NC truth from Sim 1 across all run_NNN subdirs of muon_base_dir.
 
-    Returns a deduplicated DataFrame with columns:
-        muon_id, nc_id, nc_time_ns, flag_ge77, nc_x, nc_y, nc_z
+    Returns a DataFrame with columns:
+        run_id, muon_id, nc_id, nc_time_ns, flag_ge77, nc_x, nc_y, nc_z
 
-    Rows are sorted by (muon_id, nc_id) and carry a sequential integer
-    index (reset_index).  This ordering defines the row mapping used by
-    build_pmt_matrix(); pass the same DataFrame to every setup so that
-    all B matrices share consistent row indices.
+    ``run_id`` is the integer extracted from the run directory name
+    (e.g. run_001 → 1).  The unique NC key across runs is
+    (run_id, muon_id, nc_id).
+
+    Within-run duplicates — the same (muon_id, nc_id) appearing in more
+    than one output_t file — raise RuntimeError immediately rather than
+    being silently dropped.
+
+    Rows are sorted by (run_id, muon_id, nc_id) and carry a sequential
+    integer index (reset_index).  This ordering defines the row mapping
+    used by build_pmt_matrix(); pass the same DataFrame to every setup so
+    that all B matrices share consistent row indices.
     """
     run_dirs = _list_run_dirs(muon_base_dir, omit_runs=omit_runs)
     if verbose:
@@ -212,8 +261,9 @@ def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str]
     skipped: list[tuple[str, str]] = []
     frames = []
     for rd in run_dirs:
+        run_id = _run_id_from_dir(rd)
         try:
-            frames.append(_load_nc_from_run_dir(rd))
+            frames.append(_load_nc_from_run_dir(rd, run_id))
         except Exception as exc:
             skipped.append((rd, str(exc)))
 
@@ -227,21 +277,14 @@ def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str]
 
     nc_truth = pd.concat(frames, ignore_index=True)
 
-    # Deduplicate — same NC row may appear in multiple output_t files
-    before = len(nc_truth)
-    nc_truth = nc_truth.drop_duplicates(subset=["muon_id", "nc_id"])
-    dropped = before - len(nc_truth)
-    if dropped > 0 and verbose:
-        print(f"  [INFO] Dropped {dropped:,} duplicate NC rows.")
-
     nc_truth = (
         nc_truth
-        .sort_values(["muon_id", "nc_id"])
+        .sort_values(["run_id", "muon_id", "nc_id"])
         .reset_index(drop=True)
     )
 
     if verbose:
-        n_muons = nc_truth["muon_id"].nunique()
+        n_muons = len(nc_truth[["run_id", "muon_id"]].drop_duplicates())
         n_ge77_ncs = int((nc_truth["flag_ge77"] == 1).sum())
         print(
             f"  NC truth: {len(nc_truth):,} NCs, {n_muons:,} muons, "
@@ -284,6 +327,9 @@ def build_pmt_matrix(
     det_uid is used as-is as the PMT column identifier — no additional
     layer filter is applied (same convention as comparePMTCoverage.py).
 
+    Optical hits are matched to NC truth rows by (run_id, muon_track_id,
+    nC_track_id) so that IDs from different runs are never conflated.
+
     B[i, j] = 1  if NC i was detected by PMT j with ≥m_threshold photon
               hits within time_cut_ns of the NC time.
 
@@ -323,8 +369,9 @@ def build_pmt_matrix(
     # ── load all optical data ─────────────────────────────────────────
     opt_frames = []
     for rd in run_dirs:
+        run_id = _run_id_from_dir(rd)
         try:
-            opt_frames.append(_load_optical_from_run_dir(rd))
+            opt_frames.append(_load_optical_from_run_dir(rd, run_id))
         except Exception as exc:
             if verbose:
                 print(f"  [WARN] Skipping {rd}: {exc}")
@@ -348,19 +395,23 @@ def build_pmt_matrix(
         return sp.csr_matrix((n_nc, 0), dtype=np.int8), np.array([], dtype=np.int64), _empty_detect
 
     # ── merge with NC truth to get nc_time_ns (vectorised) ───────────
+    # Key: (run_id, muon_track_id, nC_track_id) — run_id prevents conflating
+    # IDs from different runs that happen to share the same numeric values.
     nc_time_lookup = pd.DataFrame({
+        "run_id":        nc_truth["run_id"].astype(np.int32),
         "muon_track_id": nc_truth["muon_id"].astype(np.int64),
         "nC_track_id":   nc_truth["nc_id"].astype(np.int64),
         "nc_time_ns":    nc_truth["nc_time_ns"].values,
         "row_idx":       np.arange(n_nc, dtype=np.int32),
     })
 
-    optical["muon_track_id"] = optical["muon_track_id"].astype(np.int64)
-    optical["nC_track_id"]   = optical["nC_track_id"].astype(np.int64)
+    optical["run_id"]         = optical["run_id"].astype(np.int32)
+    optical["muon_track_id"]  = optical["muon_track_id"].astype(np.int64)
+    optical["nC_track_id"]    = optical["nC_track_id"].astype(np.int64)
 
     optical = optical.merge(
-        nc_time_lookup[["muon_track_id", "nC_track_id", "nc_time_ns", "row_idx"]],
-        on=["muon_track_id", "nC_track_id"],
+        nc_time_lookup[["run_id", "muon_track_id", "nC_track_id", "nc_time_ns", "row_idx"]],
+        on=["run_id", "muon_track_id", "nC_track_id"],
         how="left",
     )
 
@@ -385,7 +436,9 @@ def build_pmt_matrix(
     nc_within_200ns = np.zeros(n_nc, dtype=bool)
     nc_within_200ns[np.unique(within_rows)] = True
 
-    filtered = optical.loc[valid_mask, ["muon_track_id", "nC_track_id", "det_uid", "row_idx"]].copy()
+    filtered = optical.loc[
+        valid_mask, ["run_id", "muon_track_id", "nC_track_id", "det_uid", "row_idx"]
+    ].copy()
     del optical
     gc.collect()
 
@@ -408,7 +461,7 @@ def build_pmt_matrix(
     # ── aggregate hits per (NC, PMT) and binarise ────────────────────
     hits = (
         filtered
-        .groupby(["muon_track_id", "nC_track_id", "det_uid"])
+        .groupby(["run_id", "muon_track_id", "nC_track_id", "det_uid"])
         .size()
         .reset_index(name="n_hits")
     )
@@ -424,13 +477,14 @@ def build_pmt_matrix(
     n_pmts = len(pmt_uids)
 
     # ── map NC keys to row indices (vectorised merge) ─────────────────
-    nc_row_lookup = nc_time_lookup[["muon_track_id", "nC_track_id", "row_idx"]].copy()
-    firing["muon_track_id"] = firing["muon_track_id"].astype(np.int64)
-    firing["nC_track_id"]   = firing["nC_track_id"].astype(np.int64)
+    nc_row_lookup = nc_time_lookup[["run_id", "muon_track_id", "nC_track_id", "row_idx"]].copy()
+    firing["run_id"]         = firing["run_id"].astype(np.int32)
+    firing["muon_track_id"]  = firing["muon_track_id"].astype(np.int64)
+    firing["nC_track_id"]    = firing["nC_track_id"].astype(np.int64)
 
     firing_with_rows = firing.merge(
         nc_row_lookup,
-        on=["muon_track_id", "nC_track_id"],
+        on=["run_id", "muon_track_id", "nC_track_id"],
         how="inner",  # drops photons whose NC is not in truth (validated elsewhere)
     )
 
