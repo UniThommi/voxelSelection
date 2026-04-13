@@ -154,4 +154,44 @@ def is_valid_pmt_position(
 
     return False
 
+#FoM parameters and fuctions
+N_a = 6.022e23 # 1 / mol
+m_76 = 75.9214036 *1e-3 # kg/mol
+epsilon_tot = 0.67 # detector efficiency * analysis efficiency
+exposure = 10000 # kg yr
+T_half = 1e28 # yr
+r_prod = 0.167 # atoms/(kg·yr)
+a_rel = 0.50 # fraction of Ge-77m produced
+c_ge77m = 15.1 * 1e-5 # 1 / keV
+c_ge77 = 0.74 * 1e-5 # 1 / keV
+BI_other = 8e-6 # counts/(kg·yr·keV)
+delta_E = 5 # keV
 
+def calc_deadtime(nCaptures, threshold, runtime):
+    """ Requires number of nCaptures, threshold for vetoing, and runtime in hours"""
+    above_threshold = nCaptures >= threshold
+    above_threshold_sum = np.sum(above_threshold)
+    veto_time = above_threshold_sum * 5 * 54 / np.log(2) / (60 * 60) # in hours, single veto is ~ 5 minutes
+    deadtime = veto_time / runtime # runtime has to be in hours
+    return deadtime # find new way to calculate uncertainty
+
+def calc_germanium_efficiency(nCaptures, threshold, ge77_counts):
+    total_events = np.sum(ge77_counts)
+    cut_events = np.sum((nCaptures >= threshold) * ge77_counts) # This actually works. Weight each event by its Ge-77 count
+    efficiency = cut_events / total_events
+    return efficiency # Find new way to calculate uncertainty
+
+def figure_of_merit(ge_survival_eff, signal_survival_eff):
+    s = (np.log(2) * N_a / m_76) * epsilon_tot * exposure * (1 / T_half) * signal_survival_eff
+    b = exposure * delta_E * signal_survival_eff * (r_prod * (a_rel * ge_survival_eff * c_ge77m + (1 - a_rel * (1 - 0.19)) * c_ge77) + BI_other)
+
+    if b <= 0 or s <= 0:  
+        return np.nan
+    
+    fom = np.sqrt(2 * ((s + b) * np.log(1 + s/b) - s))
+    return fom
+
+def calc_figure_of_merit(nCaptures, threshold, ge77_counts, runtime):
+    ge_survival_eff = 1 - calc_germanium_efficiency(nCaptures, threshold=threshold, ge77_counts=ge77_counts)
+    signal_survival_eff = 1 - calc_deadtime(nCaptures, threshold=threshold, runtime=runtime)
+    return figure_of_merit(ge_survival_eff, signal_survival_eff)
