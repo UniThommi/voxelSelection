@@ -782,6 +782,36 @@ def plot_mw_sweep(
                 linewidth=1.2, marker=".", markersize=4,
             )
 
+        # Envelope: max across all configs at W=1 for each M (connected)
+        env_x, env_y = [], []
+        for M in M_values:
+            idx = next((i for i, (m, w) in enumerate(mw_pairs) if m == M and w == 1), None)
+            if idx is None:
+                continue
+            max_val = 0.0
+            for cfg in ordered:
+                cm = cfg.confusion.get((M, 1))
+                if cm is None:
+                    continue
+                TP, FP, FN = cm["TP"], cm["FP"], cm["FN"]
+                if metric_name == "Recall":
+                    denom = TP + FN
+                    v = TP / denom if denom > 0 else 0.0
+                else:
+                    denom = TP + FP
+                    v = TP / denom if denom > 0 else 0.0
+                max_val = max(max_val, v)
+            env_x.append(idx)
+            env_y.append(max_val)
+        if env_x:
+            ax.plot(
+                env_x, env_y,
+                color="black", linestyle="--", linewidth=2.0,
+                marker="D", markersize=6,
+                label="Envelope (best at W=1)",
+                zorder=5,
+            )
+
         # Vertical separators + M-group labels above the axes
         for gi, M in enumerate(M_values):
             group_start = gi * n_w
@@ -1999,8 +2029,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         ratio_override_warning=ratio_override_warning,
     )
 
-    # M×W sweep (omitted — heatmaps provide a clearer 2D view):
-    # plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
+    # M×W sweep
+    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
 
     # W2 vs performance scatter (three-panel, M=1/W=1 only)
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,

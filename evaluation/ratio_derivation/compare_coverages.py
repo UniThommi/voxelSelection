@@ -964,6 +964,30 @@ def plot_mw_sweep(
             ax.plot(x, vals, color=c, label=r.label,
                     linewidth=1.2, marker=".", markersize=4)
 
+        # Envelope: max across all setups at W=1 for each M (connected)
+        env_x, env_y = [], []
+        for M in M_values:
+            idx = next((i for i, (m, w) in enumerate(mw_pairs) if m == M and w == 1), None)
+            if idx is None:
+                continue
+            max_val = 0.0
+            for r in results:
+                cm = r.muon["confusion"].get((M, 1))
+                if cm is None:
+                    continue
+                v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                max_val = max(max_val, v)
+            env_x.append(idx)
+            env_y.append(max_val)
+        if env_x:
+            ax.plot(
+                env_x, env_y,
+                color="black", linestyle="--", linewidth=2.0,
+                marker="D", markersize=6,
+                label="Envelope (best at W=1)",
+                zorder=5,
+            )
+
         # Vertical separators + M-group labels at the top of the axes
         for gi, M in enumerate(M_values):
             group_start = gi * n_w
@@ -1805,8 +1829,8 @@ def main() -> None:
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     # W histogram — too noisy at this scale, omitted:
     # plot_w_histogram(results, M_default, W_default, args.output_dir)
-    # M×W sweep (omitted — heatmaps provide a clearer 2D view):
-    # plot_mw_sweep(results, M_values, W_values, args.output_dir)
+    # M×W sweep
+    plot_mw_sweep(results, M_values, W_values, args.output_dir)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
     # W2 correlation analysis
