@@ -1182,38 +1182,298 @@ def write_summary(
     per_layer_corr_df: Optional[pd.DataFrame],
     per_layer_optima: Optional[dict[str, float]],
     optimal_ratio: float,
-    n_setups: int,
+    setups: list[SetupData],
+    M_values: list[int],
+    W_values: list[int],
+    W_default: int,
+    total_primaries: int,
     output_dir: str,
+    ratio_min: float = 1.0,
+    ratio_max: float = 10.0,
+    ratio_step: float = 0.1,
 ) -> None:
-    lines = [
-        "SSD–PMT Correlation Analysis Summary",
-        "=" * 45,
-        f"N setups      : {n_setups}",
-        f"Optimal ratio : {optimal_ratio:.4f}",
+    """Write a comprehensive human-readable summary of all analysis results."""
+    import datetime
+
+    def _hr(char: str = "─", width: int = 72) -> str:
+        return char * width
+
+    def _fmt_p(p: float) -> str:
+        if math.isnan(p):
+            return "   n/a  "
+        if p < 0.001:
+            return f"<0.001  "
+        return f"{p:.4f}  "
+
+    def _fmt_r(r: float) -> str:
+        return "   nan " if math.isnan(r) else f"{r:+.4f}"
+
+    L = []  # output lines
+
+    # ── Header ────────────────────────────────────────────────────────
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    L += [
+        "SSD–PMT Correlation Analysis — Full Summary",
+        "=" * 72,
+        f"Generated : {ts}",
         "",
     ]
 
-    if per_layer_optima:
-        lines.append("Per-layer optimal ratios:")
-        for lyr, r in per_layer_optima.items():
-            lines.append(f"  {lyr:>4}: {r:.4f}")
-        lines.append("")
+    # ── 1. Run metadata ───────────────────────────────────────────────
+    runtime_h  = total_primaries / MUSUN_RATE if MUSUN_RATE > 0 else 0.0
+    runtime_yr = runtime_h / (24 * 365.25)
+    n_runs     = total_primaries // max(MUONS_PER_RUN_DIR, 1)
 
+    L += [
+        "1. SIMULATION OVERVIEW",
+        _hr(),
+        f"  Setups analysed    : {len(setups)}",
+        f"  Total primaries    : {total_primaries:,}  ({n_runs} runs × {MUONS_PER_RUN_DIR:,})",
+        f"  Simulated livetime : {runtime_h:,.0f} h  =  {runtime_yr:.2f} yr  "
+        f"(@ {MUSUN_RATE:.0f} µ/h)",
+        f"  Ratio sweep        : [{ratio_min:.2f}, {ratio_max:.2f}]  "
+        f"step={ratio_step:.2f}",
+        f"  M range            : 1 – {max(M_values)}",
+        f"  W range            : 1 – {max(W_values)}",
+        f"  W_default (recall) : {W_default}",
+        "",
+    ]
+
+    # ── 2. Setup overview ─────────────────────────────────────────────
+    L += [
+        "2. SETUP OVERVIEW",
+        _hr(),
+        f"  {'Label':<30} {'W2 (mm)':>10}  {'PMT best FoM':>14}  {'at (M,W)':>9}",
+        f"  {_hr('-', 67)}",
+    ]
+    for s in setups:
+        w2_str = f"{s.w2:.1f}" if s.w2 is not None else "N/A"
+        best_mw = _pmt_best_mw(s, M_values, W_values, total_primaries)
+        best_fom = _pmt_fom(s, best_mw[0], best_mw[1], total_primaries)
+        fom_str = f"{best_fom:.5g}" if math.isfinite(best_fom) else "N/A"
+        mw_str  = f"M{best_mw[0]}W{best_mw[1]}"
+        L.append(f"  {s.label:<30} {w2_str:>10}  {fom_str:>14}  {mw_str:>9}")
+    L.append("")
+
+    # ── 3. Optimal ratios ─────────────────────────────────────────────
+    L += [
+        "3. OPTIMAL AREA RATIOS",
+        _hr(),
+        f"  Global optimal ratio : {optimal_ratio:.4f}",
+        "  (Determined by max mean|Pearson r| for nc_coverage at M=1..4)",
+        "",
+    ]
+    if per_layer_optima:
+        L.append("  Per-layer optimal ratios (all other layers held at global optimum):")
+        for lyr, r in per_layer_optima.items():
+            L.append(f"    {lyr:>4} : {r:.4f}")
+        L.append("")
+
+    # ── 4. Correlation table at optimal ratio ─────────────────────────
     if not corr_df.empty:
-        nc_df = corr_df[corr_df["metric"] == "nc_coverage"].dropna(subset=["pearson_r"])
-        if not nc_df.empty:
-            best = nc_df.loc[nc_df["pearson_r"].abs().idxmax()]
-            lines += [
-                "Best global sweep result (nc_coverage):",
-                f"  ratio={best['ratio']:.2f}  M={best['M']}  "
-                f"Pearson r={best['pearson_r']:.4f} (p={best['pearson_p']:.4g})  "
-                f"Spearman ρ={best['spearman_rho']:.4f}",
-                "",
-            ]
+        L += [
+            "4. CORRELATION AT OPTIMAL RATIO",
+            _hr(),
+            f"  {'Metric':<14} {'M':>4}  {'Pearson r':>10}  {'p(Pearson)':>12}"
+            f"  {'Spearman ρ':>11}  {'p(Spearman)':>12}  {'n':>4}",
+            f"  {_hr('-', 69)}",
+        ]
+        opt_df = corr_df[
+            corr_df["ratio"].apply(lambda v: abs(v - optimal_ratio) < 1e-9)
+        ].copy()
+        metric_order = ["nc_coverage", "recall", "fom"]
+        for metric in metric_order:
+            sub = opt_df[opt_df["metric"] == metric].sort_values("M")
+            if sub.empty:
+                continue
+            metric_label = {
+                "nc_coverage": "NC coverage",
+                "recall":      f"Recall W={W_default}",
+                "fom":         f"FoM    W={W_default}",
+            }[metric]
+            for _, row in sub.iterrows():
+                pr  = _fmt_r(row["pearson_r"])
+                pp  = _fmt_p(row["pearson_p"])
+                sr  = _fmt_r(row["spearman_rho"])
+                sp  = _fmt_p(row["spearman_p"])
+                n   = int(row["n"])
+                L.append(
+                    f"  {metric_label:<14} {int(row['M']):>4}  {pr:>10}  {pp:>12}"
+                    f"  {sr:>11}  {sp:>12}  {n:>4}"
+                )
+            L.append("")
+
+    # ── 5. Best correlation per metric (full sweep) ───────────────────
+    if not corr_df.empty:
+        L += [
+            "5. BEST CORRELATION ACROSS FULL RATIO SWEEP",
+            _hr(),
+            f"  {'Metric':<14} {'Ratio':>7}  {'M':>4}  "
+            f"{'|Pearson r|':>12}  {'Spearman ρ':>11}",
+            f"  {_hr('-', 55)}",
+        ]
+        for metric in ["nc_coverage", "recall", "fom"]:
+            sub = corr_df[corr_df["metric"] == metric].dropna(subset=["pearson_r"])
+            if sub.empty:
+                continue
+            best_row = sub.loc[sub["pearson_r"].abs().idxmax()]
+            metric_label = {
+                "nc_coverage": "NC coverage",
+                "recall":      f"Recall W={W_default}",
+                "fom":         f"FoM    W={W_default}",
+            }[metric]
+            L.append(
+                f"  {metric_label:<14} {best_row['ratio']:>7.2f}  "
+                f"{int(best_row['M']):>4}  "
+                f"{abs(best_row['pearson_r']):>12.4f}  "
+                f"{_fmt_r(best_row['spearman_rho']):>11}"
+            )
+        L.append("")
+
+    # ── 6. Per-setup values at optimal ratio ──────────────────────────
+    opt_results = {s: s.ssd_results.get(optimal_ratio) for s in setups}
+    if any(v is not None for v in opt_results.values()):
+        L += [
+            f"6. PER-SETUP VALUES AT OPTIMAL RATIO  (ratio={optimal_ratio:.2f})",
+            _hr(),
+        ]
+        # Sub-section A: NC coverage + Recall at M=1, W=W_default
+        L += [
+            f"  A) NC coverage (M=1) and Recall (M=1, W={W_default})",
+            f"  {'Setup':<30} {'SSD NC':>8}  {'PMT NC':>8}  "
+            f"{'SSD Rec':>9}  {'PMT Rec':>9}",
+            f"  {_hr('-', 69)}",
+        ]
+        for s in setups:
+            res = opt_results[s]
+            if res is None:
+                L.append(f"  {s.label:<30}  (no SSD results at this ratio)")
+                continue
+            ssd_nc  = _ssd_nc_frac(res, 1)
+            pmt_nc  = _pmt_nc_frac(s, 1)
+            ssd_rec = _ssd_recall(res, 1, W_default)
+            pmt_rec = _pmt_recall(s, 1, W_default)
+            L.append(
+                f"  {s.label:<30} {ssd_nc:>8.4f}  {pmt_nc:>8.4f}  "
+                f"{ssd_rec:>9.4f}  {pmt_rec:>9.4f}"
+            )
+        L.append("")
+
+        # Sub-section B: FoM at PMT-best (M,W) per setup
+        L += [
+            "  B) FoM — using PMT-best (M,W) per setup",
+            f"  {'Setup':<30} {'Best(M,W)':>10}  {'SSD FoM':>10}  "
+            f"{'PMT FoM':>10}  {'Δ (SSD-PMT)':>12}",
+            f"  {_hr('-', 75)}",
+        ]
+        for s in setups:
+            res = opt_results[s]
+            best_mw  = _pmt_best_mw(s, M_values, W_values, total_primaries)
+            pmt_f    = _pmt_fom(s, best_mw[0], best_mw[1], total_primaries)
+            if res is not None:
+                ssd_f = _ssd_fom(res, best_mw[0], best_mw[1], total_primaries)
+                delta = ssd_f - pmt_f if (math.isfinite(ssd_f) and math.isfinite(pmt_f)) else float("nan")
+            else:
+                ssd_f = float("nan")
+                delta = float("nan")
+            mw_str   = f"M{best_mw[0]}W{best_mw[1]}"
+            ssd_str  = f"{ssd_f:.5g}"  if math.isfinite(ssd_f)  else "N/A"
+            pmt_str  = f"{pmt_f:.5g}"  if math.isfinite(pmt_f)  else "N/A"
+            dlt_str  = f"{delta:+.5g}" if math.isfinite(delta)   else "N/A"
+            L.append(
+                f"  {s.label:<30} {mw_str:>10}  {ssd_str:>10}  "
+                f"{pmt_str:>10}  {dlt_str:>12}"
+            )
+        L.append("")
+
+        # Sub-section C: FoM across all M at W=W_default (table: M vs setup)
+        L += [
+            f"  C) PMT FoM at W={W_default} for all M  (to identify useful M range)",
+            f"  {'Setup':<30} " + "  ".join(f"M={M:>2}" for M in M_values),
+            f"  {_hr('-', 30 + 7 * len(M_values))}",
+        ]
+        for s in setups:
+            vals = []
+            for M in M_values:
+                v = _pmt_fom(s, M, W_default, total_primaries)
+                vals.append(f"{v:>6.3g}" if math.isfinite(v) else "   N/A")
+            L.append(f"  {s.label:<30} " + "  ".join(vals))
+        L.append("")
+
+    # ── 7. Per-layer sweep summary ────────────────────────────────────
+    if per_layer_corr_df is not None and not per_layer_corr_df.empty:
+        L += [
+            "7. PER-LAYER SWEEP — BEST |PEARSON r| PER LAYER",
+            _hr(),
+            f"  {'Layer':<6} {'Metric':<14} {'Ratio':>7}  {'M':>4}  "
+            f"{'|Pearson r|':>12}  {'Spearman ρ':>11}",
+            f"  {_hr('-', 58)}",
+        ]
+        for layer in ["pit", "bot", "top", "wall"]:
+            layer_df = per_layer_corr_df[per_layer_corr_df["layer"] == layer]
+            for metric in ["nc_coverage", "recall", "fom"]:
+                sub = layer_df[layer_df["metric"] == metric].dropna(subset=["pearson_r"])
+                if sub.empty:
+                    continue
+                best_row = sub.loc[sub["pearson_r"].abs().idxmax()]
+                metric_label = {
+                    "nc_coverage": "NC coverage",
+                    "recall":      f"Recall W={W_default}",
+                    "fom":         f"FoM    W={W_default}",
+                }[metric]
+                L.append(
+                    f"  {layer:<6} {metric_label:<14} {best_row['ratio']:>7.2f}  "
+                    f"{int(best_row['M']):>4}  "
+                    f"{abs(best_row['pearson_r']):>12.4f}  "
+                    f"{_fmt_r(best_row['spearman_rho']):>11}"
+                )
+        L.append("")
+
+    # ── 8. Interpretation guide ───────────────────────────────────────
+    L += [
+        "8. INTERPRETATION GUIDE",
+        _hr(),
+        "  The goal of this script is to find the SSD area ratio that makes",
+        "  SSD-derived metrics (NC coverage, Recall, FoM) agree best with",
+        "  the ground-truth PMT simulation.",
+        "",
+        "  Pearson r / Spearman ρ (SSD vs PMT across setups):",
+        "    ≥  0.8   strong  — SSD reliably ranks setups the same way as PMT",
+        "    0.6–0.8  moderate — ranking is broadly preserved; absolute values differ",
+        "    0.4–0.6  weak    — partial agreement; SSD may mislead for marginal cases",
+        "    < 0.4   poor    — SSD and PMT disagree at this ratio",
+        "",
+        "  Optimal ratio (Section 3):",
+        "    The global optimum is found by maximising mean|Pearson r| for",
+        "    nc_coverage at M=1..4, which is the most stable metric.",
+        "    Per-layer optima (Section 3 / 7) let you tune each detector region",
+        "    independently — useful if one layer dominates the disagreement.",
+        "",
+        "  FoM (Figure of Merit):",
+        "    FoM combines Ge-77 muon detection efficiency (recall) and the",
+        "    livetime lost to vetoing (dead-time).  A higher FoM is better.",
+        "    The SSD–PMT FoM correlation (Sections 4–6) tells you whether",
+        "    optimising the PMT layout using the SSD simulation would lead",
+        "    to the same ranking of layouts as the full PMT simulation.",
+        "",
+        "  Δ (SSD−PMT) in Section 6B:",
+        "    A systematic positive Δ means SSD over-estimates FoM.",
+        "    A negative Δ means SSD under-estimates it.",
+        "    Large |Δ| with high Pearson r means the ranking is correct but",
+        "    the scale differs — the ratio calibration shifts absolute values",
+        "    but preserves ordering.",
+        "",
+        "  W2 (Wasserstein homogeneity, Sections 2 + plots):",
+        "    W2 measures how uniformly the PMTs are distributed spatially.",
+        "    A Spearman ρ close to −1 between W2 and FoM means that more",
+        "    uniform placements achieve higher FoM — confirming that",
+        "    homogeneity is a useful optimisation objective.",
+        "",
+    ]
 
     with open(os.path.join(output_dir, "correlation_summary.txt"), "w",
               encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(L) + "\n")
     print("  Saved: correlation_summary.txt")
 
     if not corr_df.empty:
@@ -1400,7 +1660,11 @@ def main() -> None:
     print("\nWriting summary ...")
     write_summary(
         corr_df, per_layer_corr_df, per_layer_optima,
-        optimal_ratio, len(setups), args.output_dir,
+        optimal_ratio,
+        setups, M_values, W_values, args.W_default,
+        total_primaries, args.output_dir,
+        ratio_min=args.ratio_min, ratio_max=args.ratio_max,
+        ratio_step=args.ratio_step,
     )
     print(f"\nDone. Results saved to: {args.output_dir}")
 
