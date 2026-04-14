@@ -75,6 +75,9 @@ from pmtopt.geometry import (
     DEFAULT_AREA_RATIOS,
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
+    MUSUN_RATE,
+    MUONS_PER_RUN_DIR,
+    calc_fom_confusion,
 )
 
 
@@ -413,6 +416,64 @@ def _ssd_recall(result: SSDResult, M: int, W: int) -> float:
     return compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])["Recall"]
 
 
+def _pmt_fom(setup: SetupData, M: int, W: int, total_primaries: int) -> float:
+    """FoM from PMT confusion matrix at (M, W)."""
+    conf = setup.pmt_muon["confusion"].get((M, W))
+    if conf is None:
+        return float("nan")
+    return calc_fom_confusion(conf["TP"], conf["FP"], conf["FN"], total_primaries)
+
+
+def _ssd_fom(result: SSDResult, M: int, W: int, total_primaries: int) -> float:
+    """FoM from SSD confusion matrix at (M, W)."""
+    conf = result.confusion.get((M, W))
+    if conf is None:
+        return float("nan")
+    return calc_fom_confusion(conf["TP"], conf["FP"], conf["FN"], total_primaries)
+
+
+def _pmt_best_w_at_m(
+    setup: SetupData,
+    M: int,
+    W_values: list[int],
+    total_primaries: int,
+) -> int:
+    """Return the W that maximises PMT FoM at this M for this setup."""
+    best_w   = W_values[0]
+    best_fom = float("-inf")
+    for W in W_values:
+        v = _pmt_fom(setup, M, W, total_primaries)
+        if np.isfinite(v) and v > best_fom:
+            best_fom = v
+            best_w   = W
+    return best_w
+
+
+def _pmt_best_mw(
+    setup: SetupData,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+) -> tuple[int, int]:
+    """Return the (M, W) pair that maximises PMT FoM globally for this setup."""
+    best_mw  = (M_values[0], W_values[0])
+    best_fom = float("-inf")
+    for M in M_values:
+        for W in W_values:
+            v = _pmt_fom(setup, M, W, total_primaries)
+            if np.isfinite(v) and v > best_fom:
+                best_fom = v
+                best_mw  = (M, W)
+    return best_mw
+
+
+def _count_runs(muon_dir: str) -> int:
+    """Count run_*/ subdirectories in muon_dir (for total_primaries fallback)."""
+    pattern = os.path.join(muon_dir, "run_*")
+    n = len([d for d in glob.glob(pattern) if os.path.isdir(d)])
+    return max(1, n)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # SECTION 9 — Correlation computation
 # ─────────────────────────────────────────────────────────────────────
@@ -443,15 +504,18 @@ def compute_correlations(
     M_values: list[int],
     W_default: int,
     ratio_label: Optional[float] = None,
+    total_primaries: int = 0,
 ) -> list[dict]:
     """Pearson/Spearman between SSD and PMT metrics for each M.
 
     Parameters
     ----------
-    ratio_key    : key for ssd_results lookup (float for global sweep,
-                   (layer, float) tuple for per-layer sweep).
-    ratio_label  : float stored in the output rows (defaults to ratio_key
-                   when it is already a float).
+    ratio_key       : key for ssd_results lookup (float for global sweep,
+                      (layer, float) tuple for per-layer sweep).
+    ratio_label     : float stored in the output rows (defaults to ratio_key
+                      when it is already a float).
+    total_primaries : total simulated primary muons; when > 0 FoM rows
+                      at (M, W_default) are appended.
     """
     if ratio_label is None:
         ratio_label = ratio_key if isinstance(ratio_key, float) else float("nan")
@@ -482,6 +546,26 @@ def compute_correlations(
             "spearman_rho": sr, "spearman_p": sp,
             "n": len(setups),
         })
+
+        # FoM at (M, W_default) — same W for both SSD and PMT
+        if total_primaries > 0:
+            ssd_fv = np.array([_ssd_fom(s.ssd_results[ratio_key], M, W_default,
+                                        total_primaries) for s in setups])
+            pmt_fv = np.array([_pmt_fom(s, M, W_default, total_primaries)
+                                for s in setups])
+            mask = np.isfinite(ssd_fv) & np.isfinite(pmt_fv)
+            if mask.sum() >= 3:
+                pr, pp = _safe_pearsonr(ssd_fv[mask], pmt_fv[mask])
+                sr, sp = _safe_spearmanr(ssd_fv[mask], pmt_fv[mask])
+            else:
+                pr = pp = sr = sp = float("nan")
+            rows.append({
+                "ratio": ratio_label, "M": M, "metric": "fom",
+                "pearson_r": pr, "pearson_p": pp,
+                "spearman_rho": sr, "spearman_p": sp,
+                "n": int(mask.sum()),
+            })
+
     return rows
 
 
@@ -501,6 +585,7 @@ def global_ratio_sweep(
     W_default: int,
     early_stop_patience: int = 3,
     seed: int = 42,
+    total_primaries: int = 0,
 ) -> tuple[pd.DataFrame, float]:
     """Sweep area ratio uniformly across all layers; return corr_df and optimal ratio."""
     raw_rows, raw_cols, raw_vals, voxel_ids, _, layers, num_ncs, _ = ssd_coo_data
@@ -525,7 +610,8 @@ def global_ratio_sweep(
             )
 
         corr_rows = compute_correlations(setups, ratio_factor, M_values, W_default,
-                                         ratio_label=ratio_factor)
+                                         ratio_label=ratio_factor,
+                                         total_primaries=total_primaries)
         all_rows.extend(corr_rows)
 
         # Early stop: track mean |Pearson r| for nc_coverage at M = 1..4
@@ -575,6 +661,7 @@ def per_layer_ratio_sweep(
     W_values: list[int],
     W_default: int,
     seed: int = 42,
+    total_primaries: int = 0,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     """Sweep one layer's ratio at a time; all others fixed at optimal_global_ratio."""
     raw_rows, raw_cols, raw_vals, voxel_ids, _, layers, num_ncs, _ = ssd_coo_data
@@ -603,7 +690,8 @@ def per_layer_ratio_sweep(
                 )
 
             cr = compute_correlations(setups, temp_key, M_values, W_default,
-                                      ratio_label=ratio_factor)
+                                      ratio_label=ratio_factor,
+                                      total_primaries=total_primaries)
             for row in cr:
                 row["layer"] = layer
             layer_rows.extend(cr)
@@ -681,7 +769,12 @@ def plot_corr_vs_ratio(
     for idx in range(len(M_values), n_rows * n_cols):
         axes[idx // n_cols][idx % n_cols].set_visible(False)
 
-    m_label = "NC Coverage" if metric == "nc_coverage" else f"Recall (W={W_default})"
+    if metric == "nc_coverage":
+        m_label = "NC Coverage"
+    elif metric == "recall":
+        m_label = f"Recall (W={W_default})"
+    else:
+        m_label = f"FoM (W={W_default})"
     fig.suptitle(f"SSD–PMT Correlation vs. Area Ratio — {m_label}", fontsize=11)
     fig.tight_layout()
 
@@ -907,6 +1000,180 @@ def plot_w2_comparison(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# SECTION 13a — FoM scatter: SSD vs PMT at optimal ratio
+# ─────────────────────────────────────────────────────────────────────
+
+def plot_scatter_ssd_pmt_fom(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: str,
+) -> None:
+    """Scatter of SSD-FoM vs PMT-FoM at *ratio_factor*.
+
+    For each setup the best (M, W) is determined by maximising PMT FoM;
+    the same (M, W) is then used to extract the SSD FoM — ensuring a
+    fair like-for-like comparison.
+
+    One plot: one labelled point per setup.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        warnings.warn(
+            f"No SSD results at ratio={ratio_factor:.2f} — skipping FoM scatter."
+        )
+        return
+
+    colors  = _colors(len(setups))
+    c_valid = [colors[setups.index(s)] for s in valid]
+
+    x_arr = []
+    y_arr = []
+    labels = []
+    best_mw_labels = []
+
+    for s in valid:
+        best_mw = _pmt_best_mw(s, M_values, W_values, total_primaries)
+        M_b, W_b = best_mw
+        pmt_val = _pmt_fom(s, M_b, W_b, total_primaries)
+        ssd_val = _ssd_fom(s.ssd_results[ratio_factor], M_b, W_b, total_primaries)
+        x_arr.append(ssd_val)
+        y_arr.append(pmt_val)
+        labels.append(s.label)
+        best_mw_labels.append(f"M{M_b}W{W_b}")
+
+    x_arr = np.array(x_arr, dtype=float)
+    y_arr = np.array(y_arr, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    _scatter_panel(
+        ax, x_arr, y_arr, c_valid, labels,
+        f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+    )
+    # Annotate each point with its best (M,W)
+    for x, y, mw in zip(x_arr, y_arr, best_mw_labels):
+        if np.isfinite(x) and np.isfinite(y):
+            ax.annotate(
+                mw, xy=(x, y), xytext=(4, -9),
+                textcoords="offset points", fontsize=6, color="dimgray",
+            )
+
+    ax.set_title(
+        f"SSD vs PMT — Figure of Merit  |  ratio={ratio_factor:.2f}\n"
+        f"(M,W) chosen per setup to maximise PMT FoM",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fname = f"scatter_fom_ratio{ratio_factor:.1f}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SECTION 13b — W2 Spearman plot for FoM
+# ─────────────────────────────────────────────────────────────────────
+
+def plot_w2_spearman_fom(
+    setups: list[SetupData],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    optimal_ratio: float,
+    output_dir: str,
+) -> None:
+    """Spearman ρ(W2, FoM) vs M — one line each for PMT and SSD.
+
+    For each M the best W is determined per setup by maximising PMT FoM at
+    that M; the same W is then applied to extract SSD FoM, so both series
+    use identical (M, W) per setup.
+
+    Only setups that have a W2 value are included.
+    """
+    w2_setups = [s for s in setups
+                 if s.w2 is not None and optimal_ratio in s.ssd_results]
+    if len(w2_setups) < 3:
+        print("  [SKIP] w2_spearman_fom: fewer than 3 setups have W2 + SSD results.")
+        return
+
+    w2_arr = np.array([s.w2 for s in w2_setups], dtype=float)
+
+    rho_pmt, rho_ssd = [], []
+    p_pmt,   p_ssd   = [], []
+
+    for M in M_values:
+        pmt_fom_arr = []
+        ssd_fom_arr = []
+
+        for s in w2_setups:
+            W_best = _pmt_best_w_at_m(s, M, W_values, total_primaries)
+            pmt_fom_arr.append(_pmt_fom(s, M, W_best, total_primaries))
+            ssd_fom_arr.append(
+                _ssd_fom(s.ssd_results[optimal_ratio], M, W_best, total_primaries)
+            )
+
+        pmt_fom_arr = np.array(pmt_fom_arr, dtype=float)
+        ssd_fom_arr = np.array(ssd_fom_arr, dtype=float)
+
+        mask_p = np.isfinite(pmt_fom_arr) & np.isfinite(w2_arr)
+        mask_s = np.isfinite(ssd_fom_arr) & np.isfinite(w2_arr)
+
+        if mask_p.sum() >= 3:
+            r1, p1 = _safe_spearmanr(w2_arr[mask_p], pmt_fom_arr[mask_p])
+        else:
+            r1, p1 = float("nan"), float("nan")
+        if mask_s.sum() >= 3:
+            r2, p2 = _safe_spearmanr(w2_arr[mask_s], ssd_fom_arr[mask_s])
+        else:
+            r2, p2 = float("nan"), float("nan")
+
+        rho_pmt.append(r1); p_pmt.append(p1)
+        rho_ssd.append(r2); p_ssd.append(p2)
+
+    x = np.array(M_values)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axhspan(-0.3, 0.3, color="gray", alpha=0.08, label="weak |ρ|<0.3")
+
+    for rhos, ps, label, color, marker in [
+        (rho_pmt, p_pmt, "PMT FoM (best W per setup)", "#1f77b4", "o"),
+        (rho_ssd, p_ssd, f"SSD FoM (same W, ratio={optimal_ratio:.2f})", "#d62728", "s"),
+    ]:
+        rhos = np.array(rhos, dtype=float)
+        ps   = np.array(ps,   dtype=float)
+        sig  = ps < 0.05
+        ax.plot(x, rhos, color=color, linewidth=1.5, label=label)
+        finite = np.isfinite(rhos)
+        if (sig & finite).any():
+            ax.scatter(x[sig & finite], rhos[sig & finite], color=color,
+                       s=60, marker=marker, zorder=4, label=f"{label} (p<0.05)")
+        if (~sig & finite).any():
+            ax.scatter(x[~sig & finite], rhos[~sig & finite],
+                       facecolors="none", edgecolors=color,
+                       s=60, marker=marker, linewidth=1.2, zorder=4)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+    ax.set_ylabel("Spearman ρ  (W2 vs FoM)", fontsize=11)
+    ax.set_title(
+        "Spearman Correlation: W2 vs FoM — PMT vs SSD\n"
+        "(filled = p<0.05; W per setup = argmax PMT FoM at that M)",
+        fontsize=11,
+    )
+    ax.set_xticks(M_values)
+    ax.set_ylim(-1.1, 1.1)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fname = "w2_spearman_fom.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # SECTION 13 — Text and CSV output
 # ─────────────────────────────────────────────────────────────────────
 
@@ -950,11 +1217,15 @@ def write_summary(
     print("  Saved: correlation_summary.txt")
 
     if not corr_df.empty:
-        for metric_name in ["nc_coverage", "recall"]:
-            sub      = corr_df[corr_df["metric"] == metric_name]
+        saved_csvs = []
+        for metric_name in ["nc_coverage", "recall", "fom"]:
+            sub = corr_df[corr_df["metric"] == metric_name]
+            if sub.empty:
+                continue
             csv_path = os.path.join(output_dir, f"corr_vs_ratio_{metric_name}.csv")
             sub.to_csv(csv_path, index=False)
-        print("  Saved: corr_vs_ratio_nc_coverage.csv, corr_vs_ratio_recall.csv")
+            saved_csvs.append(f"corr_vs_ratio_{metric_name}.csv")
+        print(f"  Saved: {', '.join(saved_csvs)}")
 
     if per_layer_corr_df is not None and not per_layer_corr_df.empty:
         per_layer_corr_df.to_csv(
@@ -987,8 +1258,8 @@ def _parse_args() -> argparse.Namespace:
                    help="W used for recall correlation plots (default: 1)")
     p.add_argument("--ratio-min",      type=float, default=1.0,
                    help="Start of ratio sweep (default: 1.0)")
-    p.add_argument("--ratio-max",      type=float, default=6.0,
-                   help="End of ratio sweep (default: 6.0)")
+    p.add_argument("--ratio-max",      type=float, default=10.0,
+                   help="End of ratio sweep (default: 10.0)")
     p.add_argument("--ratio-step",     type=float, default=0.1,
                    help="Step size for ratio sweep (default: 0.1)")
     p.add_argument("--output-dir",     default="./correlation_results",
@@ -1022,6 +1293,16 @@ def main() -> None:
     # ── 3. SSD muon alignment ─────────────────────────────────────────
     print("\nBuilding SSD muon alignment ...")
     alignment = align_ssd_to_pmt(args.ssd_hdf5, nc_truth)
+
+    # ── 3b. Total primaries for FoM ───────────────────────────────────
+    _n_runs = _count_runs(args.muon_dir)
+    total_primaries = _n_runs * MUONS_PER_RUN_DIR
+    _runtime_h  = total_primaries / MUSUN_RATE
+    _runtime_yr = _runtime_h / (24 * 365.25)
+    print(f"\n  FoM: total primary muons = {total_primaries:,}  "
+          f"({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
+    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  "
+          f"=  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
 
     # ── 4. Warn if few setups ─────────────────────────────────────────
     if len(args.setup_dirs) < 5:
@@ -1082,7 +1363,7 @@ def main() -> None:
     corr_df, optimal_ratio = global_ratio_sweep(
         setups, ssd_coo_data, setup_voxel_subsets, alignment,
         ratio_factors, args.m, M_values, W_values, args.W_default,
-        seed=args.seed,
+        seed=args.seed, total_primaries=total_primaries,
     )
 
     # ── 7. Per-layer ratio sweep ──────────────────────────────────────
@@ -1093,7 +1374,7 @@ def main() -> None:
         per_layer_corr_df, per_layer_optima = per_layer_ratio_sweep(
             setups, ssd_coo_data, setup_voxel_subsets, alignment,
             optimal_ratio, ratio_factors, args.m, M_values, W_values,
-            args.W_default, seed=args.seed,
+            args.W_default, seed=args.seed, total_primaries=total_primaries,
         )
 
     # ── 8. Plots ──────────────────────────────────────────────────────
@@ -1102,12 +1383,18 @@ def main() -> None:
                        args.W_default, args.output_dir, optimal_ratio)
     plot_corr_vs_ratio(corr_df, "recall", M_values,
                        args.W_default, args.output_dir, optimal_ratio)
+    plot_corr_vs_ratio(corr_df, "fom", M_values,
+                       args.W_default, args.output_dir, optimal_ratio)
     plot_scatter_ssd_pmt(setups, optimal_ratio, "nc_coverage",
                          M_values, args.W_default, args.output_dir)
     plot_scatter_ssd_pmt(setups, optimal_ratio, "recall",
                          M_values, args.W_default, args.output_dir)
+    plot_scatter_ssd_pmt_fom(setups, optimal_ratio, M_values, W_values,
+                              total_primaries, args.output_dir)
     plot_w2_comparison(setups, optimal_ratio, M_values,
                        args.W_default, args.output_dir)
+    plot_w2_spearman_fom(setups, M_values, W_values, total_primaries,
+                         optimal_ratio, args.output_dir)
 
     # ── 9. Summary ────────────────────────────────────────────────────
     print("\nWriting summary ...")
