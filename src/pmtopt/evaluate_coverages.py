@@ -43,16 +43,19 @@ from pmtopt.geometry import (
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
     calc_fom_confusion,
-)
-from pmtopt.homogeneous import (
-    compute_wasserstein_homogeneity,
-    get_w2_ref,
+    MUSUN_RATE,
+    MUONS_PER_RUN_DIR,
 )
 from pmtopt.data_loading import (
     load_raw_sparse,
     binarize_from_raw,
     load_muon_data,
     build_muon_index,
+    count_hdf5_runs,
+)
+from pmtopt.homogeneous import (
+    compute_wasserstein_homogeneity,
+    get_w2_ref,
 )
 
 
@@ -108,6 +111,7 @@ class EvalData:
         self.voxel_id_to_col: dict[str, int] = {}
         self.num_ncs: int = 0
         self.num_primaries: int = 0
+        self.num_runs: int = 0        # unique run IDs in event_ids
 
         # Muon data
         self.global_muon_id: np.ndarray | None = None
@@ -252,6 +256,7 @@ def load_shared_data(
      ed.nc_flag_ge77) = load_muon_data(
         hdf5_path, num_ncs=num_ncs, verbose=verbose,
     )
+    ed.num_runs = count_hdf5_runs(hdf5_path)
 
     (ed.nc_to_muon_local, _, ed.ge77_muon_global_ids,
      ed.eligible_nc_mask, ed.num_ge77_muons) = build_muon_index(
@@ -2229,9 +2234,19 @@ def main(argv: Optional[list[str]] = None) -> None:
     # M×W sweep
     plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
 
-    # Figure of Merit
-    plot_fom_summary(all_configs, M_values, W_values, ed.total_muons, output_dir, verbose=verbose)
-    plot_fom_per_setup(all_configs, M_values, W_values, ed.total_muons, output_dir, verbose=verbose)
+    # Figure of Merit — use total primary muons (all muons, not just NC-producing)
+    _total_primaries = (
+        ed.num_primaries if ed.num_primaries > 0
+        else MUONS_PER_RUN_DIR * ed.num_runs
+    )
+    if verbose:
+        _runtime_h = _total_primaries / MUSUN_RATE
+        _runtime_yr = _runtime_h / (24 * 365.25)
+        _source = "HDF5 /primaries" if ed.num_primaries > 0 else f"{ed.num_runs} runs × {MUONS_PER_RUN_DIR:,}"
+        print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_source})")
+        print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+    plot_fom_summary(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
+    plot_fom_per_setup(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
 
     # W2 vs performance scatter (three-panel, M=1/W=1 only)
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,

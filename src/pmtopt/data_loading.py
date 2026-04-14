@@ -307,6 +307,16 @@ def load_muon_data(
     return global_muon_id, nc_time_ns, nc_flag_ge77
 
 
+def count_hdf5_runs(filepath: str) -> int:
+    """Return the number of unique run IDs in the HDF5 event_ids dataset."""
+    with h5py.File(filepath, "r") as f:
+        event_id_cols = [c.decode() if isinstance(c, bytes) else str(c)
+                         for c in f["event_id_columns"][:]]
+        run_col = event_id_cols.index("run_id")
+        run_ids = f["event_ids"][:, run_col]
+    return int(len(np.unique(run_ids)))
+
+
 def build_muon_index(
     global_muon_id: np.ndarray,
     nc_time_ns: np.ndarray,

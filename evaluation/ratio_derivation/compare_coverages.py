@@ -67,7 +67,7 @@ from scipy import stats as scipy_stats
 
 # Shared W2-correlation plotting helper (identical across both pipelines).
 from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
-from pmtopt.geometry import calc_fom_confusion
+from pmtopt.geometry import calc_fom_confusion, MUSUN_RATE, MUONS_PER_RUN_DIR
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -1034,9 +1034,13 @@ def _cc_fom_grid(
     r: "SetupResult",
     M_values: list[int],
     W_values: list[int],
+    total_primaries: int,
 ) -> dict[tuple[int, int], float]:
-    """Return {(M, W): fom} for all combinations. Missing entries → nan."""
-    total_muons = r.muon["muon_stats"]["total"]
+    """Return {(M, W): fom} for all combinations. Missing entries → nan.
+
+    ``total_primaries`` is the total number of simulated primary muons
+    (all muons, not just those that produced neutron captures).
+    """
     result: dict[tuple[int, int], float] = {}
     for M in M_values:
         for W in W_values:
@@ -1045,7 +1049,7 @@ def _cc_fom_grid(
                 result[(M, W)] = float("nan")
             else:
                 result[(M, W)] = calc_fom_confusion(
-                    cm["TP"], cm["FP"], cm["FN"], total_muons
+                    cm["TP"], cm["FP"], cm["FN"], total_primaries
                 )
     return result
 
@@ -1055,17 +1059,21 @@ def plot_fom_summary(
     M_values: list[int],
     W_values: list[int],
     output_dir: str,
+    total_primaries: int = 0,
 ) -> None:
     """Horizontal bar chart: max FoM per setup, annotated with optimal (M, W).
 
     Setups are shown in their original order.
+    ``total_primaries`` is the total number of simulated primary muons
+    (all muons).  Pass 0 to fall back to the per-setup NC-muon count.
     """
     colors   = _colors(len(results))
     max_foms: list[float] = []
     best_mw:  list[str]   = []
 
     for r in results:
-        grid  = _cc_fom_grid(r, M_values, W_values)
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid  = _cc_fom_grid(r, M_values, W_values, _tp)
         valid = {k: v for k, v in grid.items() if np.isfinite(v)}
         if valid:
             best = max(valid, key=valid.__getitem__)
@@ -1108,6 +1116,7 @@ def plot_fom_per_setup(
     M_values: list[int],
     W_values: list[int],
     output_dir: str,
+    total_primaries: int = 0,
 ) -> None:
     """Per-setup FoM figures: heatmap (M × W grid) and MW-sweep line.
 
@@ -1116,6 +1125,7 @@ def plot_fom_per_setup(
       12_fom_line_{label}.png     — line sweep of FoM across all (M, W) pairs
 
     The cell / point with the maximum FoM is highlighted in both panels.
+    ``total_primaries`` is the total number of simulated primary muons.
     """
     mw_pairs = [(M, W) for M in M_values for W in W_values]
     x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
@@ -1123,7 +1133,8 @@ def plot_fom_per_setup(
     n_w      = len(W_values)
 
     for r in results:
-        grid      = _cc_fom_grid(r, M_values, W_values)
+        _tp  = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, M_values, W_values, _tp)
         safe_name = r.label.replace(" ", "_").replace("/", "_")
         finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
 
@@ -2015,9 +2026,15 @@ def main() -> None:
     # M×W sweep
     plot_mw_sweep(results, M_values, W_values, args.output_dir)
 
-    # Figure of Merit
-    plot_fom_summary(results, M_values, W_values, args.output_dir)
-    plot_fom_per_setup(results, M_values, W_values, args.output_dir)
+    # Figure of Merit — use total primary muons (all muons, not just NC-producing)
+    _n_runs       = len(count_vertices_by_run(args.sim_dirs[0], omit_runs=omit_runs))
+    _total_primaries = _n_runs * MUONS_PER_RUN_DIR
+    _runtime_h    = _total_primaries / MUSUN_RATE
+    _runtime_yr   = _runtime_h / (24 * 365.25)
+    print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
+    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+    plot_fom_summary(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
+    plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
 
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 

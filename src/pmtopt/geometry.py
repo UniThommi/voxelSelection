@@ -175,6 +175,11 @@ delta_E = 5 # keV
 MUSUN_RATE: float = 504.0
 """Musun simulation rate: muons generated per hour of livetime."""
 
+MUONS_PER_RUN_DIR: int = 10_000_000
+"""Number of primary muons simulated per run directory.
+Used as a fallback when /primaries in the HDF5 is 0 (placeholder).
+"""
+
 VETO_DURATION_H: float = 5.0 * 54.0 / np.log(2) / 3600.0
 """Dead-time per classified-positive muon (hours).
 
@@ -209,26 +214,29 @@ def calc_deadtime(nCaptures, threshold, runtime):
     return veto_time / runtime
 
 
-def calc_germanium_efficiency(nCaptures, threshold, ge77_counts):
-    """Ge-77 detection efficiency from per-muon arrays.
+def calc_germanium_efficiency(nCaptures, threshold, ge77_muon_counts):
+    """Ge-77 muon recall from per-muon arrays.
+
+    Returns Recall = detected Ge77 muons / total Ge77 muons, where
+    "detected" means the muon's NC capture count meets the threshold W.
 
     Parameters
     ----------
     nCaptures : array-like
-        Per-muon NC capture counts.
+        Per-muon NC capture counts (length = total muons in simulation).
     threshold : int
-        Veto threshold W.
-    ge77_counts : array-like
-        Per-muon Ge-77 event weights (1 for Ge77 muons, 0 otherwise).
+        Veto threshold W: muon is classified positive if nCaptures >= threshold.
+    ge77_muon_counts : array-like
+        Binary per-muon flag: 1 for Ge77 muons, 0 for non-Ge77.
 
     Returns
     -------
     float
-        Fraction of Ge-77 events that are detected (i.e. would be vetoed).
+        Recall = TP / (TP + FN).
     """
-    total_events = np.sum(ge77_counts)
-    cut_events   = np.sum((nCaptures >= threshold) * ge77_counts)
-    return cut_events / total_events
+    total_ge77 = np.sum(ge77_muon_counts)
+    detected   = np.sum((nCaptures >= threshold) * ge77_muon_counts)
+    return detected / total_ge77 if total_ge77 > 0 else 0.0
 
 
 def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float:
@@ -256,9 +264,9 @@ def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float
     return float(np.sqrt(2.0 * ((s + b) * np.log(1.0 + s / b) - s)))
 
 
-def calc_figure_of_merit(nCaptures, threshold, ge77_counts, runtime):
+def calc_figure_of_merit(nCaptures, threshold, ge77_muon_counts, runtime):
     """Figure of Merit from per-muon arrays (combines helpers above)."""
-    ge_survival_eff     = 1.0 - calc_germanium_efficiency(nCaptures, threshold, ge77_counts)
+    ge_survival_eff     = 1.0 - calc_germanium_efficiency(nCaptures, threshold, ge77_muon_counts)
     signal_survival_eff = 1.0 - calc_deadtime(nCaptures, threshold, runtime)
     return figure_of_merit(ge_survival_eff, signal_survival_eff)
 
