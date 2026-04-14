@@ -42,6 +42,7 @@ from pmtopt.geometry import (
     DEFAULT_AREA_RATIOS,
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
+    calc_fom_confusion,
 )
 from pmtopt.homogeneous import (
     compute_wasserstein_homogeneity,
@@ -849,6 +850,202 @@ def plot_mw_sweep(
         plt.close()
         if verbose:
             print(f"  Saved: {out_path}")
+
+
+
+# ===================================================================
+# Plotting: Figure of Merit
+# ===================================================================
+
+def _fom_grid(
+    cfg: "ConfigResult",
+    M_values: list[int],
+    W_values: list[int],
+    total_muons: int,
+) -> dict[tuple[int, int], float]:
+    """Return {(M, W): fom} for all combinations. Missing entries → nan."""
+    result: dict[tuple[int, int], float] = {}
+    for M in M_values:
+        for W in W_values:
+            cm = cfg.confusion.get((M, W))
+            if cm is None:
+                result[(M, W)] = np.nan
+            else:
+                result[(M, W)] = calc_fom_confusion(
+                    cm["TP"], cm["FP"], cm["FN"], total_muons
+                )
+    return result
+
+
+def plot_fom_summary(
+    configs: list,
+    M_values: list[int],
+    W_values: list[int],
+    total_muons: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Horizontal bar chart: max FoM per config, annotated with optimal (M, W).
+
+    Configs are shown in W2-sorted order (consistent with all other plots).
+    """
+    ordered = _sorted_by_w2(configs)
+    colors  = _get_colors(len(ordered))
+
+    max_foms: list[float] = []
+    best_mw:  list[str]   = []
+
+    for cfg in ordered:
+        grid  = _fom_grid(cfg, M_values, W_values, total_muons)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best = max(valid, key=valid.__getitem__)
+            max_foms.append(valid[best])
+            best_mw.append(f"M{best[0]}W{best[1]}")
+        else:
+            max_foms.append(np.nan)
+            best_mw.append("N/A")
+
+    labels = [_config_label(cfg) for cfg in ordered]
+    y      = np.arange(len(ordered))
+    y_max  = max((f for f in max_foms if np.isfinite(f)), default=1.0)
+
+    fig, ax = plt.subplots(figsize=(8, max(4, len(ordered) * 0.55)))
+    bars = ax.barh(y, max_foms, color=colors, height=0.6)
+
+    for bar, mw, fom in zip(bars, best_mw, max_foms):
+        if np.isfinite(fom):
+            ax.text(
+                fom + 0.01 * y_max,
+                bar.get_y() + bar.get_height() / 2,
+                mw,
+                va="center", ha="left", fontsize=8,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("Figure of Merit  (max over all M, W)", fontsize=11)
+    ax.set_title(
+        "Ge-77 Muon Figure of Merit — Best (M, W) per Configuration",
+        fontsize=12, pad=10,
+    )
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    out_path = output_dir / "fom_summary.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+def plot_fom_per_setup(
+    configs: list,
+    M_values: list[int],
+    W_values: list[int],
+    total_muons: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Per-config FoM figures: heatmap (M × W grid) and MW-sweep line.
+
+    Produces two PNG files per config:
+      fom_heatmap_{name}.png  — 2-D colour map of FoM over (M, W)
+      fom_line_{name}.png     — line sweep of FoM across all (M, W) pairs
+
+    The cell / point with the maximum FoM is highlighted in both panels.
+    """
+    ordered  = _sorted_by_w2(configs)
+    mw_pairs = [(M, W) for M in M_values for W in W_values]
+    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
+    x_arr    = np.arange(len(mw_pairs))
+    n_w      = len(W_values)
+
+    for cfg in ordered:
+        grid      = _fom_grid(cfg, M_values, W_values, total_muons)
+        title_sfx = _config_label(cfg)
+        safe_name = cfg.name.replace(" ", "_").replace("/", "_")
+        finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
+
+        # ── 1. Heatmap ────────────────────────────────────────────────
+        heat = np.array(
+            [[grid.get((M, W), np.nan) for M in M_values] for W in W_values]
+        )  # shape (n_W, n_M)
+
+        fig_h, ax_h = plt.subplots(
+            figsize=(max(6, len(M_values) * 0.9), max(5, len(W_values) * 0.45))
+        )
+        im = ax_h.imshow(
+            heat, aspect="auto", origin="lower",
+            extent=[M_values[0] - 0.5, M_values[-1] + 0.5,
+                    W_values[0] - 0.5, W_values[-1] + 0.5],
+            cmap="viridis",
+        )
+        plt.colorbar(im, ax=ax_h, label="Figure of Merit")
+
+        if finite:
+            best = max(finite, key=finite.__getitem__)
+            ax_h.scatter(
+                best[0], best[1],
+                marker="*", s=250, color="red", zorder=5,
+                label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
+            )
+            ax_h.legend(fontsize=9, loc="upper right")
+
+        ax_h.set_xlabel("M  (NC threshold)", fontsize=11)
+        ax_h.set_ylabel("W  (muon threshold)", fontsize=11)
+        ax_h.set_xticks(M_values)
+        ax_h.set_yticks(W_values)
+        ax_h.set_title(f"Figure of Merit — {title_sfx}", fontsize=12, pad=10)
+        fig_h.tight_layout()
+        out_h = output_dir / f"fom_heatmap_{safe_name}.png"
+        plt.savefig(out_h, dpi=200, bbox_inches="tight")
+        plt.close(fig_h)
+        if verbose:
+            print(f"  Saved: {out_h}")
+
+        # ── 2. Line sweep ─────────────────────────────────────────────
+        fom_vals = [grid.get((M, W), np.nan) for M, W in mw_pairs]
+        fig_w    = max(30, len(mw_pairs) * 0.18)
+        fig_l, ax_l = plt.subplots(figsize=(fig_w, 6))
+
+        ax_l.plot(x_arr, fom_vals, color="steelblue",
+                  linewidth=1.4, marker=".", markersize=4)
+
+        finite_idx = [(i, v) for i, v in enumerate(fom_vals) if np.isfinite(v)]
+        if finite_idx:
+            best_i, best_v = max(finite_idx, key=lambda t: t[1])
+            best_pair = mw_pairs[best_i]
+            ax_l.scatter(
+                best_i, best_v,
+                marker="*", s=250, color="red", zorder=5,
+                label=f"Best: M{best_pair[0]}W{best_pair[1]} = {best_v:.4g}",
+            )
+            ax_l.legend(fontsize=9, loc="upper right")
+
+        for gi, M in enumerate(M_values):
+            group_start = gi * n_w
+            group_mid   = group_start + (n_w - 1) / 2
+            if gi > 0:
+                ax_l.axvline(group_start - 0.5, color="gray",
+                             linewidth=0.6, linestyle="--", alpha=0.5)
+            ax_l.text(
+                group_mid, 1.02, f"M={M}",
+                transform=ax_l.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color="dimgray",
+            )
+
+        ax_l.set_xticks(x_arr)
+        ax_l.set_xticklabels(x_labels, rotation=90, fontsize=7)
+        ax_l.set_ylabel("Figure of Merit", fontsize=11)
+        ax_l.set_xlim(-0.5, len(mw_pairs) - 0.5)
+        ax_l.set_title(f"Figure of Merit — {title_sfx}", fontsize=12, pad=20)
+        ax_l.grid(True, axis="y", alpha=0.3)
+        fig_l.tight_layout()
+        out_l = output_dir / f"fom_line_{safe_name}.png"
+        plt.savefig(out_l, dpi=200, bbox_inches="tight")
+        plt.close(fig_l)
+        if verbose:
+            print(f"  Saved: {out_l}")
 
 
 # ===================================================================
@@ -2031,6 +2228,10 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # M×W sweep
     plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
+
+    # Figure of Merit
+    plot_fom_summary(all_configs, M_values, W_values, ed.total_muons, output_dir, verbose=verbose)
+    plot_fom_per_setup(all_configs, M_values, W_values, ed.total_muons, output_dir, verbose=verbose)
 
     # W2 vs performance scatter (three-panel, M=1/W=1 only)
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,

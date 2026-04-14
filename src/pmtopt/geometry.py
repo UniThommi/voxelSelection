@@ -154,7 +154,9 @@ def is_valid_pmt_position(
 
     return False
 
-#FoM parameters and fuctions
+# ---------------------------------------------------------------------------
+# Figure of Merit — physical parameters
+# ---------------------------------------------------------------------------
 N_a = 6.022e23 # 1 / mol
 m_76 = 75.9214036 *1e-3 # kg/mol
 epsilon_tot = 0.67 # detector efficiency * analysis efficiency
@@ -167,31 +169,171 @@ c_ge77 = 0.74 * 1e-5 # 1 / keV
 BI_other = 8e-6 # counts/(kg·yr·keV)
 delta_E = 5 # keV
 
+# ---------------------------------------------------------------------------
+# Figure of Merit — Musun simulation constants
+# ---------------------------------------------------------------------------
+MUSUN_RATE: float = 504.0
+"""Musun simulation rate: muons generated per hour of livetime."""
+
+VETO_DURATION_H: float = 5.0 * 54.0 / np.log(2) / 3600.0
+"""Dead-time per classified-positive muon (hours).
+
+Derived from vetoing for 5 half-lives of the Ge-77 activation product
+(T_1/2 ≈ 54 min → mean lifetime τ = T_1/2 / ln 2 ≈ 77.9 min).
+"""
+
+
+# ---------------------------------------------------------------------------
+# Figure of Merit — general (array-based) functions
+# ---------------------------------------------------------------------------
+
 def calc_deadtime(nCaptures, threshold, runtime):
-    """ Requires number of nCaptures, threshold for vetoing, and runtime in hours"""
+    """Dead-time fraction from per-muon capture arrays.
+
+    Parameters
+    ----------
+    nCaptures : array-like
+        Per-muon NC capture counts.
+    threshold : int
+        Veto threshold W: muons with nCaptures >= threshold are vetoed.
+    runtime : float
+        Simulated runtime in **hours**.
+
+    Returns
+    -------
+    float
+        Dead-time fraction (veto time / runtime).
+    """
     above_threshold = nCaptures >= threshold
-    above_threshold_sum = np.sum(above_threshold)
-    veto_time = above_threshold_sum * 5 * 54 / np.log(2) / (60 * 60) # in hours, single veto is ~ 5 minutes
-    deadtime = veto_time / runtime # runtime has to be in hours
-    return deadtime # find new way to calculate uncertainty
+    veto_time = np.sum(above_threshold) * VETO_DURATION_H  # hours
+    return veto_time / runtime
+
 
 def calc_germanium_efficiency(nCaptures, threshold, ge77_counts):
+    """Ge-77 detection efficiency from per-muon arrays.
+
+    Parameters
+    ----------
+    nCaptures : array-like
+        Per-muon NC capture counts.
+    threshold : int
+        Veto threshold W.
+    ge77_counts : array-like
+        Per-muon Ge-77 event weights (1 for Ge77 muons, 0 otherwise).
+
+    Returns
+    -------
+    float
+        Fraction of Ge-77 events that are detected (i.e. would be vetoed).
+    """
     total_events = np.sum(ge77_counts)
-    cut_events = np.sum((nCaptures >= threshold) * ge77_counts) # This actually works. Weight each event by its Ge-77 count
-    efficiency = cut_events / total_events
-    return efficiency # Find new way to calculate uncertainty
+    cut_events   = np.sum((nCaptures >= threshold) * ge77_counts)
+    return cut_events / total_events
 
-def figure_of_merit(ge_survival_eff, signal_survival_eff):
-    s = (np.log(2) * N_a / m_76) * epsilon_tot * exposure * (1 / T_half) * signal_survival_eff
-    b = exposure * delta_E * signal_survival_eff * (r_prod * (a_rel * ge_survival_eff * c_ge77m + (1 - a_rel * (1 - 0.19)) * c_ge77) + BI_other)
 
-    if b <= 0 or s <= 0:  
+def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float:
+    """Core Figure of Merit formula.
+
+    Parameters
+    ----------
+    ge_survival_eff : float
+        Fraction of Ge-77 muons that are *not* detected (1 − Recall).
+    signal_survival_eff : float
+        Fraction of livetime that is *not* vetoed (1 − deadtime).
+
+    Returns
+    -------
+    float
+        FoM value, or np.nan when the formula is undefined (s ≤ 0 or b ≤ 0).
+    """
+    s = (np.log(2) * N_a / m_76) * epsilon_tot * exposure * (1.0 / T_half) * signal_survival_eff
+    b = (exposure * delta_E * signal_survival_eff
+         * (r_prod * (a_rel * ge_survival_eff * c_ge77m
+                      + (1.0 - a_rel * (1.0 - 0.19)) * c_ge77)
+            + BI_other))
+    if b <= 0 or s <= 0:
         return np.nan
-    
-    fom = np.sqrt(2 * ((s + b) * np.log(1 + s/b) - s))
-    return fom
+    return float(np.sqrt(2.0 * ((s + b) * np.log(1.0 + s / b) - s)))
+
 
 def calc_figure_of_merit(nCaptures, threshold, ge77_counts, runtime):
-    ge_survival_eff = 1 - calc_germanium_efficiency(nCaptures, threshold=threshold, ge77_counts=ge77_counts)
-    signal_survival_eff = 1 - calc_deadtime(nCaptures, threshold=threshold, runtime=runtime)
+    """Figure of Merit from per-muon arrays (combines helpers above)."""
+    ge_survival_eff     = 1.0 - calc_germanium_efficiency(nCaptures, threshold, ge77_counts)
+    signal_survival_eff = 1.0 - calc_deadtime(nCaptures, threshold, runtime)
     return figure_of_merit(ge_survival_eff, signal_survival_eff)
+
+
+# ---------------------------------------------------------------------------
+# Figure of Merit — confusion-matrix helpers
+# ---------------------------------------------------------------------------
+
+def calc_deadtime_confusion(
+    n_positives: int,
+    total_muons: int,
+    musun_rate: float = MUSUN_RATE,
+) -> float:
+    """Dead-time fraction from confusion-matrix counts.
+
+    Parameters
+    ----------
+    n_positives : int
+        TP + FP — muons classified as Ge77 and therefore vetoed.
+    total_muons : int
+        TP + FP + TN + FN — total simulated muons.
+    musun_rate : float
+        Musun rate in muons / hour (default: 504).
+
+    Returns
+    -------
+    float
+        Dead-time fraction; 0.0 if total_muons == 0.
+    """
+    if total_muons <= 0:
+        return 0.0
+    runtime_h = total_muons / musun_rate
+    veto_h    = n_positives * VETO_DURATION_H
+    return veto_h / runtime_h
+
+
+def calc_ge_survival_confusion(TP: int, FN: int) -> float:
+    """Ge77-muon survival fraction from confusion-matrix counts.
+
+    Returns ``1 − Recall = FN / (TP + FN)``: the fraction of true Ge77
+    muons that are *not* detected and therefore survive the veto.
+    Returns 1.0 when TP + FN == 0 (no Ge77 muons — all survive by default).
+    """
+    denom = TP + FN
+    return FN / denom if denom > 0 else 1.0
+
+
+def calc_fom_confusion(
+    TP: int,
+    FP: int,
+    FN: int,
+    total_muons: int,
+    musun_rate: float = MUSUN_RATE,
+) -> float:
+    """Figure of Merit computed from a confusion matrix.
+
+    Convenience wrapper that calls:
+      - ``calc_ge_survival_confusion``  →  ge_survival_eff  =  1 − Recall
+      - ``calc_deadtime_confusion``     →  deadtime
+      - ``figure_of_merit``             →  FoM
+
+    Parameters
+    ----------
+    TP, FP, FN : int
+        Confusion-matrix counts (TN is not required).
+    total_muons : int
+        TP + FP + TN + FN — total simulated muons.
+    musun_rate : float
+        Musun rate in muons / hour (default: 504).
+
+    Returns
+    -------
+    float
+        FoM value, or np.nan when undefined.
+    """
+    ge_surv  = calc_ge_survival_confusion(TP, FN)
+    deadtime = calc_deadtime_confusion(TP + FP, total_muons, musun_rate)
+    return figure_of_merit(ge_surv, 1.0 - deadtime)

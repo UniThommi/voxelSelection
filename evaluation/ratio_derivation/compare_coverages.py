@@ -67,6 +67,7 @@ from scipy import stats as scipy_stats
 
 # Shared W2-correlation plotting helper (identical across both pipelines).
 from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
+from pmtopt.geometry import calc_fom_confusion
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -1024,8 +1025,190 @@ def plot_mw_sweep(
         print(f"  Saved {fname}")
 
 
+
 # ──────────────────────────────────────────────────────────────────────
-# Plot 12 — W2 vs NC coverage scatter (optional)
+# Plots 12 — Figure of Merit
+# ──────────────────────────────────────────────────────────────────────
+
+def _cc_fom_grid(
+    r: "SetupResult",
+    M_values: list[int],
+    W_values: list[int],
+) -> dict[tuple[int, int], float]:
+    """Return {(M, W): fom} for all combinations. Missing entries → nan."""
+    total_muons = r.muon["muon_stats"]["total"]
+    result: dict[tuple[int, int], float] = {}
+    for M in M_values:
+        for W in W_values:
+            cm = r.muon["confusion"].get((M, W))
+            if cm is None:
+                result[(M, W)] = float("nan")
+            else:
+                result[(M, W)] = calc_fom_confusion(
+                    cm["TP"], cm["FP"], cm["FN"], total_muons
+                )
+    return result
+
+
+def plot_fom_summary(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+) -> None:
+    """Horizontal bar chart: max FoM per setup, annotated with optimal (M, W).
+
+    Setups are shown in their original order.
+    """
+    colors   = _colors(len(results))
+    max_foms: list[float] = []
+    best_mw:  list[str]   = []
+
+    for r in results:
+        grid  = _cc_fom_grid(r, M_values, W_values)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best = max(valid, key=valid.__getitem__)
+            max_foms.append(valid[best])
+            best_mw.append(f"M{best[0]}W{best[1]}")
+        else:
+            max_foms.append(float("nan"))
+            best_mw.append("N/A")
+
+    y_max  = max((f for f in max_foms if np.isfinite(f)), default=1.0)
+    y      = np.arange(len(results))
+    fig, ax = plt.subplots(figsize=(8, max(4, len(results) * 0.55)))
+    bars = ax.barh(y, max_foms, color=colors, height=0.6)
+
+    for bar, mw, fom in zip(bars, best_mw, max_foms):
+        if np.isfinite(fom):
+            ax.text(
+                fom + 0.01 * y_max,
+                bar.get_y() + bar.get_height() / 2,
+                mw, va="center", ha="left", fontsize=8,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_xlabel("Figure of Merit  (max over all M, W)", fontsize=11)
+    ax.set_title(
+        "Ge-77 Muon Figure of Merit — Best (M, W) per Configuration",
+        fontsize=12, pad=10,
+    )
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    fname = "12_fom_summary.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_fom_per_setup(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+) -> None:
+    """Per-setup FoM figures: heatmap (M × W grid) and MW-sweep line.
+
+    Produces two PNG files per setup:
+      12_fom_heatmap_{label}.png  — 2-D colour map of FoM over (M, W)
+      12_fom_line_{label}.png     — line sweep of FoM across all (M, W) pairs
+
+    The cell / point with the maximum FoM is highlighted in both panels.
+    """
+    mw_pairs = [(M, W) for M in M_values for W in W_values]
+    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
+    x_arr    = np.arange(len(mw_pairs))
+    n_w      = len(W_values)
+
+    for r in results:
+        grid      = _cc_fom_grid(r, M_values, W_values)
+        safe_name = r.label.replace(" ", "_").replace("/", "_")
+        finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
+
+        # ── 1. Heatmap ────────────────────────────────────────────────
+        heat = np.array(
+            [[grid.get((M, W), float("nan")) for M in M_values] for W in W_values]
+        )  # shape (n_W, n_M)
+
+        fig_h, ax_h = plt.subplots(
+            figsize=(max(6, len(M_values) * 0.9), max(5, len(W_values) * 0.45))
+        )
+        im = ax_h.imshow(
+            heat, aspect="auto", origin="lower",
+            extent=[M_values[0] - 0.5, M_values[-1] + 0.5,
+                    W_values[0] - 0.5, W_values[-1] + 0.5],
+            cmap="viridis",
+        )
+        plt.colorbar(im, ax=ax_h, label="Figure of Merit")
+
+        if finite:
+            best = max(finite, key=finite.__getitem__)
+            ax_h.scatter(
+                best[0], best[1],
+                marker="*", s=250, color="red", zorder=5,
+                label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
+            )
+            ax_h.legend(fontsize=9, loc="upper right")
+
+        ax_h.set_xlabel("M  (NC threshold)", fontsize=11)
+        ax_h.set_ylabel("W  (muon threshold)", fontsize=11)
+        ax_h.set_xticks(M_values)
+        ax_h.set_yticks(W_values)
+        ax_h.set_title(f"Figure of Merit — {r.label}", fontsize=12, pad=10)
+        fig_h.tight_layout()
+        fname_h = f"12_fom_heatmap_{safe_name}.png"
+        fig_h.savefig(os.path.join(output_dir, fname_h), dpi=150)
+        plt.close(fig_h)
+        print(f"  Saved {fname_h}")
+
+        # ── 2. Line sweep ─────────────────────────────────────────────
+        fom_vals = [grid.get((M, W), float("nan")) for M, W in mw_pairs]
+        fig_w    = max(30, len(mw_pairs) * 0.18)
+        fig_l, ax_l = plt.subplots(figsize=(fig_w, 6))
+
+        ax_l.plot(x_arr, fom_vals, color="steelblue",
+                  linewidth=1.4, marker=".", markersize=4)
+
+        finite_idx = [(i, v) for i, v in enumerate(fom_vals) if np.isfinite(v)]
+        if finite_idx:
+            best_i, best_v = max(finite_idx, key=lambda t: t[1])
+            best_pair = mw_pairs[best_i]
+            ax_l.scatter(
+                best_i, best_v,
+                marker="*", s=250, color="red", zorder=5,
+                label=f"Best: M{best_pair[0]}W{best_pair[1]} = {best_v:.4g}",
+            )
+            ax_l.legend(fontsize=9, loc="upper right")
+
+        for gi, M in enumerate(M_values):
+            group_start = gi * n_w
+            group_mid   = group_start + (n_w - 1) / 2
+            if gi > 0:
+                ax_l.axvline(group_start - 0.5, color="gray",
+                             linewidth=0.6, linestyle="--", alpha=0.5)
+            ax_l.text(
+                group_mid, 1.02, f"M={M}",
+                transform=ax_l.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color="dimgray",
+            )
+
+        ax_l.set_xticks(x_arr)
+        ax_l.set_xticklabels(x_labels, rotation=90, fontsize=7)
+        ax_l.set_ylabel("Figure of Merit", fontsize=11)
+        ax_l.set_xlim(-0.5, len(mw_pairs) - 0.5)
+        ax_l.set_title(f"Figure of Merit — {r.label}", fontsize=12, pad=20)
+        ax_l.grid(True, axis="y", alpha=0.3)
+        fig_l.tight_layout()
+        fname_l = f"12_fom_line_{safe_name}.png"
+        fig_l.savefig(os.path.join(output_dir, fname_l), dpi=150)
+        plt.close(fig_l)
+        print(f"  Saved {fname_l}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 13 — W2 vs NC coverage scatter (optional)
 # ──────────────────────────────────────────────────────────────────────
 def plot_w2_scatter(
     results: list[SetupResult],
@@ -1831,6 +2014,11 @@ def main() -> None:
     # plot_w_histogram(results, M_default, W_default, args.output_dir)
     # M×W sweep
     plot_mw_sweep(results, M_values, W_values, args.output_dir)
+
+    # Figure of Merit
+    plot_fom_summary(results, M_values, W_values, args.output_dir)
+    plot_fom_per_setup(results, M_values, W_values, args.output_dir)
+
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
     # W2 correlation analysis
