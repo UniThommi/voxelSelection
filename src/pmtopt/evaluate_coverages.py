@@ -754,7 +754,9 @@ def plot_mw_sweep(
     Precision = TP / (TP + FP)
     FoM       = calc_fom_confusion(TP, FP, FN, total_primaries)  [if total_primaries > 0]
     """
-    ordered    = _sorted_by_w2(configs)
+    # Exclude the "all voxels" reference from line plots
+    ordered    = [cfg for cfg in _sorted_by_w2(configs)
+                  if cfg.name != _ALL_VOXELS_NAME]
     colors_all = _get_colors(len(ordered))
     color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
@@ -798,32 +800,40 @@ def plot_mw_sweep(
                 linewidth=1.2, marker=".", markersize=4,
             )
 
-        # Envelope: max across all configs at W=1 for each M (connected)
+        # Envelope: for each M, the highest value achieved by any setup
+        # at any W in that M-group (placed at the x-position of that W)
         env_x, env_y = [], []
         for M in M_values:
-            idx = next((i for i, (m, w) in enumerate(mw_pairs) if m == M and w == 1), None)
-            if idx is None:
-                continue
-            max_val = -np.inf
-            for cfg in ordered:
-                cm = cfg.confusion.get((M, 1))
-                if cm is None:
+            best_idx = None
+            best_val = -np.inf
+            for W in W_values:
+                idx = next(
+                    (i for i, (m, w) in enumerate(mw_pairs) if m == M and w == W),
+                    None,
+                )
+                if idx is None:
                     continue
-                TP, FP, FN = cm["TP"], cm["FP"], cm["FN"]
-                if metric_name == "Recall":
-                    denom = TP + FN
-                    v = TP / denom if denom > 0 else 0.0
-                elif metric_name == "Precision":
-                    denom = TP + FP
-                    v = TP / denom if denom > 0 else 0.0
-                else:  # FoM
-                    v = calc_fom_confusion(TP, FP, FN, total_primaries)
-                    if not np.isfinite(v):
+                for cfg in ordered:
+                    cm = cfg.confusion.get((M, W))
+                    if cm is None:
                         continue
-                max_val = max(max_val, v)
-            if np.isfinite(max_val):
-                env_x.append(idx)
-                env_y.append(max_val)
+                    TP, FP, FN = cm["TP"], cm["FP"], cm["FN"]
+                    if metric_name == "Recall":
+                        denom = TP + FN
+                        v = TP / denom if denom > 0 else 0.0
+                    elif metric_name == "Precision":
+                        denom = TP + FP
+                        v = TP / denom if denom > 0 else 0.0
+                    else:  # FoM
+                        v = calc_fom_confusion(TP, FP, FN, total_primaries)
+                        if not np.isfinite(v):
+                            continue
+                    if v > best_val:
+                        best_val = v
+                        best_idx = idx
+            if best_idx is not None and np.isfinite(best_val):
+                env_x.append(best_idx)
+                env_y.append(best_val)
         if env_x:
             ax.plot(
                 env_x, env_y,
@@ -941,12 +951,14 @@ def plot_fom_summary(
             ax.text(
                 fom + 0.01 * y_max,
                 bar.get_y() + bar.get_height() / 2,
-                mw,
+                f"{fom:.4g}  [{mw}]",
                 va="center", ha="left", fontsize=8,
             )
 
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=9)
+    # Extra right margin so annotations don't get clipped
+    ax.set_xlim(right=y_max * 1.35)
     ax.set_xlabel("Figure of Merit  (max over all M, W)", fontsize=11)
     ax.set_title(
         "Ge-77 Muon Figure of Merit — Best (M, W) per Configuration",
@@ -969,13 +981,12 @@ def plot_fom_per_setup(
     output_dir: Path,
     verbose: bool = True,
 ) -> None:
-    """Per-config FoM figures: heatmap (M × W grid) and MW-sweep line.
+    """Per-config FoM heatmap (M × W grid).
 
-    Produces two PNG files per config:
+    Produces one PNG file per config:
       fom_heatmap_{name}.png  — 2-D colour map of FoM over (M, W)
-      fom_line_{name}.png     — line sweep of FoM across all (M, W) pairs
 
-    The cell / point with the maximum FoM is highlighted in both panels.
+    The cell with the maximum FoM is highlighted.
     """
     ordered  = _sorted_by_w2(configs)
     mw_pairs = [(M, W) for M in M_values for W in W_values]
@@ -1025,50 +1036,6 @@ def plot_fom_per_setup(
         plt.close(fig_h)
         if verbose:
             print(f"  Saved: {out_h}")
-
-        # ── 2. Line sweep ─────────────────────────────────────────────
-        fom_vals = [grid.get((M, W), np.nan) for M, W in mw_pairs]
-        fig_w    = max(30, len(mw_pairs) * 0.18)
-        fig_l, ax_l = plt.subplots(figsize=(fig_w, 6))
-
-        ax_l.plot(x_arr, fom_vals, color="steelblue",
-                  linewidth=1.4, marker=".", markersize=4)
-
-        finite_idx = [(i, v) for i, v in enumerate(fom_vals) if np.isfinite(v)]
-        if finite_idx:
-            best_i, best_v = max(finite_idx, key=lambda t: t[1])
-            best_pair = mw_pairs[best_i]
-            ax_l.scatter(
-                best_i, best_v,
-                marker="*", s=250, color="red", zorder=5,
-                label=f"Best: M{best_pair[0]}W{best_pair[1]} = {best_v:.4g}",
-            )
-            ax_l.legend(fontsize=9, loc="upper right")
-
-        for gi, M in enumerate(M_values):
-            group_start = gi * n_w
-            group_mid   = group_start + (n_w - 1) / 2
-            if gi > 0:
-                ax_l.axvline(group_start - 0.5, color="gray",
-                             linewidth=0.6, linestyle="--", alpha=0.5)
-            ax_l.text(
-                group_mid, 1.02, f"M={M}",
-                transform=ax_l.get_xaxis_transform(),
-                ha="center", va="bottom", fontsize=8, color="dimgray",
-            )
-
-        ax_l.set_xticks(x_arr)
-        ax_l.set_xticklabels(x_labels, rotation=90, fontsize=7)
-        ax_l.set_ylabel("Figure of Merit", fontsize=11)
-        ax_l.set_xlim(-0.5, len(mw_pairs) - 0.5)
-        ax_l.set_title(f"Figure of Merit — {title_sfx}", fontsize=12, pad=20)
-        ax_l.grid(True, axis="y", alpha=0.3)
-        fig_l.tight_layout()
-        out_l = output_dir / f"fom_line_{safe_name}.png"
-        plt.savefig(out_l, dpi=200, bbox_inches="tight")
-        plt.close(fig_l)
-        if verbose:
-            print(f"  Saved: {out_l}")
 
 
 
@@ -2045,14 +2012,17 @@ def plot_w2_spearman_vs_m(
     W_default: int,
     output_dir: Path,
     verbose: bool = True,
+    total_primaries: int = 0,
+    W_values: list[int] | None = None,
 ) -> None:
     """
     Plot E — Spearman ρ between W2 and each metric as a function of M.
 
-    Three lines on one axes:
+    Lines on one axes:
       - ρ(W2, NC_fraction_M)
       - ρ(W2, Recall at (M, W_default))
       - ρ(W2, Precision at (M, W_default))
+      - ρ(W2, best FoM at M)  [only when total_primaries > 0]
 
     A shaded band marks the ±0.3 'weak correlation' zone.
     Markers are filled for p<0.05, hollow for p≥0.05.
@@ -2069,9 +2039,11 @@ def plot_w2_spearman_vs_m(
     rho_nc   = []
     rho_rec  = []
     rho_prec = []
+    rho_fom  = []
     p_nc   = []
     p_rec  = []
     p_prec = []
+    p_fom  = []
 
     for M in M_values:
         nc_arr   = np.array([_nc_frac(cfg, M) for cfg in w2_cfgs])
@@ -2086,17 +2058,42 @@ def plot_w2_spearman_vs_m(
         rho_rec.append(r2);  p_rec.append(p2)
         rho_prec.append(r3); p_prec.append(p3)
 
+        if total_primaries > 0 and W_values:
+            fom_arr = []
+            for cfg in w2_cfgs:
+                best = np.nan
+                for W in W_values:
+                    cm = cfg.confusion.get((M, W))
+                    if cm is None:
+                        continue
+                    v = calc_fom_confusion(cm["TP"], cm["FP"], cm["FN"], total_primaries)
+                    if np.isfinite(v) and (np.isnan(best) or v > best):
+                        best = v
+                fom_arr.append(best)
+            fom_arr = np.array(fom_arr)
+            mask = np.isfinite(fom_arr)
+            if mask.sum() >= 3:
+                r4, p4 = scipy_stats.spearmanr(w2_arr[mask], fom_arr[mask])
+            else:
+                r4, p4 = np.nan, np.nan
+            rho_fom.append(r4)
+            p_fom.append(p4)
+
     fig, ax = plt.subplots(figsize=(10, 5))
 
     x = np.array(M_values)
     ax.axhline(0,  color="black", linewidth=0.8)
     ax.axhspan(-0.3, 0.3, color="gray", alpha=0.08, label="weak |ρ|<0.3")
 
-    for rhos, ps, label, color, marker in [
-        (rho_nc,   p_nc,   "NC fraction",              "#1f77b4", "o"),
-        (rho_rec,  p_rec,  f"Recall (W={W_default})",  "#d62728", "s"),
-        (rho_prec, p_prec, f"Precision (W={W_default})","#2ca02c", "^"),
-    ]:
+    series = [
+        (rho_nc,   p_nc,   "NC fraction",               "#1f77b4", "o"),
+        (rho_rec,  p_rec,  f"Recall (W={W_default})",   "#d62728", "s"),
+        (rho_prec, p_prec, f"Precision (W={W_default})", "#2ca02c", "^"),
+    ]
+    if total_primaries > 0 and rho_fom:
+        series.append((rho_fom, p_fom, "Best FoM (over W)", "#ff7f0e", "D"))
+
+    for rhos, ps, label, color, marker in series:
         rhos = np.array(rhos)
         ps   = np.array(ps)
         sig_mask  = ps < 0.05
@@ -2461,6 +2458,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     plot_w2_spearman_vs_m(
         all_configs, M_values, args.W_default, output_dir, verbose=verbose,
+        total_primaries=_total_primaries, W_values=W_values,
     )
 
     if verbose:
