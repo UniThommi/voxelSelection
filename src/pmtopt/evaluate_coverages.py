@@ -738,17 +738,21 @@ def plot_mw_sweep(
     W_values: list[int],
     output_dir: Path,
     verbose: bool = True,
+    total_primaries: int = 0,
 ) -> None:
     """
-    One figure per metric (Recall, Precision) sweeping all (M, W) pairs.
+    One figure per metric (Recall, Precision, and optionally FoM) sweeping
+    all (M, W) pairs.
 
     X-axis order: M1W1, M1W2, …, M1W_max, M2W1, … (M outer, W inner).
     Each config is one line in its palette colour.  Vertical dashed
     separators mark M-group boundaries; the M value is labelled above
-    each group.  Y-axis shows percentage values (0 %–100 %).
+    each group.  Y-axis shows percentage values (0 %–100 %) for
+    Recall/Precision, and raw FoM values for the FoM sweep.
 
     Recall    = TP / (TP + FN)
     Precision = TP / (TP + FP)
+    FoM       = calc_fom_confusion(TP, FP, FN, total_primaries)  [if total_primaries > 0]
     """
     ordered    = _sorted_by_w2(configs)
     colors_all = _get_colors(len(ordered))
@@ -759,10 +763,14 @@ def plot_mw_sweep(
     x        = np.arange(len(mw_pairs))
     n_w      = len(W_values)
 
-    for metric_name, fname_suffix in [
+    metrics_list = [
         ("Recall",    "recall"),
         ("Precision", "precision"),
-    ]:
+    ]
+    if total_primaries > 0:
+        metrics_list.append(("FoM", "fom"))
+
+    for metric_name, fname_suffix in metrics_list:
         fig_w = max(30, len(mw_pairs) * 0.18)
         fig, ax = plt.subplots(figsize=(fig_w, 9))
 
@@ -771,15 +779,17 @@ def plot_mw_sweep(
             for M, W in mw_pairs:
                 cm = cfg.confusion.get((M, W))
                 if cm is None:
-                    vals.append(0.0)
+                    vals.append(np.nan)
                     continue
                 TP, FP, FN = cm["TP"], cm["FP"], cm["FN"]
                 if metric_name == "Recall":
                     denom = TP + FN
                     vals.append(TP / denom if denom > 0 else 0.0)
-                else:
+                elif metric_name == "Precision":
                     denom = TP + FP
                     vals.append(TP / denom if denom > 0 else 0.0)
+                else:  # FoM
+                    vals.append(calc_fom_confusion(TP, FP, FN, total_primaries))
 
             ax.plot(
                 x, vals,
@@ -794,7 +804,7 @@ def plot_mw_sweep(
             idx = next((i for i, (m, w) in enumerate(mw_pairs) if m == M and w == 1), None)
             if idx is None:
                 continue
-            max_val = 0.0
+            max_val = -np.inf
             for cfg in ordered:
                 cm = cfg.confusion.get((M, 1))
                 if cm is None:
@@ -803,12 +813,17 @@ def plot_mw_sweep(
                 if metric_name == "Recall":
                     denom = TP + FN
                     v = TP / denom if denom > 0 else 0.0
-                else:
+                elif metric_name == "Precision":
                     denom = TP + FP
                     v = TP / denom if denom > 0 else 0.0
+                else:  # FoM
+                    v = calc_fom_confusion(TP, FP, FN, total_primaries)
+                    if not np.isfinite(v):
+                        continue
                 max_val = max(max_val, v)
-            env_x.append(idx)
-            env_y.append(max_val)
+            if np.isfinite(max_val):
+                env_x.append(idx)
+                env_y.append(max_val)
         if env_x:
             ax.plot(
                 env_x, env_y,
@@ -836,11 +851,14 @@ def plot_mw_sweep(
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, rotation=90, fontsize=7)
         ax.set_ylabel(metric_name, fontsize=12)
-        ax.set_ylim(-0.02, 1.08)
-        ax.yaxis.set_major_formatter(
-            mticker.FuncFormatter(lambda v, _: f"{v * 100:.0f}%")
-        )
-        ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
+        if metric_name == "FoM":
+            ax.yaxis.set_major_locator(mticker.AutoLocator())
+        else:
+            ax.set_ylim(-0.02, 1.08)
+            ax.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v * 100:.0f}%")
+            )
+            ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
         ax.set_title(
             f"Ge-77 Muon Classification — {metric_name} across all (M, W) combinations",
             fontsize=13, pad=20,
@@ -2400,9 +2418,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         ratio_override_warning=ratio_override_warning,
     )
 
-    # M×W sweep
-    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose)
-
     # Figure of Merit — use total primary muons (all muons, not just NC-producing)
     _total_primaries = (
         ed.num_primaries if ed.num_primaries > 0
@@ -2414,6 +2429,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         _source = "HDF5 /primaries" if ed.num_primaries > 0 else f"{ed.num_runs} runs × {MUONS_PER_RUN_DIR:,}"
         print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_source})")
         print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+
+    # M×W sweep
+    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose,
+                  total_primaries=_total_primaries)
     plot_fom_summary(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
     plot_fom_per_setup(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
     plot_w2_fom_best(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)

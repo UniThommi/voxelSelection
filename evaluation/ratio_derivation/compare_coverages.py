@@ -930,13 +930,15 @@ def plot_mw_sweep(
     M_values: list[int],
     W_values: list[int],
     output_dir: str,
+    total_primaries: int = 0,
 ) -> None:
-    """One line plot per metric (Recall, Precision) across all (M, W) pairs.
+    """One line plot per metric (Recall, Precision, and optionally FoM) across all (M, W) pairs.
 
     X-axis order: M1W1, M1W2, …, M1W_max, M2W1, … (M outer, W inner).
     Each setup is a line in its consistent palette colour.
     Vertical separators mark M-group boundaries; the M value is annotated
-    above each group.  Y-axis shows percentage values (0 %–100 %).
+    above each group.  Y-axis shows percentage values (0 %–100 %) for
+    Recall/Precision; raw FoM values for the FoM sweep.
     """
     colors  = _colors(len(results))
     mw_pairs = [(M, W) for M in M_values for W in W_values]
@@ -944,24 +946,37 @@ def plot_mw_sweep(
     x        = np.arange(len(mw_pairs))
     n_w      = len(W_values)
 
-    for metric, fname_part, plot_num in [
+    metrics_list = [
         ("Recall",    "recall",    "10"),
         ("Precision", "precision", "11"),
-    ]:
+    ]
+    if total_primaries > 0:
+        metrics_list.append(("FoM", "fom", "12"))
+
+    for metric, fname_part, plot_num in metrics_list:
         # Wide enough to give each tick ~0.18 inches; minimum 30 inches
         fig_w = max(30, len(mw_pairs) * 0.18)
         fig, ax = plt.subplots(figsize=(fig_w, 9))
 
         for r, c in zip(results, colors):
-            vals = [
-                compute_metrics(
-                    r.muon["confusion"][(M, W)]["TP"],
-                    r.muon["confusion"][(M, W)]["FP"],
-                    r.muon["confusion"][(M, W)]["TN"],
-                    r.muon["confusion"][(M, W)]["FN"],
-                )[metric]
-                for M, W in mw_pairs
-            ]
+            vals = []
+            for M, W in mw_pairs:
+                cm = r.muon["confusion"].get((M, W))
+                if cm is None:
+                    vals.append(np.nan)
+                    continue
+                if metric == "Recall":
+                    vals.append(compute_metrics(
+                        cm["TP"], cm["FP"], cm["TN"], cm["FN"],
+                    )[metric])
+                elif metric == "Precision":
+                    vals.append(compute_metrics(
+                        cm["TP"], cm["FP"], cm["TN"], cm["FN"],
+                    )[metric])
+                else:  # FoM
+                    vals.append(calc_fom_confusion(
+                        cm["TP"], cm["FP"], cm["FN"], total_primaries,
+                    ))
             ax.plot(x, vals, color=c, label=r.label,
                     linewidth=1.2, marker=".", markersize=4)
 
@@ -971,15 +986,23 @@ def plot_mw_sweep(
             idx = next((i for i, (m, w) in enumerate(mw_pairs) if m == M and w == 1), None)
             if idx is None:
                 continue
-            max_val = 0.0
+            max_val = -np.inf
             for r in results:
                 cm = r.muon["confusion"].get((M, 1))
                 if cm is None:
                     continue
-                v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                if metric == "Recall":
+                    v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                elif metric == "Precision":
+                    v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                else:  # FoM
+                    v = calc_fom_confusion(cm["TP"], cm["FP"], cm["FN"], total_primaries)
+                    if not np.isfinite(v):
+                        continue
                 max_val = max(max_val, v)
-            env_x.append(idx)
-            env_y.append(max_val)
+            if np.isfinite(max_val):
+                env_x.append(idx)
+                env_y.append(max_val)
         if env_x:
             ax.plot(
                 env_x, env_y,
@@ -1005,11 +1028,14 @@ def plot_mw_sweep(
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, rotation=90, fontsize=7)
         ax.set_ylabel(metric, fontsize=12)
-        ax.set_ylim(-0.02, 1.08)
-        ax.yaxis.set_major_formatter(
-            mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
-        )
-        ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
+        if metric == "FoM":
+            ax.yaxis.set_major_locator(mticker.AutoLocator())
+        else:
+            ax.set_ylim(-0.02, 1.08)
+            ax.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
+            )
+            ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
         ax.set_title(
             f"Ge-77 Muon Classification — {metric} across all (M, W) combinations",
             fontsize=13, pad=20,
@@ -2190,8 +2216,6 @@ def main() -> None:
     plot_confusion_bar(results, M_default, W_default, args.output_dir)
     # W histogram — too noisy at this scale, omitted:
     # plot_w_histogram(results, M_default, W_default, args.output_dir)
-    # M×W sweep
-    plot_mw_sweep(results, M_values, W_values, args.output_dir)
 
     # Figure of Merit — use total primary muons (all muons, not just NC-producing)
     _n_runs       = len(count_vertices_by_run(args.sim_dirs[0], omit_runs=omit_runs))
@@ -2200,6 +2224,10 @@ def main() -> None:
     _runtime_yr   = _runtime_h / (24 * 365.25)
     print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
     print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+
+    # M×W sweep (Recall, Precision, FoM)
+    plot_mw_sweep(results, M_values, W_values, args.output_dir,
+                  total_primaries=_total_primaries)
     plot_fom_summary(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
     plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
     plot_w2_fom_best(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
