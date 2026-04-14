@@ -1218,6 +1218,173 @@ def plot_fom_per_setup(
         print(f"  Saved {fname_l}")
 
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Plots 18 — W2 correlation: FoM and Recall
+# ──────────────────────────────────────────────────────────────────────
+
+def plot_w2_fom_best(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+) -> None:
+    """Scatter: best FoM (max over all M, W) vs W2.
+
+    One labelled point per setup with W2.  OLS + Spearman ρ overlay.
+    """
+    w2_res = sorted(
+        [r for r in results if r.w2 is not None],
+        key=lambda r: r.w2,
+    )
+    if len(w2_res) < 2:
+        print("  [SKIP] 18_w2_fom_best.png: fewer than 2 setups have W2.")
+        return
+
+    colors   = _colors(len(w2_res))
+    w2_vals  = np.array([r.w2 for r in w2_res])
+    fom_best = np.array([
+        max(
+            (v for v in _cc_fom_grid(
+                r, M_values, W_values,
+                total_primaries if total_primaries > 0
+                else r.muon["muon_stats"]["total"]
+             ).values() if np.isfinite(v)),
+            default=float("nan"),
+        )
+        for r in w2_res
+    ])
+    mask = np.isfinite(fom_best)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for r, w2v, fom, col in zip(w2_res, w2_vals, fom_best, colors):
+        if np.isfinite(fom):
+            ax.scatter(w2v, fom, color=col, s=65, zorder=3)
+            ax.annotate(r.label, xy=(w2v, fom), xytext=(4, 3),
+                        textcoords="offset points", fontsize=7)
+
+    if mask.sum() >= 2:
+        from scipy import stats as _st
+        slope, intercept, _, _, _ = _st.linregress(w2_vals[mask], fom_best[mask])
+        rho, p_rho = _st.spearmanr(w2_vals[mask], fom_best[mask])
+        x_line = np.linspace(w2_vals[mask].min(), w2_vals[mask].max(), 200)
+        ax.plot(x_line, slope * x_line + intercept,
+                color="black", linestyle="--", linewidth=1.3,
+                label=f"OLS   ρ_s = {rho:+.3f}   p = {p_rho:.3f}")
+        ax.legend(fontsize=9)
+
+    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=11)
+    ax.set_ylabel("Best FoM  (max over all M, W)", fontsize=11)
+    ax.set_title("W2 Homogeneity vs Best Achievable FoM", fontsize=12, pad=10)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "18_w2_fom_best.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_w2_sorted_heatmaps(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+) -> None:
+    """W2-sorted heatmaps of Recall and FoM vs (setup × W) for M ∈ {1,3,5,10}.
+
+    Setups sorted left-to-right by ascending W2 (most uniform first).
+    W2 value is appended to each x-axis label.
+    Only setups with a W2 value are included.
+
+    Produces 4 Recall figures and 4 FoM figures:
+      18_w2_heatmap_recall_M{M:02d}.png
+      18_w2_heatmap_fom_M{M:02d}.png
+    """
+    w2_res = sorted(
+        [r for r in results if r.w2 is not None],
+        key=lambda r: r.w2,
+    )
+    if len(w2_res) < 2:
+        print("  [SKIP] 18_w2_sorted_heatmaps: fewer than 2 setups have W2.")
+        return
+
+    heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
+    n_res    = len(w2_res)
+    n_w      = len(W_values)
+    x_labels = [f"{r.label}\nW2={r.w2:.1f}" for r in w2_res]
+
+    for M in heatmap_ms:
+        for metric, fname_pfx, cmap, fixed_vmin, fixed_vmax in [
+            ("Recall", "18_w2_heatmap_recall", "YlOrRd",  0.0,  1.0),
+            ("FoM",    "18_w2_heatmap_fom",    "viridis", None, None),
+        ]:
+            data = np.full((n_w, n_res), np.nan)
+            for wi, W in enumerate(W_values):
+                for ri, r in enumerate(w2_res):
+                    cm = r.muon["confusion"].get((M, W))
+                    if cm is None:
+                        continue
+                    if metric == "Recall":
+                        data[wi, ri] = compute_metrics(
+                            cm["TP"], cm["FP"], cm["TN"], cm["FN"]
+                        )["Recall"]
+                    else:
+                        _tp = (total_primaries if total_primaries > 0
+                               else r.muon["muon_stats"]["total"])
+                        data[wi, ri] = calc_fom_confusion(
+                            cm["TP"], cm["FP"], cm["FN"], _tp
+                        )
+
+            finite_vals = data[np.isfinite(data)]
+            _vmin = fixed_vmin if fixed_vmin is not None else (
+                finite_vals.min() if len(finite_vals) else 0.0
+            )
+            _vmax = fixed_vmax if fixed_vmax is not None else (
+                finite_vals.max() if len(finite_vals) else 1.0
+            )
+            mid = (_vmin + _vmax) / 2
+
+            fig_w = max(8, n_res * 2.4 + 2)
+            fig_h = max(5, n_w * 0.45 + 2)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+            im = ax.imshow(
+                data, aspect="auto", cmap=cmap,
+                vmin=_vmin, vmax=_vmax, origin="upper",
+            )
+            plt.colorbar(im, ax=ax, label=metric)
+
+            for wi in range(n_w):
+                for ri in range(n_res):
+                    val = data[wi, ri]
+                    if not np.isfinite(val):
+                        continue
+                    txt     = f"{val:.3f}" if metric == "Recall" else f"{val:.3g}"
+                    txt_col = "white" if val > mid else "black"
+                    ax.text(ri, wi, txt, ha="center", va="center",
+                            fontsize=6, color=txt_col)
+
+            ax.set_xticks(range(n_res))
+            ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(range(n_w))
+            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=8)
+            metric_title = "Recall" if metric == "Recall" else "Figure of Merit"
+            ax.set_title(
+                f"{metric_title} at M={M}  —  setups sorted by W2 ascending",
+                fontsize=11, pad=8,
+            )
+            ax.set_xlabel("Setup  (sorted by W2, most uniform → left)", fontsize=10)
+            ax.set_ylabel("W  (muon threshold)", fontsize=10)
+
+            fig.tight_layout()
+            fname = f"{fname_pfx}_M{M:02d}.png"
+            fig.savefig(os.path.join(output_dir, fname), dpi=150)
+            plt.close(fig)
+            print(f"  Saved {fname}")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Plot 13 — W2 vs NC coverage scatter (optional)
 # ──────────────────────────────────────────────────────────────────────
@@ -2035,6 +2202,8 @@ def main() -> None:
     print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
     plot_fom_summary(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
     plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
+    plot_w2_fom_best(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
+    plot_w2_sorted_heatmaps(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
 
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir)
 
