@@ -662,23 +662,31 @@ def per_layer_ratio_sweep(
     W_default: int,
     seed: int = 42,
     total_primaries: int = 0,
+    early_stop_patience: int = 3,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Sweep one layer's ratio at a time; all others fixed at optimal_global_ratio."""
+    """Sweep one layer's ratio at a time; all others fixed at optimal_global_ratio.
+
+    Each layer's sweep stops as soon as mean|Pearson r| for nc_coverage at
+    M=1..4 has decreased for *early_stop_patience* consecutive steps.
+    """
     raw_rows, raw_cols, raw_vals, voxel_ids, _, layers, num_ncs, _ = ssd_coo_data
     num_voxels = len(voxel_ids)
 
-    all_rows:       list[dict]        = []
-    per_layer_optima: dict[str, float] = {}
+    all_rows:         list[dict]        = []
+    per_layer_optima: dict[str, float]  = {}
 
     for layer in ["pit", "bot", "top", "wall"]:
         print(f"  Layer: {layer}")
-        layer_rows: list[dict] = []
+        layer_rows:      list[dict]  = []
+        recent_mean_abs: list[float] = []
+        patience_count               = 0
 
         for ratio_factor in ratio_factors:
             ratio_factor = float(ratio_factor)
             area_ratios  = {lyr: optimal_global_ratio for lyr in DEFAULT_AREA_RATIOS}
             area_ratios[layer] = ratio_factor
             temp_key = (layer, ratio_factor)
+            print(f"    ratio={ratio_factor:.2f}", end=" ... ", flush=True)
 
             for i, setup in enumerate(setups):
                 setup.ssd_results[temp_key] = evaluate_ssd_at_ratio(
@@ -700,6 +708,25 @@ def per_layer_ratio_sweep(
             for setup in setups:
                 del setup.ssd_results[temp_key]
             gc.collect()
+
+            # Early stop: track mean |Pearson r| for nc_coverage at M=1..4
+            nc_rows  = [r for r in cr
+                        if r["metric"] == "nc_coverage" and 1 <= r["M"] <= 4]
+            abs_rs   = [abs(r["pearson_r"]) for r in nc_rows
+                        if not math.isnan(r["pearson_r"])]
+            mean_abs = float(np.mean(abs_rs)) if abs_rs else 0.0
+            print(f"mean|r|={mean_abs:.3f}")
+
+            if recent_mean_abs and mean_abs < recent_mean_abs[-1]:
+                patience_count += 1
+            else:
+                patience_count = 0
+            recent_mean_abs.append(mean_abs)
+
+            if patience_count >= early_stop_patience:
+                print(f"    Early stop at ratio={ratio_factor:.2f} "
+                      f"(mean|r| decreased for {early_stop_patience} consecutive steps)")
+                break
 
         all_rows.extend(layer_rows)
 
@@ -1263,10 +1290,39 @@ def write_summary(
         "  (Determined by max mean|Pearson r| for nc_coverage at M=1..4)",
         "",
     ]
+    # Warn when any optimum sits at a sweep boundary
+    boundary_warnings: list[str] = []
+    if abs(optimal_ratio - ratio_min) < 1e-9:
+        boundary_warnings.append(
+            f"  *** GLOBAL optimum ({optimal_ratio:.2f}) hit the LOWER boundary "
+            f"(ratio_min={ratio_min:.2f}) — true optimum may be even lower. ***"
+        )
+    if abs(optimal_ratio - ratio_max) < 1e-9:
+        boundary_warnings.append(
+            f"  *** GLOBAL optimum ({optimal_ratio:.2f}) hit the UPPER boundary "
+            f"(ratio_max={ratio_max:.2f}) — true optimum may be even higher. ***"
+        )
     if per_layer_optima:
         L.append("  Per-layer optimal ratios (all other layers held at global optimum):")
         for lyr, r in per_layer_optima.items():
-            L.append(f"    {lyr:>4} : {r:.4f}")
+            at_min = abs(r - ratio_min) < 1e-9
+            at_max = abs(r - ratio_max) < 1e-9
+            flag   = "  *** BOUNDARY HIT ***" if (at_min or at_max) else ""
+            L.append(f"    {lyr:>4} : {r:.4f}{flag}")
+            if at_min:
+                boundary_warnings.append(
+                    f"  *** {lyr.upper()} optimum ({r:.2f}) hit the LOWER boundary "
+                    f"— true optimum may be even lower. ***"
+                )
+            if at_max:
+                boundary_warnings.append(
+                    f"  *** {lyr.upper()} optimum ({r:.2f}) hit the UPPER boundary "
+                    f"(ratio_max={ratio_max:.2f}) — re-run with a higher --ratio-max. ***"
+                )
+        L.append("")
+    if boundary_warnings:
+        L.append("  BOUNDARY WARNINGS:")
+        L.extend(boundary_warnings)
         L.append("")
 
     # ── 4. Correlation table at optimal ratio ─────────────────────────
@@ -1331,8 +1387,9 @@ def write_summary(
         L.append("")
 
     # ── 6. Per-setup values at optimal ratio ──────────────────────────
-    opt_results = {s: s.ssd_results.get(optimal_ratio) for s in setups}
-    if any(v is not None for v in opt_results.values()):
+    # Use a plain list (SetupData is not hashable due to mutable fields)
+    opt_results = [s.ssd_results.get(optimal_ratio) for s in setups]
+    if any(v is not None for v in opt_results):
         L += [
             f"6. PER-SETUP VALUES AT OPTIMAL RATIO  (ratio={optimal_ratio:.2f})",
             _hr(),
@@ -1344,8 +1401,7 @@ def write_summary(
             f"{'SSD Rec':>9}  {'PMT Rec':>9}",
             f"  {_hr('-', 69)}",
         ]
-        for s in setups:
-            res = opt_results[s]
+        for s, res in zip(setups, opt_results):
             if res is None:
                 L.append(f"  {s.label:<30}  (no SSD results at this ratio)")
                 continue
@@ -1366,20 +1422,19 @@ def write_summary(
             f"{'PMT FoM':>10}  {'Δ (SSD-PMT)':>12}",
             f"  {_hr('-', 75)}",
         ]
-        for s in setups:
-            res = opt_results[s]
-            best_mw  = _pmt_best_mw(s, M_values, W_values, total_primaries)
-            pmt_f    = _pmt_fom(s, best_mw[0], best_mw[1], total_primaries)
+        for s, res in zip(setups, opt_results):
+            best_mw = _pmt_best_mw(s, M_values, W_values, total_primaries)
+            pmt_f   = _pmt_fom(s, best_mw[0], best_mw[1], total_primaries)
             if res is not None:
                 ssd_f = _ssd_fom(res, best_mw[0], best_mw[1], total_primaries)
                 delta = ssd_f - pmt_f if (math.isfinite(ssd_f) and math.isfinite(pmt_f)) else float("nan")
             else:
                 ssd_f = float("nan")
                 delta = float("nan")
-            mw_str   = f"M{best_mw[0]}W{best_mw[1]}"
-            ssd_str  = f"{ssd_f:.5g}"  if math.isfinite(ssd_f)  else "N/A"
-            pmt_str  = f"{pmt_f:.5g}"  if math.isfinite(pmt_f)  else "N/A"
-            dlt_str  = f"{delta:+.5g}" if math.isfinite(delta)   else "N/A"
+            mw_str  = f"M{best_mw[0]}W{best_mw[1]}"
+            ssd_str = f"{ssd_f:.5g}"  if math.isfinite(ssd_f)  else "N/A"
+            pmt_str = f"{pmt_f:.5g}"  if math.isfinite(pmt_f)  else "N/A"
+            dlt_str = f"{delta:+.5g}" if math.isfinite(delta)   else "N/A"
             L.append(
                 f"  {s.label:<30} {mw_str:>10}  {ssd_str:>10}  "
                 f"{pmt_str:>10}  {dlt_str:>12}"
@@ -1518,8 +1573,9 @@ def _parse_args() -> argparse.Namespace:
                    help="W used for recall correlation plots (default: 1)")
     p.add_argument("--ratio-min",      type=float, default=1.0,
                    help="Start of ratio sweep (default: 1.0)")
-    p.add_argument("--ratio-max",      type=float, default=10.0,
-                   help="End of ratio sweep (default: 10.0)")
+    p.add_argument("--ratio-max",      type=float, default=100.0,
+                   help="Safety cap for ratio sweep (default: 100.0); "
+                        "early stopping ends the sweep well before this")
     p.add_argument("--ratio-step",     type=float, default=0.1,
                    help="Step size for ratio sweep (default: 0.1)")
     p.add_argument("--output-dir",     default="./correlation_results",
