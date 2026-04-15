@@ -25,18 +25,20 @@ def regression_overlay(
     color_pts: list,
     labels: list[str],
     y_label: str,
+    x_label: str = "Global W2 (mm)",
 ) -> None:
-    """Shared scatter + OLS regression + residual panel for W2 correlation plots.
+    """Shared scatter + OLS regression + residual panel for correlation plots.
 
     Parameters
     ----------
     ax_scatter : top axes — receives scatter points, regression line, CI, stats box.
     ax_resid   : bottom axes (shared x with ax_scatter) — receives residual stems.
-    w2_arr     : 1-D array of W2 values, one per config.
+    w2_arr     : 1-D array of x-axis values (typically W2), one per config.
     y_arr      : 1-D array of the metric being plotted, same length as w2_arr.
     color_pts  : list of matplotlib colours, one per config.
     labels     : config label strings for point annotations.
     y_label    : y-axis label text placed on ax_scatter.
+    x_label    : x-axis label text (default: "Global W2 (mm)").
     """
     n = len(w2_arr)
 
@@ -106,9 +108,9 @@ def regression_overlay(
         ax_resid.text(0.5, 0.5, "n < 3", transform=ax_resid.transAxes,
                       ha="center", va="center", color="gray")
 
-    ax_scatter.set_xlabel("Global W2 (mm)", fontsize=8)
+    ax_scatter.set_xlabel(x_label, fontsize=8)
     ax_scatter.set_ylabel(y_label, fontsize=8)
     ax_scatter.grid(alpha=0.3)
-    ax_resid.set_xlabel("Global W2 (mm)", fontsize=8)
+    ax_resid.set_xlabel(x_label, fontsize=8)
     ax_resid.set_ylabel("Residual", fontsize=8)
     ax_resid.grid(alpha=0.3)

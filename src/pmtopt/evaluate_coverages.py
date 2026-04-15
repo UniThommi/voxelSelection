@@ -425,6 +425,7 @@ def plot_nc_coverage(
     configs: list[ConfigResult],
     M_max: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -439,8 +440,9 @@ def plot_nc_coverage(
     ordered = _sorted_by_w2(configs)
     no_all = [c for c in ordered if c.name != "all_voxels"]
 
-    colors_all = _get_colors(len(ordered))
-    color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+    if color_map is None:
+        colors_all = _get_colors(len(ordered))
+        color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
     fig, (ax_log, ax_lin) = plt.subplots(1, 2, figsize=(16, 6))
 
@@ -495,6 +497,7 @@ def plot_nc_coverage_bars(
     configs: list[ConfigResult],
     M_max: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -512,8 +515,9 @@ def plot_nc_coverage_bars(
     ordered = _sorted_by_w2(configs)
     no_all  = [c for c in ordered if c.name != "all_voxels"]
 
-    colors_all = _get_colors(len(ordered))
-    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+    if color_map is None:
+        colors_all = _get_colors(len(ordered))
+        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
     x = np.arange(len(M_range))
 
@@ -590,6 +594,7 @@ def plot_nc_detectability_overview(
     configs: list[ConfigResult],
     M_default: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -612,8 +617,9 @@ def plot_nc_detectability_overview(
 
     ordered = _sorted_by_w2(configs)
     n = len(ordered)
-    colors_all = _get_colors(n)
-    color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+    if color_map is None:
+        colors_all = _get_colors(n)
+        color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
     cat_labels = ["Total NCs", f"Detected\n(M≥{M_default})"]
     x = np.arange(len(cat_labels))
@@ -737,6 +743,7 @@ def plot_mw_sweep(
     M_values: list[int],
     W_values: list[int],
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
     total_primaries: int = 0,
 ) -> None:
@@ -757,8 +764,9 @@ def plot_mw_sweep(
     # Exclude the "all voxels" reference from line plots
     ordered    = [cfg for cfg in _sorted_by_w2(configs)
                   if cfg.name != _ALL_VOXELS_NAME]
-    colors_all = _get_colors(len(ordered))
-    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+    if color_map is None:
+        colors_all = _get_colors(len(ordered))
+        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
     mw_pairs = [(M, W) for M in M_values for W in W_values]
     x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
@@ -916,6 +924,7 @@ def plot_fom_summary(
     W_values: list[int],
     total_muons: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """Horizontal bar chart: max FoM per config, annotated with optimal (M, W).
@@ -923,7 +932,10 @@ def plot_fom_summary(
     Configs are shown in W2-sorted order (consistent with all other plots).
     """
     ordered = _sorted_by_w2(configs)
-    colors  = _get_colors(len(ordered))
+    if color_map is None:
+        _pal = _get_colors(len(ordered))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(ordered)}
+    colors = [color_map.get(cfg.name, "gray") for cfg in ordered]
 
     max_foms: list[float] = []
     best_mw:  list[str]   = []
@@ -1049,6 +1061,7 @@ def plot_w2_fom_best(
     W_values: list[int],
     total_primaries: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """Scatter: best FoM (max over all M, W) vs W2 homogeneity.
@@ -1065,7 +1078,9 @@ def plot_w2_fom_best(
             print("  [SKIP] w2_fom_best.png: fewer than 2 configs have W2.")
         return
 
-    colors   = _get_colors(len(w2_cfgs))
+    if color_map is None:
+        _pal = _get_colors(len(w2_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(w2_cfgs)}
     w2_vals  = np.array([c.w2 for c in w2_cfgs])
     fom_best = np.array([
         max(
@@ -1078,9 +1093,9 @@ def plot_w2_fom_best(
     mask = np.isfinite(fom_best)
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    for c, w2v, fom, col in zip(w2_cfgs, w2_vals, fom_best, colors):
+    for c, w2v, fom in zip(w2_cfgs, w2_vals, fom_best):
         if np.isfinite(fom):
-            ax.scatter(w2v, fom, color=col, s=65, zorder=3)
+            ax.scatter(w2v, fom, color=color_map.get(c.name, "gray"), s=65, zorder=3)
             ax.annotate(c.label, xy=(w2v, fom), xytext=(4, 3),
                         textcoords="offset points", fontsize=7)
 
@@ -1398,6 +1413,7 @@ def plot_w2_scatter(
     output_dir: Path,
     M_fixed: int = 1,
     W_fixed: int = 1,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """Three-panel W2 scatter figure at fixed (M_fixed, W_fixed).
@@ -1419,8 +1435,9 @@ def plot_w2_scatter(
         return
 
     w2_vals = np.array([cfg.w2 for cfg in w2_cfgs])
-    setup_colors = _get_colors(len(w2_cfgs))
-    color_map = {cfg.name: setup_colors[i] for i, cfg in enumerate(w2_cfgs)}
+    if color_map is None:
+        setup_colors = _get_colors(len(w2_cfgs))
+        color_map = {cfg.name: setup_colors[i] for i, cfg in enumerate(w2_cfgs)}
 
     # M values shown in panel 1 (NC coverage across multiple thresholds)
     panel1_ms = sorted({M for M in [1, 2, 4, 5, 10] if M in M_values})
@@ -1487,6 +1504,7 @@ def plot_muon_w2_scatter(
     W_values: list[int],
     output_dir: Path,
     num_ge77_muons: int,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """One subplot per (M, W) pair where any W2-plotted setup achieves
@@ -1515,8 +1533,9 @@ def plot_muon_w2_scatter(
                   f"(>{0.05 * num_ge77_muons:.0f}) — skipped.")
         return
 
-    colors = _get_colors(len(w2_cfgs))
-    color_map = {cfg.name: colors[i] for i, cfg in enumerate(w2_cfgs)}
+    if color_map is None:
+        _pal = _get_colors(len(w2_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(w2_cfgs)}
 
     ncols = 3
     nrows = (len(selected_mw) + ncols - 1) // ncols
@@ -1640,6 +1659,7 @@ def plot_w2_nc_correlation(
     configs: list[ConfigResult],
     M_values: list[int],
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -1657,11 +1677,12 @@ def plot_w2_nc_correlation(
             print("  w2_nc_correlation: fewer than 2 configs have W2 — skipped.")
         return
 
-    colors_all = _get_colors(len(w2_cfgs))
-    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
+    if color_map is None:
+        colors_all = _get_colors(len(w2_cfgs))
+        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
     w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
     labels     = [cfg.label for cfg in w2_cfgs]
-    color_pts  = [color_map[cfg.name] for cfg in w2_cfgs]
+    color_pts  = [color_map.get(cfg.name, "gray") for cfg in w2_cfgs]
 
     ncols = 3
     nrows = (len(M_values) + ncols - 1) // ncols   # e.g. 4 for M=1..10
@@ -1722,6 +1743,7 @@ def plot_w2_muon_correlation(
     M_values: list[int],
     W_default: int,
     output_dir: Path,
+    color_map: dict[str, str] | None = None,
     verbose: bool = True,
 ) -> None:
     """
@@ -1737,11 +1759,12 @@ def plot_w2_muon_correlation(
             print("  w2_muon_correlation: fewer than 2 configs have W2 — skipped.")
         return
 
-    colors_all = _get_colors(len(w2_cfgs))
-    color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
+    if color_map is None:
+        colors_all = _get_colors(len(w2_cfgs))
+        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
     w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
     labels     = [cfg.label for cfg in w2_cfgs]
-    color_pts  = [color_map[cfg.name] for cfg in w2_cfgs]
+    color_pts  = [color_map.get(cfg.name, "gray") for cfg in w2_cfgs]
 
     ncols_half = 3                                   # cols per metric
     nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
@@ -2130,6 +2153,91 @@ def plot_w2_spearman_vs_m(
 
 
 # ===================================================================
+# Plot F — NC coverage vs Ge-77 Recall correlation scatter
+# ===================================================================
+
+def plot_nc_recall_correlation(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    W_fixed: int = 1,
+    verbose: bool = True,
+) -> None:
+    """
+    Plot F — NC detection fraction vs Ge-77 Recall at W=W_fixed for each M.
+
+    Each point is one PMT configuration (all_voxels reference excluded).
+    Layout: one panel per M value, each with a scatter+OLS (top) and
+    residual (bottom) subplot sharing the x-axis.
+    Pearson r and Spearman ρ with p-values are annotated per panel.
+    """
+    plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
+    if len(plot_cfgs) < 2:
+        if verbose:
+            print("  nc_recall_correlation: fewer than 2 configs — skipped.")
+        return
+
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+
+    color_pts = [color_map.get(cfg.name, "gray") for cfg in plot_cfgs]
+    labels    = [cfg.label for cfg in plot_cfgs]
+
+    ncols = min(len(M_values), 4)
+    nrows = (len(M_values) + ncols - 1) // ncols
+
+    fig = plt.figure(figsize=(ncols * 5, nrows * 6))
+    fig.suptitle(
+        f"NC Detection Fraction vs Ge-77 Recall  (W = {W_fixed})\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        col = pi % ncols
+        row = pi // ncols
+
+        ax_scatter = fig.add_subplot(
+            nrows * 2, ncols, row * 2 * ncols + col + 1,
+        )
+        ax_resid = fig.add_subplot(
+            nrows * 2, ncols, (row * 2 + 1) * ncols + col + 1,
+            sharex=ax_scatter,
+        )
+
+        x_arr = np.array([_nc_frac(cfg, M) for cfg in plot_cfgs])
+        y_arr = np.array([_recall(cfg, M, W_fixed) for cfg in plot_cfgs])
+
+        _regression_overlay(
+            ax_scatter, ax_resid,
+            x_arr, y_arr,
+            color_pts, labels,
+            y_label=f"Recall (M≥{M}, W≥{W_fixed})",
+            x_label=f"NC fraction (M≥{M})",
+        )
+        ax_scatter.set_title(f"M ≥ {M}", fontsize=9)
+        ax_scatter.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+        )
+        ax_scatter.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+        )
+        ax_resid.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%")
+        )
+        plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    out_path = output_dir / "nc_recall_correlation.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
@@ -2381,15 +2489,25 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("Generating output")
         print("=" * 65)
 
+    # Canonical color map: sorted by W2 desc (all_voxels last).
+    # Built once and passed to every plot so the same config always uses
+    # the same color, regardless of which subset each plot displays.
+    _sorted_for_colors = _sorted_by_w2(all_configs)
+    _pal = _get_colors(len(_sorted_for_colors))
+    color_map = {cfg.name: _pal[i] for i, cfg in enumerate(_sorted_for_colors)}
+
     # NC coverage line plot (log + linear, two panels)
-    plot_nc_coverage(all_configs, args.M_max, output_dir, verbose=verbose)
+    plot_nc_coverage(all_configs, args.M_max, output_dir,
+                     color_map=color_map, verbose=verbose)
 
     # NC coverage bar chart — redundant with line plot, omitted:
-    # plot_nc_coverage_bars(all_configs, args.M_max, output_dir, verbose=verbose)
+    # plot_nc_coverage_bars(all_configs, args.M_max, output_dir,
+    #                       color_map=color_map, verbose=verbose)
 
     # NC detectability overview — absolute + Δ vs Baseline (Plot 03)
     plot_nc_detectability_overview(
-        all_configs, args.M_default, output_dir, verbose=verbose
+        all_configs, args.M_default, output_dir,
+        color_map=color_map, verbose=verbose,
     )
 
     # Muon heatmaps: only M=1,3,5,10 — sufficient to show the (M,W) trade-off.
@@ -2428,26 +2546,30 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
 
     # M×W sweep
-    plot_mw_sweep(all_configs, M_values, W_values, output_dir, verbose=verbose,
+    plot_mw_sweep(all_configs, M_values, W_values, output_dir,
+                  color_map=color_map, verbose=verbose,
                   total_primaries=_total_primaries)
-    plot_fom_summary(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
+    plot_fom_summary(all_configs, M_values, W_values, _total_primaries, output_dir,
+                     color_map=color_map, verbose=verbose)
     plot_fom_per_setup(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
-    plot_w2_fom_best(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
+    plot_w2_fom_best(all_configs, M_values, W_values, _total_primaries, output_dir,
+                     color_map=color_map, verbose=verbose)
     plot_w2_sorted_heatmaps(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
 
     # W2 vs performance scatter (three-panel, M=1/W=1 only)
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,
-                    verbose=verbose)
+                    color_map=color_map, verbose=verbose)
 
     # W2 correlation analysis
     # nc_correlation: only M=1..4 where the relationship is statistically significant.
     _corr_ms = [m for m in M_values if m <= 4]
     plot_w2_nc_correlation(
-        all_configs, _corr_ms, output_dir, verbose=verbose,
+        all_configs, _corr_ms, output_dir, color_map=color_map, verbose=verbose,
     )
     # muon_correlation: large grid — omitted; Spearman summary covers it.
     # plot_w2_muon_correlation(
-    #     all_configs, M_values, args.W_default, output_dir, verbose=verbose,
+    #     all_configs, M_values, args.W_default, output_dir,
+    #     color_map=color_map, verbose=verbose,
     # )
     plot_w2_correlation_matrix(
         all_configs, M_values, args.M_default, args.W_default,
@@ -2459,6 +2581,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     plot_w2_spearman_vs_m(
         all_configs, M_values, args.W_default, output_dir, verbose=verbose,
         total_primaries=_total_primaries, W_values=W_values,
+    )
+
+    # NC coverage vs Ge-77 Recall correlation — same M values as muon heatmaps.
+    plot_nc_recall_correlation(
+        all_configs, _heatmap_ms, output_dir,
+        color_map=color_map, verbose=verbose,
     )
 
     if verbose:
