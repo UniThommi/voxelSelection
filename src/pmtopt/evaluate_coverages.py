@@ -621,7 +621,7 @@ def plot_nc_detectability_overview(
         colors_all = _get_colors(n)
         color_map = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
-    cat_labels = ["Total NCs", f"Detected\n(M≥{M_default})"]
+    cat_labels = [f"Detected\n(M≥{M_default})"]
     x = np.arange(len(cat_labels))
     width = min(0.8 / n, 0.18)
 
@@ -634,7 +634,7 @@ def plot_nc_detectability_overview(
     # ── Left panel: absolute grouped bars ────────────────────────────
     for i, cfg in enumerate(ordered):
         offset = (i - (n - 1) / 2) * width
-        vals  = [cfg.num_ncs, cfg.num_detected.get(M_default, 0)]
+        vals  = [cfg.num_detected.get(M_default, 0)]
         total = cfg.num_ncs if cfg.num_ncs > 0 else 1
         bars  = ax_abs.bar(
             x + offset, vals, width,
@@ -654,8 +654,7 @@ def plot_nc_detectability_overview(
     ax_abs.set_xticklabels(cat_labels, fontsize=10)
     ax_abs.set_ylabel("Number of NCs", fontsize=11)
     ax_abs.set_title(
-        f"NC Detectability Overview  [M_default = {M_default}]\n"
-        "(Total NCs is identical for all setups — shared NC truth)",
+        f"NC Detectability Overview  [M_default = {M_default}]",
         fontsize=11,
     )
     ax_abs.legend(fontsize=8)
@@ -663,6 +662,16 @@ def plot_nc_detectability_overview(
         mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
     )
     ax_abs.margins(y=0.30)
+    # Indicate what 100% corresponds to (the omitted Total NCs bar)
+    _nc_total_note = ordered[0].num_ncs if ordered else 0
+    if _nc_total_note > 0:
+        ax_abs.text(
+            0.01, 0.99, f"100 % = {_nc_total_note:,} NCs",
+            transform=ax_abs.transAxes, fontsize=9, va="top", ha="left",
+            color="dimgray",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="gray", alpha=0.85),
+        )
 
     # ── Right panel: Δ vs Baseline ────────────────────────────────────
     non_ref = [c for c in ordered if c.name != baseline_cfg.name]
@@ -2238,6 +2247,215 @@ def plot_nc_recall_correlation(
 
 
 # ===================================================================
+# Plot 20 — Recall at W=1 across M thresholds
+# ===================================================================
+
+def plot_recall_w1_vs_m(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    verbose: bool = True,
+) -> None:
+    """Line plot: Ge-77 Recall at W=1 for all configs across M thresholds.
+
+    Addresses: 'if recall is best at M=1, is it also best for larger M?'
+    W is kept fixed at 1 throughout.  The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in _sorted_by_w2(configs)
+                 if cfg.name != _ALL_VOXELS_NAME]
+    if not plot_cfgs:
+        return
+
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for cfg in plot_cfgs:
+        recalls = [_recall(cfg, M, 1) for M in M_values]
+        ax.plot(M_values, recalls, marker="o", linewidth=1.5, markersize=5,
+                color=color_map.get(cfg.name, "gray"),
+                label=_config_label(cfg))
+
+    ax.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
+    ax.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=11)
+    ax.set_title(
+        "Ge-77 Muon Recall at W=1 across M Thresholds\n"
+        "(does the best-recall config at M=1 remain the best at higher M?)",
+        fontsize=12,
+    )
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax.set_xticks(M_values)
+    ax.set_ylim(-0.02, 1.05)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    out_path = output_dir / "recall_w1_vs_m.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot 21 — Recall at each config's FoM-optimal (M, W)
+# ===================================================================
+
+def plot_recall_at_best_fom(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    verbose: bool = True,
+) -> None:
+    """Horizontal bar: Recall at each config's FoM-optimal (M, W).
+
+    Each bar is annotated with the optimal (M, W) pair and Recall value.
+    The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in _sorted_by_w2(configs)
+                 if cfg.name != _ALL_VOXELS_NAME]
+    if not plot_cfgs:
+        return
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+
+    recalls: list[float] = []
+    opt_mw_labels: list[str] = []
+    for cfg in plot_cfgs:
+        grid = _fom_grid(cfg, M_values, W_values, total_primaries)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            recalls.append(_recall(cfg, best_mw[0], best_mw[1]))
+            opt_mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            recalls.append(float("nan"))
+            opt_mw_labels.append("N/A")
+
+    labels = [_config_label(cfg) for cfg in plot_cfgs]
+    colors = [color_map.get(cfg.name, "gray") for cfg in plot_cfgs]
+    y = np.arange(len(plot_cfgs))
+    fig, ax = plt.subplots(figsize=(9, max(4, len(plot_cfgs) * 0.55)))
+    bars = ax.barh(y, recalls, color=colors, height=0.6)
+
+    x_max = max((r for r in recalls if np.isfinite(r)), default=1.0)
+    for bar, mw, rec in zip(bars, opt_mw_labels, recalls):
+        if np.isfinite(rec):
+            ax.text(
+                rec + 0.01 * x_max,
+                bar.get_y() + bar.get_height() / 2,
+                f"{rec*100:.1f}%  [{mw}]",
+                va="center", ha="left", fontsize=8,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlim(right=x_max * 1.4)
+    ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=11)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax.set_title(
+        "Ge-77 Muon Recall at Each Config's FoM-Optimal (M, W)\n"
+        "(brackets show the (M, W) that maximises FoM for that config)",
+        fontsize=12, pad=10,
+    )
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    out_path = output_dir / "recall_at_best_fom.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot 22 — NC fraction (M=1) vs Recall at best FoM (scatter + OLS)
+# ===================================================================
+
+def plot_nc_recall_at_best_fom(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    verbose: bool = True,
+) -> None:
+    """Scatter: NC detection fraction (M=1) vs Recall at each config's FoM-optimal (M, W).
+
+    OLS regression + 95 % CI overlay.  The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
+    if len(plot_cfgs) < 2:
+        if verbose:
+            print("  nc_recall_at_best_fom: fewer than 2 configs — skipped.")
+        return
+
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+    color_pts = [color_map.get(cfg.name, "gray") for cfg in plot_cfgs]
+    labels = [cfg.label for cfg in plot_cfgs]
+
+    nc_fracs = np.array([_nc_frac(cfg, 1) for cfg in plot_cfgs])
+    recalls_best: list[float] = []
+    for cfg in plot_cfgs:
+        grid = _fom_grid(cfg, M_values, W_values, total_primaries)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            recalls_best.append(_recall(cfg, best_mw[0], best_mw[1]))
+        else:
+            recalls_best.append(float("nan"))
+    recalls_arr = np.array(recalls_best)
+
+    mask = np.isfinite(recalls_arr)
+    if mask.sum() < 2:
+        if verbose:
+            print("  nc_recall_at_best_fom: fewer than 2 finite values — skipped.")
+        return
+
+    fig, (ax_scatter, ax_resid) = plt.subplots(
+        2, 1, figsize=(8, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True,
+    )
+    fig.suptitle(
+        "NC Detection Fraction (M=1) vs Ge-77 Recall at FoM-Optimal (M, W)\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=12,
+    )
+
+    _regression_overlay(
+        ax_scatter, ax_resid,
+        nc_fracs[mask], recalls_arr[mask],
+        [c for c, m in zip(color_pts, mask) if m],
+        [lb for lb, m in zip(labels, mask) if m],
+        y_label="Recall at FoM-optimal (M, W)",
+        x_label="NC detection fraction (M=1)",
+    )
+    ax_scatter.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax_resid.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax_resid.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    out_path = output_dir / "nc_recall_at_best_fom.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
@@ -2510,14 +2728,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         color_map=color_map, verbose=verbose,
     )
 
-    # Muon heatmaps: only M=1,3,5,10 — sufficient to show the (M,W) trade-off.
+    # Muon heatmaps deactivated — not useful for comparison at this scale.
     _heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
-    plot_muon_heatmaps(
-        all_configs, _heatmap_ms, W_values, output_dir,
-        num_ge77_muons=ed.num_ge77_muons,
-        total_muons=ed.total_muons,
-        verbose=verbose,
-    )
+    # plot_muon_heatmaps(
+    #     all_configs, _heatmap_ms, W_values, output_dir,
+    #     num_ge77_muons=ed.num_ge77_muons,
+    #     total_muons=ed.total_muons,
+    #     verbose=verbose,
+    # )
 
     # Text files
     write_confusion_txt(
@@ -2551,10 +2769,12 @@ def main(argv: Optional[list[str]] = None) -> None:
                   total_primaries=_total_primaries)
     plot_fom_summary(all_configs, M_values, W_values, _total_primaries, output_dir,
                      color_map=color_map, verbose=verbose)
-    plot_fom_per_setup(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
+    # plot_fom_per_setup: per-config FoM heatmaps deactivated.
+    # plot_fom_per_setup(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
     plot_w2_fom_best(all_configs, M_values, W_values, _total_primaries, output_dir,
                      color_map=color_map, verbose=verbose)
-    plot_w2_sorted_heatmaps(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
+    # plot_w2_sorted_heatmaps: W2-sorted heatmaps deactivated.
+    # plot_w2_sorted_heatmaps(all_configs, M_values, W_values, _total_primaries, output_dir, verbose=verbose)
 
     # W2 vs performance scatter (three-panel, M=1/W=1 only)
     plot_w2_scatter(all_configs, M_values, output_dir, M_fixed=1, W_fixed=1,
@@ -2588,6 +2808,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         all_configs, _heatmap_ms, output_dir,
         color_map=color_map, verbose=verbose,
     )
+
+    # New plots: FoM-optimal analysis
+    plot_recall_w1_vs_m(all_configs, M_values, output_dir,
+                        color_map=color_map, verbose=verbose)
+    plot_recall_at_best_fom(all_configs, M_values, W_values, _total_primaries, output_dir,
+                            color_map=color_map, verbose=verbose)
+    plot_nc_recall_at_best_fom(all_configs, M_values, W_values, _total_primaries, output_dir,
+                               color_map=color_map, verbose=verbose)
 
     if verbose:
         print("\nDone.")
