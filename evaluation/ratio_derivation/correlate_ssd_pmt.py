@@ -1201,6 +1201,142 @@ def plot_w2_spearman_fom(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# SECTION 13c — SSD prediction vs PMT Recall at FoM-optimal (M,W)
+# ─────────────────────────────────────────────────────────────────────
+
+def plot_ssd_nc_vs_pmt_recall_at_best_fom(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: str,
+) -> None:
+    """Scatter: SSD NC fraction (M=1) vs PMT Recall at each setup's FoM-optimal (M,W).
+
+    For each setup:
+      x = SSD NC fraction at M=1 (at ratio_factor)
+      y = PMT Recall at (M, W) that maximises PMT FoM for that setup
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        warnings.warn(
+            f"No SSD results at ratio={ratio_factor:.2f} — "
+            "skipping SSD NC vs PMT Recall plot."
+        )
+        return
+
+    colors  = _colors(len(setups))
+    c_valid = [colors[setups.index(s)] for s in valid]
+
+    x_arr         = []
+    y_arr         = []
+    labels        = []
+    best_mw_labels = []
+
+    for s in valid:
+        best_mw = _pmt_best_mw(s, M_values, W_values, total_primaries)
+        M_b, W_b = best_mw
+        x_arr.append(_ssd_nc_frac(s.ssd_results[ratio_factor], 1))
+        y_arr.append(_pmt_recall(s, M_b, W_b))
+        labels.append(s.label)
+        best_mw_labels.append(f"M{M_b}W{W_b}")
+
+    x_arr = np.array(x_arr, dtype=float)
+    y_arr = np.array(y_arr, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    _scatter_panel(
+        ax, x_arr, y_arr, c_valid, labels,
+        f"SSD NC fraction  (M=1, ratio={ratio_factor:.2f})",
+        "PMT Recall at FoM-optimal (M,W)",
+    )
+    for x, y, mw in zip(x_arr, y_arr, best_mw_labels):
+        if np.isfinite(x) and np.isfinite(y):
+            ax.annotate(
+                mw, xy=(x, y), xytext=(4, -9),
+                textcoords="offset points", fontsize=6, color="dimgray",
+            )
+
+    ax.set_title(
+        f"SSD NC fraction (M=1) vs PMT Recall at FoM-optimal (M,W)\n"
+        f"ratio={ratio_factor:.2f}  |  (M,W) chosen per setup to maximise PMT FoM",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fname = f"scatter_ssd_nc_vs_pmt_recall_best_fom_ratio{ratio_factor:.1f}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+def plot_ssd_recall_vs_pmt_recall_at_best_fom(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: str,
+) -> None:
+    """Scatter: SSD Recall (M=1, W=1) vs PMT Recall at each setup's FoM-optimal (M,W).
+
+    For each setup:
+      x = SSD Recall at (M=1, W=1) (at ratio_factor)
+      y = PMT Recall at (M, W) that maximises PMT FoM for that setup
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        warnings.warn(
+            f"No SSD results at ratio={ratio_factor:.2f} — "
+            "skipping SSD Recall vs PMT Recall plot."
+        )
+        return
+
+    colors  = _colors(len(setups))
+    c_valid = [colors[setups.index(s)] for s in valid]
+
+    x_arr         = []
+    y_arr         = []
+    labels        = []
+    best_mw_labels = []
+
+    for s in valid:
+        best_mw = _pmt_best_mw(s, M_values, W_values, total_primaries)
+        M_b, W_b = best_mw
+        x_arr.append(_ssd_recall(s.ssd_results[ratio_factor], 1, 1))
+        y_arr.append(_pmt_recall(s, M_b, W_b))
+        labels.append(s.label)
+        best_mw_labels.append(f"M{M_b}W{W_b}")
+
+    x_arr = np.array(x_arr, dtype=float)
+    y_arr = np.array(y_arr, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    _scatter_panel(
+        ax, x_arr, y_arr, c_valid, labels,
+        f"SSD Recall  (M=1, W=1, ratio={ratio_factor:.2f})",
+        "PMT Recall at FoM-optimal (M,W)",
+    )
+    for x, y, mw in zip(x_arr, y_arr, best_mw_labels):
+        if np.isfinite(x) and np.isfinite(y):
+            ax.annotate(
+                mw, xy=(x, y), xytext=(4, -9),
+                textcoords="offset points", fontsize=6, color="dimgray",
+            )
+
+    ax.set_title(
+        f"SSD Recall (M=1, W=1) vs PMT Recall at FoM-optimal (M,W)\n"
+        f"ratio={ratio_factor:.2f}  |  (M,W) chosen per setup to maximise PMT FoM",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fname = f"scatter_ssd_recall_vs_pmt_recall_best_fom_ratio{ratio_factor:.1f}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # SECTION 13 — Text and CSV output
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1711,6 +1847,14 @@ def main() -> None:
                        args.W_default, args.output_dir)
     plot_w2_spearman_fom(setups, M_values, W_values, total_primaries,
                          optimal_ratio, args.output_dir)
+    plot_ssd_nc_vs_pmt_recall_at_best_fom(
+        setups, optimal_ratio, M_values, W_values,
+        total_primaries, args.output_dir,
+    )
+    plot_ssd_recall_vs_pmt_recall_at_best_fom(
+        setups, optimal_ratio, M_values, W_values,
+        total_primaries, args.output_dir,
+    )
 
     # ── 9. Summary ────────────────────────────────────────────────────
     print("\nWriting summary ...")
