@@ -247,7 +247,7 @@ def plot_nc_coverage_line(
             frac_any = r.nc["nc_any_photon"] / max(r.nc["nc_total"], 1)
             axes[0].axhline(
                 frac_any, color=c, linestyle=":", linewidth=1,
-                label=f"{r.label} (any photon)",
+                label="_nolegend_",
             )
 
     for ax, ylabel, title in zip(
@@ -378,14 +378,12 @@ def _draw_detectability_panels(
 
     if has_detect:
         abs_cat_labels = [
-            "Total NCs",
             "≥1 photon\n(any time)",
             "≥1 photon\n(within 200 ns)",
             "Photons only\noutside 200 ns",
             f"Detected\n(M≥{M_default})",
         ]
         abs_val_keys = [
-            total_key,
             nc_key + "any_photon",
             nc_key + "within_200ns",
             only_outside_key,
@@ -404,8 +402,8 @@ def _draw_detectability_panels(
             detected_key,
         ]
     else:
-        abs_cat_labels = ["Total NCs", f"Detected\n(M≥{M_default})"]
-        abs_val_keys   = [total_key, detected_key]
+        abs_cat_labels = [f"Detected\n(M≥{M_default})"]
+        abs_val_keys   = [detected_key]
         delta_cat_labels = [f"Detected (M≥{M_default})"]
         delta_val_keys   = [detected_key]
 
@@ -432,6 +430,16 @@ def _draw_detectability_panels(
     ax_abs.yaxis.set_major_formatter(
         mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
     )
+    # Indicate what 100% corresponds to (the omitted Total bar)
+    _nc_total_note = results[0].nc[total_key] if results else 0
+    if _nc_total_note > 0:
+        ax_abs.text(
+            0.01, 0.99, f"100 % = {_nc_total_note:,} NCs",
+            transform=ax_abs.transAxes, fontsize=9, va="top", ha="left",
+            color="dimgray",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="gray", alpha=0.85),
+        )
 
     # ── Right panel: Δ horizontal diverging bars ──────────────────────
     if n < 2:
@@ -564,6 +572,7 @@ def plot_ge77_muon_overview(
     W_default: int,
     output_dir: str,
     color_map: dict[str, str] | None = None,
+    total_primary_muons: int = 0,
 ) -> None:
     """Two-panel figure: Ge77-muon detection funnel + Δ from reference.
 
@@ -589,27 +598,25 @@ def plot_ge77_muon_overview(
 
     if has_photon_info:
         cat_labels = [
-            "Total\nGe77 muons",
             "≥1 NC:\nany photon",
             "≥1 NC:\nphoton ≤200 ns\nafter NC",
             f"Detected\n(M≥{M_default}, W≥{W_default})\n= Recall TP",
         ]
-        delta_cat_labels = cat_labels[1:]  # skip Total in delta panel
+        delta_cat_labels = cat_labels  # all included (Total removed)
 
         def _vals(r: SetupResult) -> list[int]:
             gd = r.muon["ge77_muon_detectability"]
             tp = r.muon["confusion"][(M_default, W_default)]["TP"]
-            return [r.muon["muon_stats"]["n_ge77"], gd["any_photon"], gd["within_200ns"], tp]
+            return [gd["any_photon"], gd["within_200ns"], tp]
     else:
         cat_labels = [
-            "Total\nGe77 muons",
             f"Detected\n(M≥{M_default}, W≥{W_default})\n= Recall TP",
         ]
-        delta_cat_labels = cat_labels[1:]
+        delta_cat_labels = cat_labels
 
         def _vals(r: SetupResult) -> list[int]:
             tp = r.muon["confusion"][(M_default, W_default)]["TP"]
-            return [r.muon["muon_stats"]["n_ge77"], tp]
+            return [tp]
 
     x = np.arange(len(cat_labels))
     width = min(0.8 / n, 0.30)
@@ -619,13 +626,13 @@ def plot_ge77_muon_overview(
     )
 
     # ── Left panel: absolute grouped bars ────────────────────────────
+    _denom = total_primary_muons if total_primary_muons > 0 else results[0].muon["muon_stats"]["n_ge77"]
     for i, (r, c) in enumerate(zip(results, colors)):
         vals   = _vals(r)
-        total  = r.muon["muon_stats"]["n_ge77"]
         offset = (i - (n - 1) / 2) * width
         bars   = ax_abs.bar(x + offset, vals, width, label=r.label, color=c)
         for bar, val in zip(bars, vals):
-            _annotate_bar(ax_abs, bar, val, total, fontsize=6, rotation=90)
+            _annotate_bar(ax_abs, bar, val, _denom, fontsize=6, rotation=90)
 
     ax_abs.set_xticks(x)
     ax_abs.set_xticklabels(cat_labels, fontsize=9)
@@ -637,6 +644,18 @@ def plot_ge77_muon_overview(
     )
     ax_abs.legend(fontsize=8)
     ax_abs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+    # Indicate what 100% corresponds to
+    _n_ge77_note = results[0].muon["muon_stats"]["n_ge77"] if results else 0
+    _note_lines = f"100 % = {_denom:,} muons"
+    if total_primary_muons > 0 and _n_ge77_note > 0:
+        _note_lines += f"\n(of which Ge77: {_n_ge77_note:,})"
+    ax_abs.text(
+        0.01, 0.99, _note_lines,
+        transform=ax_abs.transAxes, fontsize=9, va="top", ha="left",
+        color="dimgray",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                  edgecolor="gray", alpha=0.85),
+    )
 
     # ── Right panel: Δ horizontal diverging bars ──────────────────────
     if n < 2:
@@ -651,11 +670,11 @@ def plot_ge77_muon_overview(
         n_cats     = len(delta_cat_labels)
         bar_h      = 0.8 / n_non_ref
         y_base     = np.arange(n_cats, dtype=float)
-        ref_vals   = _vals(results[0])[1:]   # skip Total
-        ref_total  = results[0].muon["muon_stats"]["n_ge77"]
+        ref_vals   = _vals(results[0])
+        ref_total  = total_primary_muons if total_primary_muons > 0 else results[0].muon["muon_stats"]["n_ge77"]
 
         for j, (r, c) in enumerate(zip(results[1:], colors[1:])):
-            vals   = _vals(r)[1:]   # skip Total
+            vals   = _vals(r)
             deltas = [v - rv for v, rv in zip(vals, ref_vals)]
             offset = (j - (n_non_ref - 1) / 2) * bar_h
 
@@ -2034,6 +2053,195 @@ def plot_nc_recall_correlation(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 20 — Recall at W=1 across M thresholds
+# ──────────────────────────────────────────────────────────────────────
+def plot_recall_w1_vs_m(
+    results: list[SetupResult],
+    M_values: list[int],
+    output_dir: str,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Line plot: Ge-77 Recall at W=1 for all setups across M thresholds.
+
+    Addresses: 'if recall is best at M=1, is it also best for larger M?'
+    W is kept fixed at 1 throughout.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for r, c in zip(results, colors):
+        recalls = [_cc_recall(r, M, 1) for M in M_values]
+        ax.plot(M_values, recalls, marker="o", color=c, label=r.label,
+                linewidth=1.5, markersize=5)
+
+    ax.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
+    ax.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=11)
+    ax.set_title(
+        "Ge-77 Muon Recall at W=1 across M Thresholds\n"
+        "(does the best-recall setup at M=1 remain the best at higher M?)",
+        fontsize=12,
+    )
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax.set_xticks(M_values)
+    ax.set_ylim(-0.02, 1.05)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fname = "20_recall_w1_vs_m.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 21 — Recall at each setup's FoM-optimal (M, W)
+# ──────────────────────────────────────────────────────────────────────
+def plot_recall_at_best_fom(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Horizontal bar: Recall at each setup's FoM-optimal (M, W).
+
+    Each bar is annotated with its optimal (M, W) pair and Recall value.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    recalls: list[float] = []
+    opt_mw_labels: list[str] = []
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, M_values, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            recalls.append(_cc_recall(r, best_mw[0], best_mw[1]))
+            opt_mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            recalls.append(float("nan"))
+            opt_mw_labels.append("N/A")
+
+    y = np.arange(len(results))
+    fig, ax = plt.subplots(figsize=(9, max(4, len(results) * 0.55)))
+    bars = ax.barh(y, recalls, color=colors, height=0.6)
+
+    x_max = max((r for r in recalls if np.isfinite(r)), default=1.0)
+    for bar, mw, rec in zip(bars, opt_mw_labels, recalls):
+        if np.isfinite(rec):
+            ax.text(
+                rec + 0.01 * x_max,
+                bar.get_y() + bar.get_height() / 2,
+                f"{rec*100:.1f}%  [{mw}]",
+                va="center", ha="left", fontsize=8,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_xlim(right=x_max * 1.4)
+    ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=11)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax.set_title(
+        "Ge-77 Muon Recall at Each Setup's FoM-Optimal (M, W)\n"
+        "(brackets show the (M, W) that maximises FoM for that setup)",
+        fontsize=12, pad=10,
+    )
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    fname = "21_recall_at_best_fom.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 22 — NC fraction (M=1) vs Recall at best FoM (scatter + OLS)
+# ──────────────────────────────────────────────────────────────────────
+def plot_nc_recall_at_best_fom(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Scatter: NC detection fraction (M=1) vs Recall at each setup's FoM-optimal (M, W).
+
+    OLS regression + 95 % CI overlay via _regression_overlay.
+    Saved as 22_nc_recall_at_best_fom.png.
+    """
+    if len(results) < 2:
+        print("  [SKIP] 22_nc_recall_at_best_fom.png: fewer than 2 setups.")
+        return
+
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    color_pts = [color_map.get(r.label, "gray") for r in results]
+    labels = [r.label for r in results]
+
+    nc_fracs = np.array([_cc_nc_frac(r, 1) for r in results])
+    recalls_best: list[float] = []
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, M_values, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            recalls_best.append(_cc_recall(r, best_mw[0], best_mw[1]))
+        else:
+            recalls_best.append(float("nan"))
+    recalls_arr = np.array(recalls_best)
+
+    mask = np.isfinite(recalls_arr)
+    if mask.sum() < 2:
+        print("  [SKIP] 22_nc_recall_at_best_fom.png: fewer than 2 finite values.")
+        return
+
+    fig, (ax_scatter, ax_resid) = plt.subplots(
+        2, 1, figsize=(8, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True,
+    )
+    fig.suptitle(
+        "NC Detection Fraction (M=1) vs Ge-77 Recall at FoM-Optimal (M, W)\n"
+        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+        fontsize=12,
+    )
+
+    _regression_overlay(
+        ax_scatter, ax_resid,
+        nc_fracs[mask], recalls_arr[mask],
+        [c for c, m in zip(color_pts, mask) if m],
+        [lb for lb, m in zip(labels, mask) if m],
+        y_label="Recall at FoM-optimal (M, W)",
+        x_label="NC detection fraction (M=1)",
+    )
+    ax_scatter.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+    ax_resid.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax_resid.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    plt.setp(ax_scatter.get_xticklabels(), visible=False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fname = "22_nc_recall_at_best_fom.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Text output
 # ──────────────────────────────────────────────────────────────────────
 def write_nc_summary(
@@ -2326,10 +2534,11 @@ def main() -> None:
     plot_nc_detectability_overview(results, M_default, args.output_dir,
                                    color_map=color_map)
     plot_ge77_muon_overview(results, M_default, W_default, args.output_dir,
-                            color_map=color_map)
-    # Heatmaps: only M=1,3,5,10 — sufficient to show the (M,W) trade-off.
+                            color_map=color_map,
+                            total_primary_muons=_total_primaries)
+    # Heatmaps deactivated — not useful for comparison at this scale.
     _heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
-    plot_muon_heatmaps(results, _heatmap_ms, W_values, args.output_dir)
+    # plot_muon_heatmaps(results, _heatmap_ms, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir,
                        color_map=color_map)
     # W histogram — too noisy at this scale, omitted:
@@ -2348,10 +2557,12 @@ def main() -> None:
                   total_primaries=_total_primaries, color_map=color_map)
     plot_fom_summary(results, M_values, W_values, args.output_dir,
                      total_primaries=_total_primaries, color_map=color_map)
-    plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
+    # plot_fom_per_setup: per-setup FoM heatmaps deactivated.
+    # plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
     plot_w2_fom_best(results, M_values, W_values, args.output_dir,
                      total_primaries=_total_primaries, color_map=color_map)
-    plot_w2_sorted_heatmaps(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
+    # plot_w2_sorted_heatmaps: W2-sorted heatmaps deactivated.
+    # plot_w2_sorted_heatmaps(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
 
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir,
                     color_map=color_map)
@@ -2371,6 +2582,13 @@ def main() -> None:
 
     plot_nc_recall_correlation(results, _heatmap_ms, args.output_dir,
                                color_map=color_map, W_fixed=W_default)
+
+    # New plots: FoM-optimal analysis
+    plot_recall_w1_vs_m(results, M_values, args.output_dir, color_map=color_map)
+    plot_recall_at_best_fom(results, M_values, W_values, args.output_dir,
+                            total_primaries=_total_primaries, color_map=color_map)
+    plot_nc_recall_at_best_fom(results, M_values, W_values, args.output_dir,
+                               total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
