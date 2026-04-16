@@ -43,6 +43,7 @@ from pmtopt.geometry import (
     MUON_TIME_WINDOW_MIN_NS,
     MUON_TIME_WINDOW_MAX_NS,
     calc_fom_confusion,
+    calc_veto_fraction,
     MUSUN_RATE,
     MUONS_PER_RUN_DIR,
 )
@@ -1660,6 +1661,14 @@ def _precision(cfg: ConfigResult, M: int, W: int) -> float:
     return cm["TP"] / denom if denom > 0 else 0.0
 
 
+def _signal_survival(cfg: ConfigResult, M: int, W: int) -> float:
+    """Signal survival at (M, W): 1 − (TP+FP)/(TP+FP+TN+FN)."""
+    cm = cfg.confusion.get((M, W))
+    if cm is None:
+        return 0.0
+    return 1.0 - calc_veto_fraction(cm["TP"], cm["FP"], cm["TN"], cm["FN"])
+
+
 # ===================================================================
 # Plot A — W2 × NC coverage correlation scatter
 # ===================================================================
@@ -2456,6 +2465,207 @@ def plot_nc_recall_at_best_fom(
 
 
 # ===================================================================
+# Plot 23 — Ge-77 survival at FoM-optimal (M, W) per config
+# ===================================================================
+
+def plot_ge77_survival_at_best_fom(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    verbose: bool = True,
+) -> None:
+    """Scatter: Ge-77 survival (Recall) vs setup index at each config's FoM-optimal (M, W).
+
+    Ge77 survival = TP / (TP + FN) = Recall.
+    The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
+    if not plot_cfgs:
+        return
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+
+    values: list[float] = []
+    mw_labels: list[str] = []
+    for cfg in plot_cfgs:
+        grid = _fom_grid(cfg, M_values, W_values, total_primaries)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            values.append(_recall(cfg, best_mw[0], best_mw[1]))
+            mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            values.append(float("nan"))
+            mw_labels.append("N/A")
+
+    labels = [_config_label(cfg) for cfg in plot_cfgs]
+    colors = [color_map.get(cfg.name, "gray") for cfg in plot_cfgs]
+    x = np.arange(len(plot_cfgs))
+
+    fig, ax = plt.subplots(figsize=(max(6, len(plot_cfgs) * 0.9), 5))
+    for i, (c, val, mw) in enumerate(zip(colors, values, mw_labels)):
+        if np.isfinite(val):
+            ax.scatter([i], [val], color=c, s=80, zorder=3)
+            ax.annotate(
+                mw, xy=(i, val), xytext=(0, 8),
+                textcoords="offset points", fontsize=7, ha="center", color=c,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
+    ax.set_xlabel("Setup", fontsize=11)
+    ax.set_ylabel("Ge-77 Survival  (Recall = TP / (TP+FN))", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.set_ylim(bottom=0)
+    ax.set_title(
+        "Ge-77 Muon Survival at Each Config's FoM-Optimal (M, W)\n"
+        "(labels show the (M, W) that maximises FoM for that config)",
+        fontsize=12,
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    out_path = output_dir / "ge77_survival_at_best_fom.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Plot 24 — Signal survival at FoM-optimal (M, W) per config
+# ===================================================================
+
+def plot_signal_survival_at_best_fom(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: Path,
+    color_map: dict[str, str] | None = None,
+    verbose: bool = True,
+) -> None:
+    """Scatter: signal survival 1-(TP+FP)/(TP+FP+TN+FN) vs setup index at each config's FoM-optimal (M, W).
+
+    Signal survival = (TN+FN) / (TP+FP+TN+FN).
+    The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
+    if not plot_cfgs:
+        return
+    if color_map is None:
+        _pal = _get_colors(len(plot_cfgs))
+        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(plot_cfgs)}
+
+    values: list[float] = []
+    mw_labels: list[str] = []
+    for cfg in plot_cfgs:
+        grid = _fom_grid(cfg, M_values, W_values, total_primaries)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            values.append(_signal_survival(cfg, best_mw[0], best_mw[1]))
+            mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            values.append(float("nan"))
+            mw_labels.append("N/A")
+
+    labels = [_config_label(cfg) for cfg in plot_cfgs]
+    colors = [color_map.get(cfg.name, "gray") for cfg in plot_cfgs]
+    x = np.arange(len(plot_cfgs))
+
+    fig, ax = plt.subplots(figsize=(max(6, len(plot_cfgs) * 0.9), 5))
+    for i, (c, val, mw) in enumerate(zip(colors, values, mw_labels)):
+        if np.isfinite(val):
+            ax.scatter([i], [val], color=c, s=80, zorder=3)
+            ax.annotate(
+                mw, xy=(i, val), xytext=(0, 8),
+                textcoords="offset points", fontsize=7, ha="center", color=c,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
+    ax.set_xlabel("Setup", fontsize=11)
+    ax.set_ylabel("Signal Survival = (TN+FN) / (TP+FP+TN+FN)", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.3f}%"))
+    ax.set_ylim(bottom=0)
+    ax.set_title(
+        "Signal Survival at Each Config's FoM-Optimal (M, W)\n"
+        "(1 − veto fraction; labels show optimal (M, W))",
+        fontsize=12,
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    out_path = output_dir / "signal_survival_at_best_fom.png"
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
+# Text output — survival table
+# ===================================================================
+
+def write_survival_table(
+    configs: list[ConfigResult],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    output_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Write survival_at_best_fom.txt: Ge77 and signal survival at FoM-optimal (M,W).
+
+    Ge77 survival   = TP / (TP+FN)          = Recall
+    Signal survival = (TP+FP) / total_primary_muons
+    The all_voxels reference is excluded.
+    """
+    plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
+    out_path = output_dir / "survival_at_best_fom.txt"
+    W = 80
+    with open(out_path, "w") as f:
+        f.write("Survival at FoM-Optimal (M, W) per Config\n")
+        f.write("=" * W + "\n\n")
+        f.write("  Ge77 survival   = TP / (TP + FN)            = Recall\n")
+        f.write("  Signal survival = (TP + FP) / all_muons\n")
+        f.write(f"  all_muons       = {total_primaries:,}\n\n")
+
+        hdr = (
+            f"  {'Config':<25}  {'(M,W)':>8}  "
+            f"{'Ge77 Survival':>15}  {'Signal Survival':>16}  "
+            f"{'TP':>8}  {'FP':>8}  {'FN':>8}\n"
+        )
+        f.write(hdr)
+        f.write("  " + "-" * (len(hdr) - 3) + "\n")
+
+        for cfg in plot_cfgs:
+            grid = _fom_grid(cfg, M_values, W_values, total_primaries)
+            valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+            if not valid:
+                f.write(f"  {cfg.label:<25}  {'N/A':>8}  {'N/A':>15}  {'N/A':>16}\n")
+                continue
+            best_mw = max(valid, key=valid.__getitem__)
+            M_b, W_b = best_mw
+            cm = cfg.confusion.get((M_b, W_b), {})
+            tp = cm.get("TP", 0)
+            fp = cm.get("FP", 0)
+            fn = cm.get("FN", 0)
+            ge77_surv = _recall(cfg, M_b, W_b)
+            sig_surv  = _signal_survival(cfg, M_b, W_b)
+            f.write(
+                f"  {cfg.label:<25}  {f'M{M_b}W{W_b}':>8}  "
+                f"{ge77_surv*100:>14.2f}%  {sig_surv*100:>15.4f}%  "
+                f"{tp:>8,}  {fp:>8,}  {fn:>8,}\n"
+            )
+    if verbose:
+        print(f"  Saved: {out_path}")
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
@@ -2816,6 +3026,12 @@ def main(argv: Optional[list[str]] = None) -> None:
                             color_map=color_map, verbose=verbose)
     plot_nc_recall_at_best_fom(all_configs, M_values, W_values, _total_primaries, output_dir,
                                color_map=color_map, verbose=verbose)
+    plot_ge77_survival_at_best_fom(all_configs, M_values, W_values, _total_primaries,
+                                   output_dir, color_map=color_map, verbose=verbose)
+    plot_signal_survival_at_best_fom(all_configs, M_values, W_values, _total_primaries,
+                                     output_dir, color_map=color_map, verbose=verbose)
+    write_survival_table(all_configs, M_values, W_values, _total_primaries,
+                         output_dir, verbose=verbose)
 
     if verbose:
         print("\nDone.")

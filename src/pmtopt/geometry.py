@@ -275,32 +275,42 @@ def calc_figure_of_merit(nCaptures, threshold, ge77_muon_counts, runtime):
 # Figure of Merit — confusion-matrix helpers
 # ---------------------------------------------------------------------------
 
+def calc_veto_fraction(TP: int, FP: int, TN: int, FN: int) -> float:
+    """Fraction of all simulated muons that triggered a veto.
+
+    Returns ``(TP + FP) / (TP + FP + TN + FN)``.
+    Returns 0.0 when the total is zero.
+    """
+    total = TP + FP + TN + FN
+    return (TP + FP) / total if total > 0 else 0.0
+
+
 def calc_deadtime_confusion(
-    n_positives: int,
-    total_muons: int,
+    TP: int,
+    FP: int,
+    TN: int,
+    FN: int,
     musun_rate: float = MUSUN_RATE,
 ) -> float:
     """Dead-time fraction from confusion-matrix counts.
 
+    Calls ``calc_veto_fraction`` and scales by the veto duration and muon rate::
+
+        deadtime = calc_veto_fraction(TP, FP, TN, FN) * VETO_DURATION_H * musun_rate
+
     Parameters
     ----------
-    n_positives : int
-        TP + FP — muons classified as Ge77 and therefore vetoed.
-    total_muons : int
-        TP + FP + TN + FN — total simulated muons.
+    TP, FP, TN, FN : int
+        Confusion-matrix counts.
     musun_rate : float
         Musun rate in muons / hour (default: 504).
 
     Returns
     -------
     float
-        Dead-time fraction; 0.0 if total_muons == 0.
+        Dead-time fraction; 0.0 if total muons == 0.
     """
-    if total_muons <= 0:
-        return 0.0
-    runtime_h = total_muons / musun_rate
-    veto_h    = n_positives * VETO_DURATION_H
-    return veto_h / runtime_h
+    return calc_veto_fraction(TP, FP, TN, FN) * VETO_DURATION_H * musun_rate
 
 
 def calc_ge_survival_confusion(TP: int, FN: int) -> float:
@@ -331,7 +341,7 @@ def calc_fom_confusion(
     Parameters
     ----------
     TP, FP, FN : int
-        Confusion-matrix counts (TN is not required).
+        Confusion-matrix counts (TN is derived as total_muons − TP − FP − FN).
     total_muons : int
         TP + FP + TN + FN — total simulated muons.
     musun_rate : float
@@ -342,6 +352,7 @@ def calc_fom_confusion(
     float
         FoM value, or np.nan when undefined.
     """
+    TN = total_muons - TP - FP - FN
     ge_surv  = calc_ge_survival_confusion(TP, FN)
-    deadtime = calc_deadtime_confusion(TP + FP, total_muons, musun_rate)
+    deadtime = calc_deadtime_confusion(TP, FP, TN, FN, musun_rate)
     return figure_of_merit(ge_surv, 1.0 - deadtime)

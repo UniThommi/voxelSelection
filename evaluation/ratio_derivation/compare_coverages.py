@@ -67,7 +67,7 @@ from scipy import stats as scipy_stats
 
 # Shared W2-correlation plotting helper (identical across both pipelines).
 from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
-from pmtopt.geometry import calc_fom_confusion, MUSUN_RATE, MUONS_PER_RUN_DIR
+from pmtopt.geometry import calc_fom_confusion, calc_veto_fraction, MUSUN_RATE, MUONS_PER_RUN_DIR
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -1555,6 +1555,14 @@ def _cc_precision(r: SetupResult, M: int, W: int) -> float:
     return compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])["Precision"]
 
 
+def _cc_signal_survival(r: SetupResult, M: int, W: int) -> float:
+    """Signal survival at (M, W): 1 − (TP+FP)/(TP+FP+TN+FN)."""
+    cm = r.muon["confusion"].get((M, W))
+    if cm is None:
+        return 0.0
+    return 1.0 - calc_veto_fraction(cm["TP"], cm["FP"], cm["TN"], cm["FN"])
+
+
 def _sorted_by_w2_cc(results: list[SetupResult]) -> list[SetupResult]:
     """Return results sorted by W2 descending (None W2 last)."""
     return sorted(results, key=lambda r: (r.w2 is None, -(r.w2 or 0.0)))
@@ -2242,6 +2250,136 @@ def plot_nc_recall_at_best_fom(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 23 — Ge-77 survival at FoM-optimal (M, W) per setup
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge77_survival_at_best_fom(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Scatter: Ge-77 survival (Recall) at each setup's FoM-optimal (M, W) vs setup index.
+
+    Ge77 survival = TP / (TP + FN) = Recall.
+    Each point is annotated with the (M, W) pair that maximises FoM for that setup.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    values: list[float] = []
+    mw_labels: list[str] = []
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, M_values, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            values.append(_cc_recall(r, best_mw[0], best_mw[1]))
+            mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            values.append(float("nan"))
+            mw_labels.append("N/A")
+
+    x = np.arange(len(results))
+    fig, ax = plt.subplots(figsize=(max(6, len(results) * 0.9), 5))
+
+    for i, (r, c, val, mw) in enumerate(zip(results, colors, values, mw_labels)):
+        if np.isfinite(val):
+            ax.scatter([i], [val], color=c, s=80, zorder=3)
+            ax.annotate(
+                mw, xy=(i, val), xytext=(0, 8),
+                textcoords="offset points", fontsize=7, ha="center", color=c,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=9)
+    ax.set_xlabel("Setup", fontsize=11)
+    ax.set_ylabel("Ge-77 Survival  (Recall = TP / (TP+FN))", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.set_ylim(bottom=0)
+    ax.set_title(
+        "Ge-77 Muon Survival at Each Setup's FoM-Optimal (M, W)\n"
+        "(labels show the (M, W) that maximises FoM for that setup)",
+        fontsize=12,
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fname = "23_ge77_survival_at_best_fom.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 24 — Signal survival at FoM-optimal (M, W) per setup
+# ──────────────────────────────────────────────────────────────────────
+def plot_signal_survival_at_best_fom(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Scatter: signal survival 1-(TP+FP)/(TP+FP+TN+FN) at each setup's FoM-optimal (M, W) vs setup index.
+
+    Signal survival = (TN+FN) / (TP+FP+TN+FN) — fraction of muons that did NOT
+    trigger a veto at the optimal operating point.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    values: list[float] = []
+    mw_labels: list[str] = []
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, M_values, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best_mw = max(valid, key=valid.__getitem__)
+            values.append(_cc_signal_survival(r, best_mw[0], best_mw[1]))
+            mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+        else:
+            values.append(float("nan"))
+            mw_labels.append("N/A")
+
+    x = np.arange(len(results))
+    fig, ax = plt.subplots(figsize=(max(6, len(results) * 0.9), 5))
+
+    for i, (r, c, val, mw) in enumerate(zip(results, colors, values, mw_labels)):
+        if np.isfinite(val):
+            ax.scatter([i], [val], color=c, s=80, zorder=3)
+            ax.annotate(
+                mw, xy=(i, val), xytext=(0, 8),
+                textcoords="offset points", fontsize=7, ha="center", color=c,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=9)
+    ax.set_xlabel("Setup", fontsize=11)
+    ax.set_ylabel("Signal Survival = (TN+FN) / (TP+FP+TN+FN)", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.3f}%"))
+    ax.set_ylim(bottom=0)
+    ax.set_title(
+        "Signal Survival at Each Setup's FoM-Optimal (M, W)\n"
+        "(1 − veto fraction; labels show optimal (M, W))",
+        fontsize=12,
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fname = "24_signal_survival_at_best_fom.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Text output
 # ──────────────────────────────────────────────────────────────────────
 def write_nc_summary(
@@ -2342,6 +2480,59 @@ def write_confusion_matrices(
                     )
             f.write("\n")
     print("  Saved confusion_matrices.txt")
+
+
+def write_survival_table(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+) -> None:
+    """Write survival_at_best_fom.txt: Ge77 and signal survival at FoM-optimal (M,W) per setup.
+
+    Ge77 survival   = TP / (TP+FN)          = Recall
+    Signal survival = (TP+FP) / all_muons
+    """
+    fpath = os.path.join(output_dir, "survival_at_best_fom.txt")
+    W = 80
+    with open(fpath, "w") as f:
+        f.write("Survival at FoM-Optimal (M, W) per Setup\n")
+        f.write("=" * W + "\n\n")
+        f.write("  Ge77 survival   = TP / (TP + FN)            = Recall\n")
+        f.write("  Signal survival = (TP + FP) / all_muons\n")
+        _denom_note = total_primaries if total_primaries > 0 else "per-setup muon count"
+        f.write(f"  all_muons       = {_denom_note:,}\n\n")
+
+        hdr = (
+            f"  {'Setup':<25}  {'(M,W)':>8}  "
+            f"{'Ge77 Survival':>15}  {'Signal Survival':>16}  "
+            f"{'TP':>8}  {'FP':>8}  {'FN':>8}\n"
+        )
+        f.write(hdr)
+        f.write("  " + "-" * (len(hdr) - 3) + "\n")
+
+        for r in results:
+            _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+            grid = _cc_fom_grid(r, M_values, W_values, _tp)
+            valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+            if not valid:
+                f.write(f"  {r.label:<25}  {'N/A':>8}  {'N/A':>15}  {'N/A':>16}\n")
+                continue
+            best_mw = max(valid, key=valid.__getitem__)
+            M_b, W_b = best_mw
+            cm = r.muon["confusion"].get((M_b, W_b), {})
+            tp = cm.get("TP", 0)
+            fp = cm.get("FP", 0)
+            fn = cm.get("FN", 0)
+            ge77_surv = _cc_recall(r, M_b, W_b)
+            sig_surv  = _cc_signal_survival(r, M_b, W_b)
+            f.write(
+                f"  {r.label:<25}  {f'M{M_b}W{W_b}':>8}  "
+                f"{ge77_surv*100:>14.2f}%  {sig_surv*100:>15.4f}%  "
+                f"{tp:>8,}  {fp:>8,}  {fn:>8,}\n"
+            )
+    print("  Saved survival_at_best_fom.txt")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2527,6 +2718,14 @@ def main() -> None:
     _pal_global = _colors(len(results))
     color_map   = {r.label: _pal_global[i] for i, r in enumerate(results)}
 
+    # Figure of Merit — use total primary muons (all muons, not just NC-producing)
+    _n_runs          = len(count_vertices_by_run(args.sim_dirs[0], omit_runs=omit_runs))
+    _total_primaries = _n_runs * MUONS_PER_RUN_DIR
+    _runtime_h    = _total_primaries / MUSUN_RATE
+    _runtime_yr   = _runtime_h / (24 * 365.25)
+    print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
+    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+
     plot_nc_coverage_line(results, M_values, args.output_dir,
                           color_map=color_map)
     # Multiplicity histogram — secondary diagnostic, omitted from main output:
@@ -2543,14 +2742,6 @@ def main() -> None:
                        color_map=color_map)
     # W histogram — too noisy at this scale, omitted:
     # plot_w_histogram(results, M_default, W_default, args.output_dir)
-
-    # Figure of Merit — use total primary muons (all muons, not just NC-producing)
-    _n_runs       = len(count_vertices_by_run(args.sim_dirs[0], omit_runs=omit_runs))
-    _total_primaries = _n_runs * MUONS_PER_RUN_DIR
-    _runtime_h    = _total_primaries / MUSUN_RATE
-    _runtime_yr   = _runtime_h / (24 * 365.25)
-    print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
-    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
 
     # M×W sweep (Recall, Precision, FoM)
     plot_mw_sweep(results, M_values, W_values, args.output_dir,
@@ -2589,11 +2780,17 @@ def main() -> None:
                             total_primaries=_total_primaries, color_map=color_map)
     plot_nc_recall_at_best_fom(results, M_values, W_values, args.output_dir,
                                total_primaries=_total_primaries, color_map=color_map)
+    plot_ge77_survival_at_best_fom(results, M_values, W_values, args.output_dir,
+                                   total_primaries=_total_primaries, color_map=color_map)
+    plot_signal_survival_at_best_fom(results, M_values, W_values, args.output_dir,
+                                     total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
     write_nc_summary(results, M_values, args.output_dir)
     write_confusion_matrices(results, M_values, W_values, args.output_dir)
+    write_survival_table(results, M_values, W_values, args.output_dir,
+                         total_primaries=_total_primaries)
 
     print(f"\nAll outputs saved to: {args.output_dir}")
     print("Done.")
