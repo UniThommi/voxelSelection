@@ -484,6 +484,170 @@ def _run_zone_scan(
 # Per-PMT-position ratio analysis
 # ---------------------------------------------------------------------------
 
+def _validate_input_data(
+    mode: str,
+    pmt_dir: Path,
+    ssd_postprocessed_file: Path,
+) -> None:
+    """Validate integrity of input data files and run ID consistency.
+
+    SSD postprocessed HDF5:
+      - Required datasets present: event_ids, target_matrix, target_columns, phi_matrix.
+      - event_ids, target_matrix, phi_matrix all have the same number of rows.
+      - event_ids is non-empty.
+
+    PMT run directories (all output_t*.hdf5):
+      - File opens without error.
+      - hit/optical group and required fields present.
+      - hit/optical is non-empty (warning if empty, not error).
+
+    musun CSV (merged_ncs.csv per run):
+      - File exists and is non-empty.
+      - All data rows have >= 6 comma-separated columns.
+
+    Run ID consistency:
+      - Unique run_id values in SSD event_ids[:, 0] match the numeric suffixes
+        of run_*** directories in pmt_dir (run_id 1 <-> run_001).
+
+    Raises:
+        ValueError: if any critical check fails (all errors collected before raising).
+    """
+    errors: List[str] = []
+    warn: List[str] = []
+
+    print("\n[0/4] Validating input data integrity and run ID consistency...")
+
+    # ------------------------------------------------------------------
+    # SSD postprocessed HDF5
+    # ------------------------------------------------------------------
+    _SSD_REQUIRED = ['event_ids', 'target_matrix', 'target_columns', 'phi_matrix']
+    ssd_run_ids: set = set()
+    ssd_n_rows = 0
+    try:
+        with h5py.File(ssd_postprocessed_file, 'r') as f:
+            missing = [k for k in _SSD_REQUIRED if k not in f]
+            if missing:
+                errors.append(f"SSD HDF5 missing datasets: {missing}")
+            else:
+                n_ev  = f['event_ids'].shape[0]
+                n_tgt = f['target_matrix'].shape[0]
+                n_phi = f['phi_matrix'].shape[0]
+                if n_ev == 0:
+                    errors.append("SSD HDF5: event_ids is empty")
+                if not (n_ev == n_tgt == n_phi):
+                    errors.append(
+                        f"SSD HDF5 row count mismatch: event_ids={n_ev}, "
+                        f"target_matrix={n_tgt}, phi_matrix={n_phi}")
+                ssd_n_rows = n_ev
+                ssd_run_ids = set(int(x) for x in np.unique(f['event_ids'][:, 0]))
+        print(f"  SSD HDF5: {ssd_n_rows:,} NCs, run IDs = {sorted(ssd_run_ids)}")
+    except OSError as e:
+        errors.append(f"Cannot open SSD HDF5 {ssd_postprocessed_file.name}: {e}")
+
+    # ------------------------------------------------------------------
+    # PMT run directories
+    # ------------------------------------------------------------------
+    primary_field = 'muon_track_id' if mode == 'musun' else 'evtid'
+    _OPT_REQUIRED = [
+        'x_position_in_m', 'time_in_ns', 'det_uid', 'nC_track_id', primary_field,
+    ]
+
+    pmt_run_ids: set = set()
+    run_dirs = sorted(pmt_dir.glob("run_*"))
+    if not run_dirs:
+        errors.append(f"No run_* directories found in {pmt_dir}")
+
+    for run_dir in run_dirs:
+        suffix = run_dir.name[4:]   # strip "run_"
+        try:
+            run_id = int(suffix)
+        except ValueError:
+            warn.append(f"Cannot parse numeric run ID from '{run_dir.name}', skipping")
+            continue
+        pmt_run_ids.add(run_id)
+
+        # CSV integrity (musun only)
+        if mode == 'musun':
+            nc_csv = run_dir / "merged_ncs.csv"
+            if not nc_csv.exists():
+                errors.append(f"Missing merged_ncs.csv in {run_dir.name}")
+            else:
+                n_data = 0
+                has_short = False
+                with open(nc_csv, 'r') as csvf:
+                    csvf.readline()   # skip header
+                    for line in csvf:
+                        if line.strip():
+                            n_data += 1
+                            if len(line.strip().split(',')) < 6:
+                                has_short = True
+                if n_data == 0:
+                    errors.append(f"Empty merged_ncs.csv in {run_dir.name}")
+                elif has_short:
+                    warn.append(
+                        f"merged_ncs.csv in {run_dir.name}: "
+                        f"some rows have < 6 columns")
+
+        # HDF5 file integrity
+        hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
+        if not hdf5_files:
+            warn.append(f"No output_t*.hdf5 files in {run_dir.name}")
+            continue
+        for hdf5_file in hdf5_files:
+            try:
+                with h5py.File(hdf5_file, 'r') as f:
+                    if 'hit' not in f or 'optical' not in f['hit']:
+                        errors.append(
+                            f"{hdf5_file.name} ({run_dir.name}): "
+                            f"missing group hit/optical")
+                        continue
+                    opt = f['hit']['optical']
+                    missing_fields = [k for k in _OPT_REQUIRED if k not in opt]
+                    if missing_fields:
+                        errors.append(
+                            f"{hdf5_file.name} ({run_dir.name}): "
+                            f"hit/optical missing fields: {missing_fields}")
+                    else:
+                        n_hits = opt['x_position_in_m']['pages'].shape[0]
+                        if n_hits == 0:
+                            warn.append(
+                                f"{hdf5_file.name} ({run_dir.name}): "
+                                f"hit/optical is empty")
+            except OSError as e:
+                errors.append(
+                    f"Cannot open {hdf5_file.name} ({run_dir.name}): {e}")
+
+    print(f"  PMT dirs:  {len(pmt_run_ids)} dirs, run IDs = {sorted(pmt_run_ids)}")
+
+    # ------------------------------------------------------------------
+    # Run ID consistency
+    # ------------------------------------------------------------------
+    if ssd_run_ids and pmt_run_ids:
+        ssd_only = ssd_run_ids - pmt_run_ids
+        pmt_only = pmt_run_ids - ssd_run_ids
+        if ssd_only or pmt_only:
+            parts = ["Run ID mismatch between SSD file and PMT directories."]
+            if ssd_only:
+                parts.append(f"In SSD only: {sorted(ssd_only)}.")
+            if pmt_only:
+                parts.append(f"In PMT dirs only: {sorted(pmt_only)}.")
+            errors.append(" ".join(parts))
+        else:
+            print(f"  Run IDs match: {sorted(ssd_run_ids)}")
+
+    # ------------------------------------------------------------------
+    # Report
+    # ------------------------------------------------------------------
+    for w in warn:
+        print(f"  WARNING: {w}")
+    if errors:
+        raise ValueError(
+            "Input data validation failed:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+    print("  All integrity checks passed.")
+
+
 def _accumulate_pmt_hits_per_uid(
     mode: str,
     pmt_dir: Path,
@@ -716,6 +880,9 @@ def analyze_per_pmt_ratio(
     print(f"  Output dir:         {output_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0 -- Validate inputs
+    _validate_input_data(mode, pmt_dir, ssd_postprocessed_file)
 
     # 1 -- PMT positions
     print("\n[1/4] Loading PMT positions...")
