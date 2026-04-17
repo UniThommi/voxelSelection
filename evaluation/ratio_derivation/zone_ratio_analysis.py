@@ -476,6 +476,344 @@ def _run_zone_scan(
 
 
 # ---------------------------------------------------------------------------
+# Per-PMT-position ratio analysis
+# ---------------------------------------------------------------------------
+
+def _accumulate_pmt_hits_per_uid(
+    mode: str,
+    pmt_dir: Path,
+    chunk_size: int,
+) -> Dict[int, int]:
+    """Scan all PMT run directories and accumulate hit counts per detector UID.
+
+    Applies the same NC time-window filter (hit time in [NC_time, NC_time+200 ns])
+    as the main zone-scan pipeline by reusing _filter_pmt_chunk.
+
+    Opens each HDF5 file only once: NC data dict and photon hits are both read
+    within the same ``with h5py.File(...)`` block.
+
+    Args:
+        mode:       'homogeneous' or 'musun'
+        pmt_dir:    base directory that contains run_* subdirectories
+        chunk_size: number of rows per HDF5 read chunk
+
+    Returns:
+        {uid: total_photon_count}  (only UIDs that received >= 1 time-filtered hit)
+    """
+    uid_counts: Dict[int, int] = {}
+
+    for run_dir in sorted(pmt_dir.glob("run_*")):
+        if mode == 'musun':
+            nc_csv = run_dir / "merged_ncs.csv"
+            if not nc_csv.exists():
+                print(f"    [per-PMT] No merged_ncs.csv in {run_dir.name}, skipping")
+                continue
+            nc_data_dict_run = load_nc_data_dict_musun(nc_csv)
+            primary_field = 'muon_track_id'
+
+        for hdf5_file in sorted(run_dir.glob("output_t*.hdf5")):
+            try:
+                with h5py.File(hdf5_file, 'r') as f:
+                    if mode == 'homogeneous':
+                        # Load NC dict and photon hits in a single open
+                        nc_data_dict = load_nc_data_dict_homogeneous(f)
+                        primary_field = 'evtid'
+                    else:
+                        nc_data_dict = nc_data_dict_run
+
+                    total = len(f['hit']['optical']['x_position_in_m']['pages'])
+                    num_chunks = (total - 1) // chunk_size + 1
+                    for ci in range(num_chunks):
+                        cs = ci * chunk_size
+                        ce = min(cs + chunk_size, total)
+                        chunk_counts = _filter_pmt_chunk(
+                            f, cs, ce, primary_field, nc_data_dict)
+                        for uid, cnt in chunk_counts.items():
+                            uid_counts[uid] = uid_counts.get(uid, 0) + cnt
+            except Exception as e:
+                print(f"    [per-PMT] Error in {hdf5_file.name}: {e}")
+
+    return uid_counts
+
+
+def _load_ssd_voxel_hits_from_postprocessed(
+    ssd_postprocessed_file: Path,
+) -> Dict[str, int]:
+    """Sum target_matrix over all NC rows to get total photon hits per voxel.
+
+    The postprocessed file is assumed to already carry the NC time-window
+    filter applied during simPostProcessing -- no additional filtering is done.
+    Reads in batches of 1 000 NC rows to limit peak memory.
+
+    Args:
+        ssd_postprocessed_file: path to ncscore_output_*.hdf5
+
+    Returns:
+        {voxel_id: total_hits_over_all_NCs}
+    """
+    with h5py.File(ssd_postprocessed_file, 'r') as f:
+        voxel_ids: List[str] = [
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f['target_columns'][:]
+        ]
+        mat = f['target_matrix']
+        n_ncs, n_vox = mat.shape
+        col_sums = np.zeros(n_vox, dtype=np.float64)
+        _BATCH = 1000
+        for rs in range(0, n_ncs, _BATCH):
+            re = min(rs + _BATCH, n_ncs)
+            col_sums += np.array(mat[rs:re, :], dtype=np.float64).sum(axis=0)
+
+    return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}
+
+
+def _plot_per_pmt_delta_histogram(
+    all_deltas: List[float],
+    area_deltas: Dict[str, List[float]],
+    area_ratios: Dict[str, float],
+    out_path: Path,
+) -> None:
+    """Two-panel figure: histogram of delta_hits coloured by area (left) and
+    per-area mean +/- std bar chart (right).
+
+    delta_hits = (SSD hits / area_ratio) - PMT hits.
+    A value of 0 means perfect calibration; the representative voxel
+    (chosen as the median-SSD-hit pair) has delta = 0 by construction.
+    """
+    area_colors = {
+        'pit':  'royalblue',
+        'bot':  'darkcyan',
+        'top':  'firebrick',
+        'wall': 'forestgreen',
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+    # Left: stacked histogram coloured by area
+    ax = axes[0]
+    bins = np.histogram_bin_edges(all_deltas, bins=30)
+    for area in ['pit', 'bot', 'top', 'wall']:
+        if area_deltas.get(area):
+            ax.hist(
+                area_deltas[area], bins=bins,
+                color=area_colors[area], alpha=0.6,
+                label=f"{area}  (N={len(area_deltas[area])})",
+                edgecolor='black', linewidth=0.4,
+            )
+    ax.axvline(0,
+               color='black', linestyle='--', linewidth=1.5,
+               label='delta = 0  (perfect match)')
+    ax.axvline(np.mean(all_deltas),
+               color='darkorange', linestyle='-', linewidth=1.5,
+               label=f'Global mean = {np.mean(all_deltas):.1f}')
+    ax.set_xlabel("delta_hits = (SSD hits / area ratio) - PMT hits  [photons]", fontsize=11)
+    ax.set_ylabel("Number of PMT positions", fontsize=11)
+    ax.set_title(
+        "Per-PMT hit deviation after per-area calibration\n"
+        "(representative voxel = closest to median SSD hits; delta = 0 by construction)",
+        fontsize=10,
+    )
+    ax.legend(fontsize=8)
+
+    # Right: per-area mean +/- std bar chart
+    ax = axes[1]
+    valid_areas = [a for a in ['pit', 'bot', 'top', 'wall'] if area_deltas.get(a)]
+    means  = [np.mean(area_deltas[a]) for a in valid_areas]
+    stds   = [np.std(area_deltas[a])  for a in valid_areas]
+    colors = [area_colors[a]          for a in valid_areas]
+    x = np.arange(len(valid_areas))
+    ax.bar(x, means, yerr=stds, color=colors, alpha=0.75,
+           edgecolor='black', capsize=6, error_kw={'linewidth': 1.5})
+    ax.axhline(0, color='black', linestyle='--', linewidth=1.2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{a}\n(ratio = {area_ratios.get(a, float('nan')):.3f})" for a in valid_areas],
+        fontsize=9,
+    )
+    ax.set_ylabel("Mean delta_hits  [photons]  (mean +/- std)", fontsize=11)
+    ax.set_title("Per-area mean hit deviation after calibration", fontsize=10)
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def analyze_per_pmt_ratio(
+    mode: str,
+    pmt_dir: Path,
+    ssd_postprocessed_file: Path,
+    pmt_json: Path,
+    geometry: GeometryConfig,
+    chunk_size: int,
+    output_dir: Path,
+) -> None:
+    """Per-PMT-position calibration ratio analysis (independent of zone scan).
+
+    Derives one efficiency ratio per detector area from the median-hit
+    representative voxel/PMT pair, scales all SSD voxel hits in the area by
+    that ratio, then measures the residual hit deviation at every PMT position.
+
+    Algorithm
+    ---------
+    1. Load 300 PMT positions (JSON) -> UID -> voxel_id mapping via pmt.index.
+    2. Scan raw PMT sim files with the NC time-window filter (+/-200 ns around
+       each NC event, same filter as the main pipeline) -> per-UID photon count.
+    3. Load SSD postprocessed target_matrix (already time-filtered during
+       simPostProcessing) -> sum over NC rows -> per-voxel photon count.
+    4. For each area (pit / bot / top / wall):
+         a. Select the voxel/PMT pair whose SSD hit count is closest to the
+            area median -> the "representative" pair.
+         b. ratio_area = ssd_hits[repr] / pmt_hits[repr]
+            Note: ratio_area < 1 if the SSD surface collected fewer photons
+            than the PMT at the same position.
+    5. For every PMT position in the area:
+            scaled_hits = ssd_hits / ratio_area
+            delta_hits  = scaled_hits - pmt_hits
+       By construction, delta = 0 for the representative voxel; all other
+       values show the residual non-uniformity within the area.
+    6. Plot a histogram of delta_hits over all ~300 PMT-matched voxels.
+
+    Assumptions / uncertainties
+    ---------------------------
+    * pmt.index (from the JSON) == voxel_id in SSD target_columns.
+      Both derive from the same det_uid by stripping the '10' / '1' prefix
+      (consistent between pmt_data.py and compare_pmt_ssd.py).
+    * The SSD postprocessed target_matrix carries the same 200 ns time window
+      as the PMT filtering applied here (confirmed by user).
+    * PMT positions with pmt_hits == 0 in the representative voxel produce an
+      undefined ratio and the area is excluded with a warning.
+
+    Args:
+        mode:                   'homogeneous' or 'musun'
+        pmt_dir:                raw PMT simulation base directory (run_* subdirs)
+        ssd_postprocessed_file: ncscore_output_*.hdf5 with target_matrix
+        pmt_json:               JSON file listing the 300 PMT positions
+        geometry:               GeometryConfig (kept for API symmetry; not used here)
+        chunk_size:             HDF5 read chunk size (rows per chunk)
+        output_dir:             directory where the output plot is saved
+    """
+    print("\n" + "=" * 80)
+    print("Per-PMT-position ratio analysis")
+    print("=" * 80)
+    print(f"  Mode:               {mode}")
+    print(f"  PMT dir:            {pmt_dir}")
+    print(f"  SSD postprocessed:  {ssd_postprocessed_file}")
+    print(f"  Output dir:         {output_dir}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1 -- PMT positions
+    print("\n[1/4] Loading PMT positions...")
+    pmts       = load_pmt_data(pmt_json)
+    uid_to_pmt = build_uid_to_pmt_map(pmts)
+    print(f"  {len(pmts)} PMTs loaded, {len(uid_to_pmt)} UID mappings")
+
+    # 2 -- PMT hit counts (NC time filter)
+    print("\n[2/4] Accumulating PMT hits per position (NC time filter)...")
+    pmt_uid_hits: Dict[int, int] = _accumulate_pmt_hits_per_uid(
+        mode, pmt_dir, chunk_size)
+    n_with_hits = sum(1 for v in pmt_uid_hits.values() if v > 0)
+    print(f"  {len(pmt_uid_hits)} UIDs observed; {n_with_hits} with hits > 0")
+
+    # 3 -- SSD postprocessed voxel hits
+    print("\n[3/4] Loading SSD postprocessed voxel hits...")
+    ssd_voxel_hits: Dict[str, int] = _load_ssd_voxel_hits_from_postprocessed(
+        ssd_postprocessed_file)
+    print(f"  {len(ssd_voxel_hits)} voxels; "
+          f"total hits = {sum(ssd_voxel_hits.values()):,}")
+
+    # 4 -- Build per-position records and per-area ratios
+    print("\n[4/4] Computing per-area calibration ratios and delta hits...")
+
+    records: List[Dict] = []
+    n_no_pmt = 0
+    n_no_ssd = 0
+    for uid, pmt in uid_to_pmt.items():
+        p_hits = pmt_uid_hits.get(uid, 0)
+        s_hits = ssd_voxel_hits.get(pmt.index, 0)
+        if uid not in pmt_uid_hits:
+            n_no_pmt += 1
+        if pmt.index not in ssd_voxel_hits:
+            n_no_ssd += 1
+        records.append({
+            'uid':      uid,
+            'voxel_id': pmt.index,
+            'layer':    pmt.layer,
+            'pmt_hits': p_hits,
+            'ssd_hits': s_hits,
+        })
+    if n_no_pmt:
+        print(f"  INFO: {n_no_pmt} PMT positions with no time-filtered photons in sim "
+              f"(normal for low-rate NCs)")
+    if n_no_ssd:
+        print(f"  WARNING: {n_no_ssd} PMT positions have no matching voxel in the "
+              f"SSD postprocessed file (voxel_id not in target_columns)")
+
+    # Per-area calibration: median representative voxel
+    areas = ['pit', 'bot', 'top', 'wall']
+    area_ratios: Dict[str, float] = {}
+
+    print(f"\n  {'Area':<6} {'Repr voxel':<14} {'SSD hits':>10} "
+          f"{'PMT hits':>10} {'Ratio':>8}  (ratio < 1 means SSD < PMT)")
+    print("  " + "-" * 62)
+
+    for area in areas:
+        area_recs = [r for r in records if r['layer'] == area]
+        if not area_recs:
+            print(f"  {area:<6}  -- no matched voxels in this area")
+            area_ratios[area] = float('nan')
+            continue
+
+        ssd_vals   = np.array([r['ssd_hits'] for r in area_recs], dtype=float)
+        median_ssd = np.median(ssd_vals)
+        # Voxel closest to median SSD hit count -> representative
+        idx_repr   = int(np.argmin(np.abs(ssd_vals - median_ssd)))
+        repr_rec   = area_recs[idx_repr]
+
+        if repr_rec['pmt_hits'] == 0:
+            print(f"  {area:<6}  WARNING: representative PMT has 0 photon hits -- "
+                  f"ratio undefined, area skipped")
+            area_ratios[area] = float('nan')
+            continue
+
+        ratio = repr_rec['ssd_hits'] / repr_rec['pmt_hits']
+        area_ratios[area] = ratio
+        print(f"  {area:<6} {repr_rec['voxel_id']:<14} "
+              f"{repr_rec['ssd_hits']:>10d} {repr_rec['pmt_hits']:>10d} {ratio:>8.4f}")
+
+    # Compute delta_hits for every PMT position with a valid area ratio
+    all_deltas:  List[float]            = []
+    area_deltas: Dict[str, List[float]] = {a: [] for a in areas}
+
+    for r in records:
+        ratio = area_ratios.get(r['layer'], float('nan'))
+        if np.isnan(ratio) or ratio == 0.0:
+            continue
+        delta = r['ssd_hits'] / ratio - r['pmt_hits']
+        all_deltas.append(delta)
+        area_deltas[r['layer']].append(delta)
+
+    if not all_deltas:
+        print("\n  WARNING: No valid delta values -- check input paths and data.")
+        return
+
+    print(f"\n  Delta-hits summary over {len(all_deltas)} PMT positions:")
+    print(f"    Global mean   = {np.mean(all_deltas):+.2f}")
+    print(f"    Global std    = {np.std(all_deltas):.2f}")
+    print(f"    Global median = {np.median(all_deltas):+.2f}")
+    print(f"    Min / Max     = {np.min(all_deltas):+.1f} / {np.max(all_deltas):+.1f}")
+    for area in areas:
+        if area_deltas[area]:
+            print(f"    {area:<5}  mean={np.mean(area_deltas[area]):+.2f}  "
+                  f"std={np.std(area_deltas[area]):.2f}  N={len(area_deltas[area])}")
+
+    out_path = output_dir / "per_pmt_delta_hits.png"
+    _plot_per_pmt_delta_histogram(all_deltas, area_deltas, area_ratios, out_path)
+    print(f"\n  Saved: {out_path}")
+    print("Per-PMT ratio analysis done.")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -513,6 +851,14 @@ def parse_args() -> argparse.Namespace:
                         "(the musun default path is stored in _MUSUN_DEFAULTS['compare'])")
     p.add_argument('--geometry', type=str, default='currentDist',
                    help="Geometry name tag stored in output JSON metadata")
+    # per-PMT-position ratio analysis (independent mode)
+    p.add_argument('--per-pmt-ratio', action='store_true',
+                   help="Run per-PMT-position ratio analysis instead of the zone scan. "
+                        "Requires --ssd-postprocessed-file.")
+    p.add_argument('--ssd-postprocessed-file', type=Path, default=None,
+                   metavar='HDF5',
+                   help="SSD postprocessed ncscore_output_*.hdf5 (target_matrix). "
+                        "Required when --per-pmt-ratio is set.")
     return p.parse_args()
 
 
@@ -540,6 +886,24 @@ def main() -> None:
     geometry   = GeometryConfig(geometry_name=args.geometry)
     chunk_size = get_chunk_size()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Independent per-PMT-position analysis (short-circuits zone scan)
+    if args.per_pmt_ratio:
+        if args.ssd_postprocessed_file is None:
+            raise ValueError(
+                "--ssd-postprocessed-file is required when --per-pmt-ratio is set"
+            )
+        analyze_per_pmt_ratio(
+            mode=args.mode,
+            pmt_dir=args.pmt_dir,
+            ssd_postprocessed_file=args.ssd_postprocessed_file,
+            pmt_json=args.pmt_json,
+            geometry=geometry,
+            chunk_size=chunk_size,
+            output_dir=args.output_dir,
+        )
+        return
+
     output_file = args.output_dir / "zone_ratio_results.txt"
 
     print("=" * 80)
