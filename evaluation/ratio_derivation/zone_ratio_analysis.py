@@ -135,24 +135,24 @@ def _filter_ssd_chunk(
     Returns (x_f, y_f, z_f, uid_f) in mm, after both filters.
     """
     x   = np.array(f['hit']['optical']['x_position_in_m']['pages'][cs:ce],
-                   dtype=np.float32) * 1000
+                   dtype=np.float64) * 1000
     y   = np.array(f['hit']['optical']['y_position_in_m']['pages'][cs:ce],
-                   dtype=np.float32) * 1000
+                   dtype=np.float64) * 1000
     z   = np.array(f['hit']['optical']['z_position_in_m']['pages'][cs:ce],
-                   dtype=np.float32) * 1000
+                   dtype=np.float64) * 1000
     px  = np.array(f['hit']['optical']['x_momentum_direction']['pages'][cs:ce],
-                   dtype=np.float32)
+                   dtype=np.float64)
     py  = np.array(f['hit']['optical']['y_momentum_direction']['pages'][cs:ce],
-                   dtype=np.float32)
+                   dtype=np.float64)
     pz_arr = np.array(f['hit']['optical']['z_momentum_direction']['pages'][cs:ce],
-                      dtype=np.float32)
+                      dtype=np.float64)
     pids = f['hit']['optical'][primary_field]['pages'][cs:ce]
     nids = f['hit']['optical']['nC_track_id']['pages'][cs:ce]
-    time = f['hit']['optical']['time_in_ns']['pages'][cs:ce]
+    time = np.array(f['hit']['optical']['time_in_ns']['pages'][cs:ce], dtype=np.float64)
     uid  = f['hit']['optical']['det_uid']['pages'][cs:ce]
 
     # NC time filter
-    nc_times = np.full(len(time), np.inf, dtype=np.float32)
+    nc_times = np.full(len(time), np.inf, dtype=np.float64)
     for i in range(len(pids)):
         key = (int(pids[i]), int(nids[i]))
         if key in nc_data_dict:
@@ -179,21 +179,26 @@ def _filter_ssd_chunk(
 def _filter_pmt_chunk(
     f, cs: int, ce: int,
     primary_field: str, nc_data_dict: Dict,
-) -> Dict[int, int]:
+) -> Tuple[Dict[int, int], int]:
     """Read one PMT HDF5 chunk; apply NC time filter.
 
-    Returns {uid: photon_count} for PMT UIDs only.
+    Returns ({uid: photon_count}, n_unmatched) for PMT UIDs only.
+    n_unmatched counts photons whose (primary_id, nc_id) key was absent from
+    nc_data_dict (they carry no NC time and are silently dropped).
     """
     pids = f['hit']['optical'][primary_field]['pages'][cs:ce]
     nids = f['hit']['optical']['nC_track_id']['pages'][cs:ce]
-    time = f['hit']['optical']['time_in_ns']['pages'][cs:ce]
+    time = np.array(f['hit']['optical']['time_in_ns']['pages'][cs:ce], dtype=np.float64)
     uid  = f['hit']['optical']['det_uid']['pages'][cs:ce]
 
-    nc_times = np.full(len(time), np.inf, dtype=np.float32)
+    nc_times = np.full(len(time), np.inf, dtype=np.float64)
+    n_unmatched = 0
     for i in range(len(pids)):
         key = (int(pids[i]), int(nids[i]))
         if key in nc_data_dict:
             nc_times[i] = nc_data_dict[key]['nC_time']
+        else:
+            n_unmatched += 1
     tmask = (nc_times != np.inf) & (time >= nc_times) & (time <= nc_times + 200.0)
     uid_f = uid[tmask]
     pmt_mask = (uid_f >= 10_000_000) & (uid_f < 1_000_000_000)
@@ -203,7 +208,7 @@ def _filter_pmt_chunk(
     uids, cnts = np.unique(uid_f, return_counts=True)
     for u, c in zip(uids, cnts):
         counts[int(u)] = counts.get(int(u), 0) + int(c)
-    return counts
+    return counts, n_unmatched
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +347,7 @@ def _scan_pmt_for_area(
                     for ci in range(num_chunks):
                         cs = ci * chunk_size
                         ce = min(cs + chunk_size, total)
-                        chunk_cnts = _filter_pmt_chunk(
+                        chunk_cnts, _ = _filter_pmt_chunk(
                             f, cs, ce, primary_field, nc_data_dict)
                         for u, c in chunk_cnts.items():
                             pmt_photon_counts[u] = pmt_photon_counts.get(u, 0) + c
@@ -483,7 +488,7 @@ def _accumulate_pmt_hits_per_uid(
     mode: str,
     pmt_dir: Path,
     chunk_size: int,
-) -> Dict[int, int]:
+) -> Tuple[Dict[int, int], int, int]:
     """Scan all PMT run directories and accumulate hit counts per detector UID.
 
     Applies the same NC time-window filter (hit time in [NC_time, NC_time+200 ns])
@@ -498,9 +503,14 @@ def _accumulate_pmt_hits_per_uid(
         chunk_size: number of rows per HDF5 read chunk
 
     Returns:
-        {uid: total_photon_count}  (only UIDs that received >= 1 time-filtered hit)
+        (uid_counts, total_nc, n_unmatched)
+        uid_counts:  {uid: total_photon_count} (only UIDs with >= 1 time-filtered hit)
+        total_nc:    number of NC events across all processed files
+        n_unmatched: photons whose (primary_id, nc_id) key was absent from nc_data_dict
     """
     uid_counts: Dict[int, int] = {}
+    total_nc: int = 0
+    n_unmatched: int = 0
 
     for run_dir in sorted(pmt_dir.glob("run_*")):
         if mode == 'musun':
@@ -509,6 +519,7 @@ def _accumulate_pmt_hits_per_uid(
                 print(f"    [per-PMT] No merged_ncs.csv in {run_dir.name}, skipping")
                 continue
             nc_data_dict_run = load_nc_data_dict_musun(nc_csv)
+            total_nc += len(nc_data_dict_run)
             primary_field = 'muon_track_id'
 
         for hdf5_file in sorted(run_dir.glob("output_t*.hdf5")):
@@ -518,6 +529,8 @@ def _accumulate_pmt_hits_per_uid(
                         # Load NC dict and photon hits in a single open
                         nc_data_dict = load_nc_data_dict_homogeneous(f)
                         primary_field = 'evtid'
+                        total_nc += len(
+                            f['hit']['MyNeutronCaptureOutput']['evtid']['pages'])
                     else:
                         nc_data_dict = nc_data_dict_run
 
@@ -526,30 +539,32 @@ def _accumulate_pmt_hits_per_uid(
                     for ci in range(num_chunks):
                         cs = ci * chunk_size
                         ce = min(cs + chunk_size, total)
-                        chunk_counts = _filter_pmt_chunk(
+                        chunk_counts, chunk_unmatched = _filter_pmt_chunk(
                             f, cs, ce, primary_field, nc_data_dict)
                         for uid, cnt in chunk_counts.items():
                             uid_counts[uid] = uid_counts.get(uid, 0) + cnt
+                        n_unmatched += chunk_unmatched
             except Exception as e:
                 print(f"    [per-PMT] Error in {hdf5_file.name}: {e}")
 
-    return uid_counts
+    return uid_counts, total_nc, n_unmatched
 
 
 def _load_ssd_voxel_hits_from_postprocessed(
     ssd_postprocessed_file: Path,
-) -> Dict[str, int]:
+) -> Tuple[Dict[str, int], int]:
     """Sum target_matrix over all NC rows to get total photon hits per voxel.
 
     The postprocessed file is assumed to already carry the NC time-window
     filter applied during simPostProcessing -- no additional filtering is done.
     Reads in batches of 1 000 NC rows to limit peak memory.
+    Accumulates in float64 (from int32 on disk) to avoid overflow at large row counts.
 
     Args:
         ssd_postprocessed_file: path to ncscore_output_*.hdf5
 
     Returns:
-        {voxel_id: total_hits_over_all_NCs}
+        ({voxel_id: total_hits_over_all_NCs}, n_ncs)
     """
     with h5py.File(ssd_postprocessed_file, 'r') as f:
         voxel_ids: List[str] = [
@@ -564,7 +579,7 @@ def _load_ssd_voxel_hits_from_postprocessed(
             re = min(rs + _BATCH, n_ncs)
             col_sums += np.array(mat[rs:re, :], dtype=np.float64).sum(axis=0)
 
-    return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}
+    return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}, n_ncs
 
 
 def _plot_per_pmt_delta_histogram(
@@ -710,17 +725,29 @@ def analyze_per_pmt_ratio(
 
     # 2 -- PMT hit counts (NC time filter)
     print("\n[2/4] Accumulating PMT hits per position (NC time filter)...")
-    pmt_uid_hits: Dict[int, int] = _accumulate_pmt_hits_per_uid(
+    pmt_uid_hits, pmt_nc, n_unmatched = _accumulate_pmt_hits_per_uid(
         mode, pmt_dir, chunk_size)
     n_with_hits = sum(1 for v in pmt_uid_hits.values() if v > 0)
     print(f"  {len(pmt_uid_hits)} UIDs observed; {n_with_hits} with hits > 0")
+    print(f"  PMT simulation: {pmt_nc:,} NC events")
+    if n_unmatched:
+        print(f"  WARNING: {n_unmatched:,} photons had no NC match in nc_data_dict "
+              f"(dropped by time filter)")
 
     # 3 -- SSD postprocessed voxel hits
     print("\n[3/4] Loading SSD postprocessed voxel hits...")
-    ssd_voxel_hits: Dict[str, int] = _load_ssd_voxel_hits_from_postprocessed(
+    ssd_voxel_hits, ssd_nc = _load_ssd_voxel_hits_from_postprocessed(
         ssd_postprocessed_file)
     print(f"  {len(ssd_voxel_hits)} voxels; "
           f"total hits = {sum(ssd_voxel_hits.values()):,}")
+    print(f"  SSD postprocessed: {ssd_nc:,} NC events")
+
+    if pmt_nc != ssd_nc:
+        raise ValueError(
+            f"NC count mismatch: PMT simulation has {pmt_nc:,} NCs but "
+            f"SSD postprocessed file has {ssd_nc:,} NCs. "
+            "Ensure both datasets were produced from the same simulation run."
+        )
 
     # 4 -- Build per-position records and per-area ratios
     print("\n[4/4] Computing per-area calibration ratios and delta hits...")

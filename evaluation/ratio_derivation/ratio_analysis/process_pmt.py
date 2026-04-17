@@ -50,11 +50,12 @@ def process_pmt_file(
 
                 primary_ids  = f['hit']['optical'][primary_id_field]['pages'][cs:ce]
                 nc_track_ids = f['hit']['optical']['nC_track_id']['pages'][cs:ce]
-                time         = f['hit']['optical']['time_in_ns']['pages'][cs:ce]
+                time         = np.array(
+                    f['hit']['optical']['time_in_ns']['pages'][cs:ce], dtype=np.float64)
                 det_uid      = f['hit']['optical']['det_uid']['pages'][cs:ce]
 
                 # NC time filter
-                nc_times = np.full(len(time), np.inf, dtype=np.float32)
+                nc_times = np.full(len(time), np.inf, dtype=np.float64)
                 for idx in range(len(primary_ids)):
                     key = (int(primary_ids[idx]), int(nc_track_ids[idx]))
                     if key in nc_data_dict:
