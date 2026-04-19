@@ -121,6 +121,31 @@ def _validate_fractions(all_zones: List[Zone], pmts: list) -> None:
               f"{FRACTION_TOLERANCE*100:.0f}% of 1.0")
 
 
+def _validate_raw_dirs(mode: str, ssd_dir: Path, pmt_dir: Path) -> None:
+    """Validate raw SSD and PMT run directories before zone scan."""
+    errors: List[str] = []
+    for label, d in [('SSD', ssd_dir), ('PMT', pmt_dir)]:
+        run_dirs = sorted(d.glob("run_*"))
+        if not run_dirs:
+            errors.append(f"No run_* directories in {label} dir: {d}")
+            continue
+        n_hdf5 = 0
+        for rd in run_dirs:
+            n_hdf5 += len(list(rd.glob("output_t*.hdf5")))
+            if mode == 'musun' and not (rd / "merged_ncs.csv").exists():
+                errors.append(f"Missing merged_ncs.csv in {label} {rd.name}")
+        if n_hdf5 == 0:
+            errors.append(f"No output_t*.hdf5 files in any run_* of {label} dir: {d}")
+        else:
+            print(f"  {label}: {len(run_dirs)} run dir(s), {n_hdf5} HDF5 file(s)")
+    if errors:
+        raise ValueError(
+            "Raw directory validation failed:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+    print("  Raw directory checks passed.")
+
+
 # ---------------------------------------------------------------------------
 # Chunk-level filter helpers (zone scan inner loop)
 # ---------------------------------------------------------------------------
@@ -825,6 +850,7 @@ def analyze_per_pmt_ratio(
     geometry: GeometryConfig,
     chunk_size: int,
     output_dir: Path,
+    _skip_validation: bool = False,
 ) -> None:
     """Per-PMT-position calibration ratio analysis (independent of zone scan).
 
@@ -882,7 +908,8 @@ def analyze_per_pmt_ratio(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 0 -- Validate inputs
-    _validate_input_data(mode, pmt_dir, ssd_postprocessed_file)
+    if not _skip_validation:
+        _validate_input_data(mode, pmt_dir, ssd_postprocessed_file)
 
     # 1 -- PMT positions
     print("\n[1/4] Loading PMT positions...")
@@ -1063,6 +1090,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Decide which analyses to run BEFORE filling path defaults so we can
+    # detect whether --ssd-dir was explicitly provided by the user.
+    run_per_pmt = args.per_pmt_ratio
+    run_zone    = not run_per_pmt or (args.ssd_dir is not None)
+
     # Fill mode-specific path defaults
     if args.ssd_dir is None:
         args.ssd_dir = (_MUSUN_DEFAULTS['ssd_dir'] if args.mode == 'musun'
@@ -1074,19 +1106,27 @@ def main() -> None:
         args.output_dir = (_MUSUN_DEFAULTS['output_dir'] if args.mode == 'musun'
                            else _HOMO_DEFAULTS['output_dir'])
 
-    compare_mode   = args.compare is not None
+    compare_mode    = args.compare is not None
     zone_scan_areas = args.zone_scan if args.zone_scan else []
 
     geometry   = GeometryConfig(geometry_name=args.geometry)
     chunk_size = get_chunk_size()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Independent per-PMT-position analysis (short-circuits zone scan)
-    if args.per_pmt_ratio:
+    # --- Pre-flight validation (all checks before any heavy computation) ---
+    if run_per_pmt:
         if args.ssd_postprocessed_file is None:
             raise ValueError(
                 "--ssd-postprocessed-file is required when --per-pmt-ratio is set"
             )
+        print("\n[Pre-flight] Validating per-PMT inputs...")
+        _validate_input_data(args.mode, args.pmt_dir, args.ssd_postprocessed_file)
+
+    if run_zone:
+        print("\n[Pre-flight] Validating raw SSD/PMT directories...")
+        _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir)
+    else:
+        # Per-PMT only: validation already done; run and exit.
         analyze_per_pmt_ratio(
             mode=args.mode,
             pmt_dir=args.pmt_dir,
@@ -1095,7 +1135,9 @@ def main() -> None:
             geometry=geometry,
             chunk_size=chunk_size,
             output_dir=args.output_dir,
+            _skip_validation=True,
         )
+        print("\nDone.")
         return
 
     output_file = args.output_dir / "zone_ratio_results.txt"
@@ -1407,6 +1449,18 @@ def main() -> None:
         area_results = [r for r in results if r['zone'].area_name == area]
         plot_area_flux(area_results, area,
                        args.output_dir / f"{area}_ssd_vs_pmt_flux.png")
+
+    if run_per_pmt:
+        analyze_per_pmt_ratio(
+            mode=args.mode,
+            pmt_dir=args.pmt_dir,
+            ssd_postprocessed_file=args.ssd_postprocessed_file,
+            pmt_json=args.pmt_json,
+            geometry=geometry,
+            chunk_size=chunk_size,
+            output_dir=args.output_dir,
+            _skip_validation=True,
+        )
 
     print("\nDone.")
 
