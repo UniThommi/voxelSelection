@@ -175,10 +175,12 @@ def validate_pmt_uids(results: list[SetupResult]) -> None:
 # Shared plot helpers
 # ──────────────────────────────────────────────────────────────────────
 
-# Qualitative palette: 10 clearly distinguishable colours ordered so that
-# adjacent entries have maximum hue contrast.  Used for ALL non-heatmap
+# Qualitative palette: 20 clearly distinguishable colours ordered so that
+# adjacent entries have maximum hue contrast.  Covers up to 20 setups
+# without repeating; cycles only beyond that.  Used for ALL non-heatmap
 # plots so every setup is always represented by the same colour.
 _SETUP_PALETTE: list[str] = [
+    # ── 0–9: tab10 (standard categorical palette) ────────────────────
     "#1f77b4",  # 0  blue
     "#d62728",  # 1  red
     "#2ca02c",  # 2  green
@@ -189,11 +191,22 @@ _SETUP_PALETTE: list[str] = [
     "#e377c2",  # 7  pink
     "#bcbd22",  # 8  yellow-green
     "#7f7f7f",  # 9  grey
+    # ── 10–19: perceptually distinct additions ───────────────────────
+    "#1b9e77",  # 10 dark teal        (darker/greener than cyan)
+    "#e7298a",  # 11 hot magenta      (more saturated than pink)
+    "#e6ab02",  # 12 amber            (more yellow than orange)
+    "#006d2c",  # 13 dark forest      (much darker than green)
+    "#d95f02",  # 14 burnt sienna     (more reddish than orange)
+    "#7570b3",  # 15 slate blue       (more grey-blue than purple)
+    "#f46d43",  # 16 coral            (warm red-orange)
+    "#74c476",  # 17 mint green       (lighter/cooler than green)
+    "#b15928",  # 18 rust brown       (reddish-brown, distinct from brown)
+    "#313695",  # 19 dark navy        (much darker than blue)
 ]
 
 
 def _colors(n: int) -> list[str]:
-    """Return a list of n setup colours, cycling _SETUP_PALETTE if n > 10."""
+    """Return a list of n setup colours, cycling _SETUP_PALETTE if n > 20."""
     return [_SETUP_PALETTE[i % len(_SETUP_PALETTE)] for i in range(n)]
 
 
