@@ -626,13 +626,13 @@ def plot_ge77_muon_overview(
     )
 
     # ── Left panel: absolute grouped bars ────────────────────────────
-    _denom = total_primary_muons if total_primary_muons > 0 else results[0].muon["muon_stats"]["n_ge77"]
+    _ge77_total = results[0].muon["muon_stats"]["n_ge77"] if results else 0
     for i, (r, c) in enumerate(zip(results, colors)):
         vals   = _vals(r)
         offset = (i - (n - 1) / 2) * width
         bars   = ax_abs.bar(x + offset, vals, width, label=r.label, color=c)
         for bar, val in zip(bars, vals):
-            _annotate_bar(ax_abs, bar, val, _denom, fontsize=6, rotation=90)
+            _annotate_bar(ax_abs, bar, val, _ge77_total, fontsize=6, rotation=90)
 
     ax_abs.set_xticks(x)
     ax_abs.set_xticklabels(cat_labels, fontsize=9)
@@ -645,10 +645,10 @@ def plot_ge77_muon_overview(
     ax_abs.legend(fontsize=8)
     ax_abs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
     # Indicate what 100% corresponds to
-    _n_ge77_note = results[0].muon["muon_stats"]["n_ge77"] if results else 0
-    _note_lines = f"100 % = {_denom:,} muons"
-    if total_primary_muons > 0 and _n_ge77_note > 0:
-        _note_lines += f"\n(of which Ge77: {_n_ge77_note:,})"
+    _all_muons = total_primary_muons if total_primary_muons > 0 else (results[0].muon["muon_stats"]["total"] if results else 0)
+    _note_lines = f"100 % = {_ge77_total:,} Ge77 muons"
+    if _all_muons > 0 and _all_muons != _ge77_total:
+        _note_lines += f"\n(total primary muons: {_all_muons:,})"
     ax_abs.text(
         0.01, 0.99, _note_lines,
         transform=ax_abs.transAxes, fontsize=9, va="top", ha="left",
@@ -671,7 +671,7 @@ def plot_ge77_muon_overview(
         bar_h      = 0.8 / n_non_ref
         y_base     = np.arange(n_cats, dtype=float)
         ref_vals   = _vals(results[0])
-        ref_total  = total_primary_muons if total_primary_muons > 0 else results[0].muon["muon_stats"]["n_ge77"]
+        ref_total  = results[0].muon["muon_stats"]["n_ge77"]
 
         for j, (r, c) in enumerate(zip(results[1:], colors[1:])):
             vals   = _vals(r)
@@ -793,44 +793,57 @@ def plot_confusion_bar(
     output_dir: str,
     color_map: dict[str, str] | None = None,
 ) -> None:
-    """Grouped bar: TP, FN, TN, FP at (M_default, W_default) for all configs."""
+    """Four sub-figures (2×2): TP, FN, TN, FP at (M_default, W_default).
+
+    Each panel shows one confusion metric with linear scale and y-axis zoomed
+    to the data range so differences across setups are clearly visible.
+    """
     n = len(results)
     if color_map is None:
         _pal = _colors(n)
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
     categories = [
-        "True Positive\n(Ge77 → classified)",
-        "False Negative\n(Ge77 → missed)",
-        "True Negative\n(non-Ge77 → correct)",
-        "False Positive\n(non-Ge77 → misclass.)",
+        ("True Positive\n(Ge77 → classified)", "TP"),
+        ("False Negative\n(Ge77 → missed)", "FN"),
+        ("True Negative\n(non-Ge77 → correct)", "TN"),
+        ("False Positive\n(non-Ge77 → misclass.)", "FP"),
     ]
-    keys = ("TP", "FN", "TN", "FP")
-    x = np.arange(len(categories))
-    width = 0.8 / n
     colors = [color_map.get(r.label, "gray") for r in results]
 
-    fig, ax = plt.subplots(figsize=(16, 8))
-    for i, (r, c) in enumerate(zip(results, colors)):
-        conf = r.muon["confusion"][(M_default, W_default)]
-        vals = [conf[k] for k in keys]
-        offset = (i - (n - 1) / 2) * width
-        bars = ax.bar(x + offset, vals, width, label=r.label, color=c)
-        for bar, val in zip(bars, vals):
-            _annotate_bar(ax, bar, val, fontsize=7, rotation=90)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes_flat = axes.flatten()
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(categories, fontsize=9)
-    ax.set_ylabel("Number of Muons (log scale)")
-    ax.set_title(
+    for ax, (cat_label, key) in zip(axes_flat, categories):
+        all_vals = []
+        for i, (r, c) in enumerate(zip(results, colors)):
+            conf = r.muon["confusion"][(M_default, W_default)]
+            val = conf[key]
+            all_vals.append(val)
+            bar = ax.bar([i], [val], 0.6, label=r.label, color=c)
+            _annotate_bar(ax, bar[0], val, fontsize=8)
+
+        vmin = min(all_vals) if all_vals else 0
+        vmax = max(all_vals) if all_vals else 1
+        span = vmax - vmin
+        if span > 0:
+            margin = span * 0.4
+            ax.set_ylim(max(0, vmin - margin), vmax + margin)
+        else:
+            ax.set_ylim(0, vmax * 1.2 if vmax > 0 else 1)
+
+        ax.set_xticks(range(n))
+        ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Number of Muons")
+        ax.set_title(cat_label, fontsize=11)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle(
         f"Ge-77 Muon Classification (W≥{W_default}, M≥{M_default})\n"
-        "(only muons with ≥1 NC)"
+        "(linear scale · y-axis zoomed to data range per panel)",
+        fontsize=13,
     )
-    ax.set_yscale("log")
-    ax.set_ylim(bottom=1)
-    ax.legend()
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-    # Metrics per config — placed below the axis with extra room
     lines = []
     for r in results:
         conf = r.muon["confusion"][(M_default, W_default)]
@@ -845,7 +858,7 @@ def plot_confusion_bar(
         fontstyle="italic", family="monospace",
     )
 
-    fig.tight_layout(rect=[0, 0.04 + 0.025 * n_lines, 1, 1])
+    fig.tight_layout(rect=[0, 0.04 + 0.025 * n_lines, 1, 0.96])
     fname = "06_confusion_bar.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
@@ -1427,7 +1440,62 @@ def plot_w2_sorted_heatmaps(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Plot 13 — W2 vs NC coverage scatter (optional)
+# Plot 08 — W2 vs NC coverage scatter (standalone)
+# ──────────────────────────────────────────────────────────────────────
+def plot_w2_nc_scatter(
+    results: list[SetupResult],
+    M_values: list[int],
+    output_dir: str,
+    M_fixed: int = 1,
+    W_fixed: int = 1,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """W2 vs NC coverage fraction for multiple M thresholds — standalone plot.
+
+    Saved as 08_w2_nc_scatter_M{M_fixed:02d}_W{W_fixed:02d}.png.
+    """
+    w2_results = [r for r in results if r.w2 is not None]
+    if len(w2_results) < 2:
+        print("  [SKIP] 08_w2_nc_scatter*.png: fewer than 2 setups have W2.")
+        return
+
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    w2_vals = np.array([r.w2 for r in w2_results])
+
+    panel_ms = sorted({M for M in [1, 2, 4, 5, 10] if M in M_values})
+    m_colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(panel_ms)))
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.suptitle("W2 Homogeneity vs NC Coverage", fontsize=13, fontweight="bold")
+
+    for sM, cm in zip(panel_ms, m_colors):
+        fracs = np.array([
+            r.nc["nc_detected"][sM] / max(r.nc["nc_total"], 1)
+            for r in w2_results
+        ])
+        ax.scatter(w2_vals, fracs, color=cm, s=55, zorder=3, label=f"M={sM}")
+        for r, w2v, frac in zip(w2_results, w2_vals, fracs):
+            ax.annotate(r.label, xy=(w2v, frac), xytext=(4, 2),
+                        textcoords="offset points", fontsize=6, color=cm)
+
+    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=10)
+    ax.set_ylabel("NC detection fraction", fontsize=10)
+    ax.set_title("W2 vs NC Coverage", fontsize=11)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.legend(title="M threshold", fontsize=8, title_fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fname = f"08_w2_nc_scatter_M{M_fixed:02d}_W{W_fixed:02d}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 09 — W2 vs Recall / Precision scatter
 # ──────────────────────────────────────────────────────────────────────
 def plot_w2_scatter(
     results: list[SetupResult],
@@ -1440,12 +1508,12 @@ def plot_w2_scatter(
     W_fixed: int = 1,
     color_map: dict[str, str] | None = None,
 ) -> None:
-    """Three-panel W2 scatter figure at fixed (M_fixed, W_fixed) — one file.
+    """Two-panel W2 scatter figure at fixed (M_fixed, W_fixed) — one file.
 
-    Panel 1 — W2 vs NC coverage fraction for multiple M thresholds
-               (colored by M; per-setup point annotations).
-    Panel 2 — W2 vs Recall at (M_fixed, W_fixed), per-setup colours + OLS.
-    Panel 3 — W2 vs Precision at (M_fixed, W_fixed), per-setup colours + OLS.
+    Panel 1 — W2 vs Recall at (M_fixed, W_fixed), per-setup colours + OLS.
+    Panel 2 — W2 vs Precision at (M_fixed, W_fixed), per-setup colours + OLS.
+
+    W2 vs NC coverage is saved separately as 08_w2_nc_scatter_*.png.
     """
     w2_results = [r for r in results if r.w2 is not None]
     if len(w2_results) < 2:
@@ -1458,40 +1526,17 @@ def plot_w2_scatter(
     w2_vals = np.array([r.w2 for r in w2_results])
     setup_colors = [color_map.get(r.label, "gray") for r in w2_results]
 
-    # M values shown in panel 1 (NC coverage across multiple thresholds)
-    panel1_ms = sorted({M for M in [1, 2, 4, 5, 10] if M in M_values})
-    m_colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(panel1_ms)))
-
-    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
     fig.suptitle(
         f"W2 Homogeneity vs Performance  (M={M_fixed}, W={W_fixed})",
         fontsize=13, fontweight="bold",
     )
 
-    # ── Panel 1: W2 vs NC fraction for multiple M thresholds ──────────
-    ax = axes[0]
-    for sM, cm in zip(panel1_ms, m_colors):
-        fracs = np.array([
-            r.nc["nc_detected"][sM] / max(r.nc["nc_total"], 1)
-            for r in w2_results
-        ])
-        ax.scatter(w2_vals, fracs, color=cm, s=55, zorder=3, label=f"M={sM}")
-        for r, w2v, frac in zip(w2_results, w2_vals, fracs):
-            ax.annotate(r.label, xy=(w2v, frac), xytext=(4, 2),
-                        textcoords="offset points", fontsize=6, color=cm)
-    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=10)
-    ax.set_ylabel("NC detection fraction", fontsize=10)
-    ax.set_title("W2 vs NC Coverage", fontsize=11)
-    ax.yaxis.set_major_formatter(
-        mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
-    ax.legend(title="M threshold", fontsize=8, title_fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # ── Panels 2 & 3: W2 vs Recall / Precision with OLS line ──────────
+    # ── Panels 1 & 2: W2 vs Recall / Precision with OLS line ──────────
     for ax, metric_key, ylabel, title in [
-        (axes[1], "Recall",    "Recall",
+        (axes[0], "Recall",    "Recall",
          f"W2 vs Recall  (M={M_fixed}, W={W_fixed})"),
-        (axes[2], "Precision", "Precision",
+        (axes[1], "Precision", "Precision",
          f"W2 vs Precision  (M={M_fixed}, W={W_fixed})"),
     ]:
         y_vals = np.array([
@@ -2069,34 +2114,66 @@ def plot_recall_w1_vs_m(
     output_dir: str,
     color_map: dict[str, str] | None = None,
 ) -> None:
-    """Line plot: Ge-77 Recall at W=1 for all setups across M thresholds.
+    """Two-panel: Ge-77 Recall at W=1 (left, zoomed y) and setup rank at each M (right).
 
-    Addresses: 'if recall is best at M=1, is it also best for larger M?'
-    W is kept fixed at 1 throughout.
+    The rank panel immediately shows whether the best setup at M=1 stays on top
+    as M increases — a stable rank-1 line means the ordering is preserved.
     """
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
     colors = [color_map.get(r.label, "gray") for r in results]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for r, c in zip(results, colors):
-        recalls = [_cc_recall(r, M, 1) for M in M_values]
-        ax.plot(M_values, recalls, marker="o", color=c, label=r.label,
-                linewidth=1.5, markersize=5)
+    all_recalls = {r.label: [_cc_recall(r, M, 1) for M in M_values] for r in results}
 
-    ax.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
-    ax.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=11)
-    ax.set_title(
-        "Ge-77 Muon Recall at W=1 across M Thresholds\n"
-        "(does the best-recall setup at M=1 remain the best at higher M?)",
+    fig, (ax_recall, ax_rank) = plt.subplots(1, 2, figsize=(18, 6))
+
+    # ── Left panel: recall, zoomed y-axis ────────────────────────────
+    for r, c in zip(results, colors):
+        ax_recall.plot(M_values, all_recalls[r.label], marker="o", color=c,
+                       label=r.label, linewidth=1.5, markersize=5)
+
+    all_vals = [v for recalls in all_recalls.values() for v in recalls if np.isfinite(v)]
+    if all_vals:
+        vmin, vmax = min(all_vals), max(all_vals)
+        margin = max((vmax - vmin) * 0.3, 0.005)
+        ax_recall.set_ylim(max(0.0, vmin - margin), min(1.0, vmax + margin))
+
+    ax_recall.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
+    ax_recall.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=11)
+    ax_recall.set_title(
+        "Ge-77 Muon Recall at W=1 across M Thresholds",
         fontsize=12,
     )
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-    ax.set_xticks(M_values)
-    ax.set_ylim(-0.02, 1.05)
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
+    ax_recall.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax_recall.set_xticks(M_values)
+    ax_recall.legend(fontsize=8, loc="upper right")
+    ax_recall.grid(True, alpha=0.3)
+
+    # ── Right panel: rank at each M (rank 1 = highest recall) ────────
+    for r, c in zip(results, colors):
+        ranks = []
+        for mi, M in enumerate(M_values):
+            vals_at_m = [(results[j].label, all_recalls[results[j].label][mi])
+                         for j in range(len(results))]
+            vals_sorted = sorted(vals_at_m, key=lambda x: -x[1])
+            rank = next(i + 1 for i, (lbl, _) in enumerate(vals_sorted) if lbl == r.label)
+            ranks.append(rank)
+        ax_rank.plot(M_values, ranks, marker="o", color=c, label=r.label,
+                     linewidth=1.5, markersize=5)
+
+    ax_rank.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
+    ax_rank.set_ylabel("Recall rank  (1 = highest)", fontsize=11)
+    ax_rank.set_title(
+        "Setup Rank by Recall at W=1 across M\n"
+        "(rank 1 = best; flat line → ordering is preserved)",
+        fontsize=12,
+    )
+    ax_rank.set_xticks(M_values)
+    ax_rank.set_yticks(range(1, len(results) + 1))
+    ax_rank.invert_yaxis()
+    ax_rank.legend(fontsize=8)
+    ax_rank.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fname = "20_recall_w1_vs_m.png"
@@ -2299,8 +2376,12 @@ def plot_ge77_survival_at_best_fom(
     ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=9)
     ax.set_xlabel("Setup", fontsize=11)
     ax.set_ylabel("Ge-77 Survival  (Recall = TP / (TP+FN))", fontsize=11)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
-    ax.set_ylim(bottom=0)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    finite_vals_23 = [v for v in values if np.isfinite(v)]
+    if finite_vals_23:
+        vmin23, vmax23 = min(finite_vals_23), max(finite_vals_23)
+        margin23 = max((vmax23 - vmin23) * 0.4, 0.002)
+        ax.set_ylim(max(0.0, vmin23 - margin23), min(1.0, vmax23 + margin23))
     ax.set_title(
         "Ge-77 Muon Survival at Each Setup's FoM-Optimal (M, W)\n"
         "(labels show the (M, W) that maximises FoM for that setup)",
@@ -2365,7 +2446,11 @@ def plot_signal_survival_at_best_fom(
     ax.set_xlabel("Setup", fontsize=11)
     ax.set_ylabel("Signal Survival = (TN+FN) / (TP+FP+TN+FN)", fontsize=11)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.3f}%"))
-    ax.set_ylim(bottom=0)
+    finite_vals_24 = [v for v in values if np.isfinite(v)]
+    if finite_vals_24:
+        vmin24, vmax24 = min(finite_vals_24), max(finite_vals_24)
+        margin24 = max((vmax24 - vmin24) * 0.4, 0.00005)
+        ax.set_ylim(max(0.0, vmin24 - margin24), min(1.0, vmax24 + margin24))
     ax.set_title(
         "Signal Survival at Each Setup's FoM-Optimal (M, W)\n"
         "(1 − veto fraction; labels show optimal (M, W))",
@@ -2755,6 +2840,7 @@ def main() -> None:
     # plot_w2_sorted_heatmaps: W2-sorted heatmaps deactivated.
     # plot_w2_sorted_heatmaps(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
 
+    plot_w2_nc_scatter(results, M_values, args.output_dir, color_map=color_map)
     plot_w2_scatter(results, M_values, M_default, W_default, W_values, args.output_dir,
                     color_map=color_map)
 
