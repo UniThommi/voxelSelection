@@ -198,8 +198,16 @@ def evaluate_muon(
         "in_window": in_window,
     })
 
-    confusion: dict[tuple[int, int], dict[str, int]] = {}
+    confusion: dict[tuple[int, int], dict] = {}
     w_hist:    dict[int, dict[str, list[int]]]        = {}
+
+    # Number of Ge77 NCs per muon (all flag_ge77==1 NCs, no time-window cut).
+    ge77_nc_counts_per_muon: np.ndarray = (
+        nc_truth.groupby("muon_id")["flag_ge77"]
+        .sum()
+        .reindex(unique_muons, fill_value=0)
+        .values.astype(np.int32)
+    )
 
     for M in M_values:
         detected = (mults >= M).astype(np.int8)
@@ -219,11 +227,17 @@ def evaluate_muon(
 
         for W in W_values:
             classified_ge77 = w_counts >= W
-            tp = int(( ge77_truth &  classified_ge77).sum())
+            tp_mask = ge77_truth &  classified_ge77
+            fn_mask = ge77_truth & ~classified_ge77
+            tp = int(tp_mask.sum())
             fp = int((~ge77_truth &  classified_ge77).sum())
             tn = int((~ge77_truth & ~classified_ge77).sum())
-            fn = int(( ge77_truth & ~classified_ge77).sum())
-            confusion[(M, W)] = {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
+            fn = int(fn_mask.sum())
+            confusion[(M, W)] = {
+                "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+                "tp_ge77_nc_counts": ge77_nc_counts_per_muon[tp_mask],
+                "fn_ge77_nc_counts": ge77_nc_counts_per_muon[fn_mask],
+            }
 
     # ── muon-level detectability upper bounds (requires detect_info) ─────
     # For each Ge77 muon: does it have at least one NC with a photon?

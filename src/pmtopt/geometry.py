@@ -313,15 +313,23 @@ def calc_deadtime_confusion(
     return calc_veto_fraction(TP, FP, TN, FN) * VETO_DURATION_H * musun_rate
 
 
-def calc_ge_survival_confusion(TP: int, FN: int) -> float:
-    """Ge77-muon survival fraction from confusion-matrix counts.
+def calc_ge_survival_confusion(
+    tp_ge77_nc_counts: np.ndarray,
+    fn_ge77_nc_counts: np.ndarray,
+) -> float:
+    """Ge77-NC-weighted survival fraction from per-muon Ge77-NC count arrays.
 
-    Returns ``1 − Recall = FN / (TP + FN)``: the fraction of true Ge77
-    muons that are *not* detected and therefore survive the veto.
-    Returns 1.0 when TP + FN == 0 (no Ge77 muons — all survive by default).
+    Each entry in the arrays is the number of Ge77 NCs (flag_ge77==1,
+    no time-window restriction) for that muon.  The formula is:
+
+        ge_surv = Σ(fn_ge77_nc_counts) / (Σ(tp_ge77_nc_counts) + Σ(fn_ge77_nc_counts))
+
+    Returns 1.0 when both sums are zero (no Ge77 production — all survive).
     """
-    denom = TP + FN
-    return FN / denom if denom > 0 else 1.0
+    fn_sum = int(np.sum(fn_ge77_nc_counts))
+    tp_sum = int(np.sum(tp_ge77_nc_counts))
+    denom  = tp_sum + fn_sum
+    return fn_sum / denom if denom > 0 else 1.0
 
 
 def calc_fom_confusion(
@@ -329,12 +337,14 @@ def calc_fom_confusion(
     FP: int,
     FN: int,
     total_muons: int,
+    tp_ge77_nc_counts: np.ndarray | None = None,
+    fn_ge77_nc_counts: np.ndarray | None = None,
     musun_rate: float = MUSUN_RATE,
 ) -> float:
     """Figure of Merit computed from a confusion matrix.
 
     Convenience wrapper that calls:
-      - ``calc_ge_survival_confusion``  →  ge_survival_eff  =  1 − Recall
+      - ``calc_ge_survival_confusion``  →  ge_surv (Ge77-NC-weighted)
       - ``calc_deadtime_confusion``     →  deadtime
       - ``figure_of_merit``             →  FoM
 
@@ -344,6 +354,9 @@ def calc_fom_confusion(
         Confusion-matrix counts (TN is derived as total_muons − TP − FP − FN).
     total_muons : int
         TP + FP + TN + FN — total simulated muons.
+    tp_ge77_nc_counts, fn_ge77_nc_counts : np.ndarray, optional
+        Per-muon Ge77-NC count arrays from the confusion dict.  When omitted,
+        each muon is weighted as 1 (old unweighted behaviour).
     musun_rate : float
         Musun rate in muons / hour (default: 504).
 
@@ -353,6 +366,8 @@ def calc_fom_confusion(
         FoM value, or np.nan when undefined.
     """
     TN = total_muons - TP - FP - FN
-    ge_surv  = calc_ge_survival_confusion(TP, FN)
+    _tp_w = tp_ge77_nc_counts if tp_ge77_nc_counts is not None else np.ones(TP, dtype=np.int32)
+    _fn_w = fn_ge77_nc_counts if fn_ge77_nc_counts is not None else np.ones(FN, dtype=np.int32)
+    ge_surv  = calc_ge_survival_confusion(_tp_w, _fn_w)
     deadtime = calc_deadtime_confusion(TP, FP, TN, FN, musun_rate)
     return figure_of_merit(ge_surv, 1.0 - deadtime)

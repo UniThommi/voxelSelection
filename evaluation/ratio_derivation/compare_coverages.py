@@ -67,7 +67,14 @@ from scipy import stats as scipy_stats
 
 # Shared W2-correlation plotting helper (identical across both pipelines).
 from pmtopt.w2_plot_helpers import regression_overlay as _regression_overlay
-from pmtopt.geometry import calc_fom_confusion, calc_veto_fraction, MUSUN_RATE, MUONS_PER_RUN_DIR
+from pmtopt.geometry import (
+    calc_fom_confusion,
+    calc_ge_survival_confusion,
+    calc_deadtime_confusion,
+    calc_veto_fraction,
+    MUSUN_RATE,
+    MUONS_PER_RUN_DIR,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -1044,6 +1051,8 @@ def plot_mw_sweep(
                 else:  # FoM
                     vals.append(calc_fom_confusion(
                         cm["TP"], cm["FP"], cm["FN"], total_primaries,
+                        tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                        fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
                     ))
             ax.plot(x, vals, color=c, label=r.label,
                     linewidth=1.2, marker=".", markersize=4)
@@ -1070,7 +1079,11 @@ def plot_mw_sweep(
                     elif metric == "Precision":
                         v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
                     else:  # FoM
-                        v = calc_fom_confusion(cm["TP"], cm["FP"], cm["FN"], total_primaries)
+                        v = calc_fom_confusion(
+                            cm["TP"], cm["FP"], cm["FN"], total_primaries,
+                            tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                            fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
+                        )
                         if not np.isfinite(v):
                             continue
                     if v > best_val:
@@ -1151,7 +1164,9 @@ def _cc_fom_grid(
                 result[(M, W)] = float("nan")
             else:
                 result[(M, W)] = calc_fom_confusion(
-                    cm["TP"], cm["FP"], cm["FN"], total_primaries
+                    cm["TP"], cm["FP"], cm["FN"], total_primaries,
+                    tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                    fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
                 )
     return result
 
@@ -1401,7 +1416,9 @@ def plot_w2_sorted_heatmaps(
                         _tp = (total_primaries if total_primaries > 0
                                else r.muon["muon_stats"]["total"])
                         data[wi, ri] = calc_fom_confusion(
-                            cm["TP"], cm["FP"], cm["FN"], _tp
+                            cm["TP"], cm["FP"], cm["FN"], _tp,
+                            tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                            fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
                         )
 
             finite_vals = data[np.isfinite(data)]
@@ -1985,7 +2002,11 @@ def plot_w2_spearman_vs_m(
                     cm = r.muon["confusion"].get((M, W))
                     if cm is None:
                         continue
-                    v = calc_fom_confusion(cm["TP"], cm["FP"], cm["FN"], total_primaries)
+                    v = calc_fom_confusion(
+                        cm["TP"], cm["FP"], cm["FN"], total_primaries,
+                        tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                        fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
+                    )
                     if np.isfinite(v) and (np.isnan(best) or v > best):
                         best = v
                 fom_arr.append(best)
@@ -2478,6 +2499,84 @@ def plot_signal_survival_at_best_fom(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 25 — ge_surv vs (1 − deadtime) trade-off scatter
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_vs_livetime(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Scatter: Ge77-NC-weighted ge_surv (y) vs 1 − deadtime (x) per setup.
+
+    Each point corresponds to one (M, W) combination for one setup.
+    Lower ge_surv = fewer Ge77 isotopes survive (better background rejection).
+    Higher 1 − deadtime = more signal livetime (better).
+    Good operating points sit in the bottom-right corner.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for r, c in zip(results, colors):
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        xs, ys = [], []
+        for M in M_values:
+            for W in W_values:
+                cm = r.muon["confusion"].get((M, W))
+                if cm is None:
+                    continue
+                TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+                ge_surv  = calc_ge_survival_confusion(
+                    cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+                    cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+                )
+                deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+                livetime = 1.0 - deadtime
+                xs.append(livetime)
+                ys.append(ge_surv)
+        if xs:
+            ax.scatter(xs, ys, color=c, s=18, alpha=0.6, zorder=3)
+            # Label the cloud with the setup name near its centroid
+            ax.annotate(
+                r.label,
+                xy=(float(np.median(xs)), float(np.median(ys))),
+                xytext=(4, 3), textcoords="offset points",
+                fontsize=7, color=c, fontweight="bold",
+            )
+
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_title(
+        "Ge77 Survival vs Signal Livetime Trade-off\n"
+        "(each point = one (M, W) combination; bottom-right = optimal)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.legend(
+        handles=[
+            plt.Line2D([0], [0], marker="o", color="w",
+                       markerfacecolor=color_map.get(r.label, "gray"),
+                       markersize=7, label=r.label)
+            for r in results
+        ],
+        fontsize=8, loc="best",
+    )
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25_ge_surv_vs_livetime.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Text output
 # ──────────────────────────────────────────────────────────────────────
 def write_nc_summary(
@@ -2883,6 +2982,8 @@ def main() -> None:
                                    total_primaries=_total_primaries, color_map=color_map)
     plot_signal_survival_at_best_fom(results, M_values, W_values, args.output_dir,
                                      total_primaries=_total_primaries, color_map=color_map)
+    plot_ge_surv_vs_livetime(results, M_values, W_values, args.output_dir,
+                             total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
