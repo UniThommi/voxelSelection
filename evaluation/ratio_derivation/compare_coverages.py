@@ -72,6 +72,7 @@ from pmtopt.geometry import (
     calc_ge_survival_confusion,
     calc_deadtime_confusion,
     calc_veto_fraction,
+    figure_of_merit,
     MUSUN_RATE,
     MUONS_PER_RUN_DIR,
 )
@@ -2499,6 +2500,60 @@ def plot_signal_survival_at_best_fom(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Shared helper — FoM background colormap + contours
+# ──────────────────────────────────────────────────────────────────────
+def _fom_colormap_background(
+    ax: plt.Axes,
+    xs: list[float],
+    ys: list[float],
+    n_grid: int = 300,
+) -> "matplotlib.cm.ScalarMappable":
+    """Draw a FoM(signal_surv, ge_surv) colormap + labelled contours on ax.
+
+    The grid is clipped to the convex hull of the visible data range (with
+    a 5 % margin on each side).  Returns the pcolormesh artist so the
+    caller can attach a colorbar.
+    """
+    if not xs or not ys:
+        return None
+    mx, mx2 = min(xs), max(xs)
+    my, my2 = min(ys), max(ys)
+    dx = max((mx2 - mx) * 0.05, 1e-4)
+    dy = max((my2 - my) * 0.05, 1e-4)
+    xg = np.linspace(mx - dx, mx2 + dx, n_grid)
+    yg = np.linspace(my - dy, my2 + dy, n_grid)
+    XX, YY = np.meshgrid(xg, yg)
+    _fom_vec = np.vectorize(figure_of_merit)
+    ZZ = _fom_vec(YY, XX)  # ge_surv=YY, signal_surv=XX
+    ZZ = np.where(np.isfinite(ZZ), ZZ, np.nan)
+    pcm = ax.pcolormesh(XX, YY, ZZ, cmap="viridis", alpha=0.35, shading="auto", zorder=0)
+    finite_z = ZZ[np.isfinite(ZZ)]
+    if finite_z.size > 0:
+        n_levels = 8
+        levels = np.linspace(finite_z.min(), finite_z.max(), n_levels + 2)[1:-1]
+        cs = ax.contour(XX, YY, ZZ, levels=levels, colors="gray",
+                        linewidths=0.6, alpha=0.8, zorder=1)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%.2f")
+    return pcm
+
+
+def _parse_advisor_csv(path: str) -> list[dict]:
+    """Parse advisor fom_data.csv (key=value, comma-separated per line)."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            d = {}
+            for item in line.split(","):
+                k, v = item.strip().split("=")
+                d[k.strip()] = float(v.strip())
+            rows.append(d)
+    return rows
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Plot 25 — ge_surv vs (1 − deadtime) trade-off scatter
 # ──────────────────────────────────────────────────────────────────────
 def plot_ge_surv_vs_livetime(
@@ -2523,7 +2578,11 @@ def plot_ge_surv_vs_livetime(
 
     fig, ax = plt.subplots(figsize=(10, 7))
 
-    for r, c in zip(results, colors):
+    # Collect all points first so the colormap spans the visible data range.
+    all_xs: list[float] = []
+    all_ys: list[float] = []
+    per_setup: list[tuple[list[float], list[float]]] = []
+    for r in results:
         _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
         xs, ys = [], []
         for M in M_values:
@@ -2537,12 +2596,19 @@ def plot_ge_surv_vs_livetime(
                     cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
                 )
                 deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
-                livetime = 1.0 - deadtime
-                xs.append(livetime)
+                xs.append(1.0 - deadtime)
                 ys.append(ge_surv)
+        per_setup.append((xs, ys))
+        all_xs.extend(xs)
+        all_ys.extend(ys)
+
+    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+
+    for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
-            ax.scatter(xs, ys, color=c, s=18, alpha=0.6, zorder=3)
-            # Label the cloud with the setup name near its centroid
+            ax.scatter(xs, ys, color=c, s=18, alpha=0.7, zorder=3)
             ax.annotate(
                 r.label,
                 xy=(float(np.median(xs)), float(np.median(ys))),
@@ -2574,6 +2640,192 @@ def plot_ge_surv_vs_livetime(
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
     print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 25b — ge_surv vs livetime: advisor's data + user setups at M=6
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_vs_livetime_advisor(
+    results: list[SetupResult],
+    W_values: list[int],
+    output_dir: str,
+    advisor_csv: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    M_fixed: int = 6,
+) -> None:
+    """Ge77 survival vs signal livetime at M=M_fixed, overlaying advisor data.
+
+    Advisor's CSV (threshold=W, signal_surv, ge_surv, FOM) is shown as a
+    distinct series.  Each user setup is shown at M=M_fixed for all W in
+    W_values.  The FoM colormap spans the combined data range.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    advisor_rows = _parse_advisor_csv(advisor_csv)
+    adv_xs = [row["signal_surv"] for row in advisor_rows]
+    adv_ys = [row["ge_surv"]     for row in advisor_rows]
+    adv_ws = [int(row["threshold"]) for row in advisor_rows]
+
+    per_setup: list[tuple[list[float], list[float], list[int]]] = []
+    all_xs = list(adv_xs)
+    all_ys = list(adv_ys)
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        xs, ys, ws = [], [], []
+        for W in W_values:
+            cm = r.muon["confusion"].get((M_fixed, W))
+            if cm is None:
+                continue
+            TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+            ge_surv  = calc_ge_survival_confusion(
+                cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+                cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+            )
+            deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+            xs.append(1.0 - deadtime)
+            ys.append(ge_surv)
+            ws.append(W)
+        per_setup.append((xs, ys, ws))
+        all_xs.extend(xs)
+        all_ys.extend(ys)
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+
+    # Advisor data
+    ax.scatter(adv_xs, adv_ys, color="black", s=40, marker="D", zorder=4,
+               label=f"Advisor (M={M_fixed})")
+    for x, y, w in zip(adv_xs, adv_ys, adv_ws):
+        ax.annotate(f"W={w}", xy=(x, y), xytext=(3, 3),
+                    textcoords="offset points", fontsize=6, color="black")
+
+    # User setups at M=M_fixed
+    for r, c, (xs, ys, ws) in zip(results, colors, per_setup):
+        if xs:
+            ax.scatter(xs, ys, color=c, s=22, alpha=0.8, zorder=3)
+            ax.annotate(
+                r.label,
+                xy=(float(np.median(xs)), float(np.median(ys))),
+                xytext=(4, 3), textcoords="offset points",
+                fontsize=7, color=c, fontweight="bold",
+            )
+
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_title(
+        f"Ge77 Survival vs Signal Livetime — M={M_fixed}, W sweep\n"
+        "(each point = one W value; bottom-right = optimal)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    handles = [
+        plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="black",
+                   markersize=7, label=f"Advisor (M={M_fixed})"),
+    ] + [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map.get(r.label, "gray"),
+                   markersize=7, label=f"{r.label} (M={M_fixed})")
+        for r in results
+    ]
+    ax.legend(handles=handles, fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25b_ge_surv_vs_livetime_advisor.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 25c — ge_surv vs livetime: one plot per setup, all (M,W) labelled
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_vs_livetime_per_setup(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """One PNG per setup: scatter of all (M, W) combinations, labelled.
+
+    Points are coloured by M (using a discrete colormap) and annotated
+    with the W value so every operating point is identifiable.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+
+    m_cmap = plt.cm.get_cmap("tab10", len(M_values))
+    m_colors = {M: m_cmap(i) for i, M in enumerate(M_values)}
+
+    safe_label = str.maketrans(" /\\:*?\"<>|", "__________")
+
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        points: list[tuple[float, float, int, int]] = []
+        for M in M_values:
+            for W in W_values:
+                cm = r.muon["confusion"].get((M, W))
+                if cm is None:
+                    continue
+                TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+                ge_surv  = calc_ge_survival_confusion(
+                    cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+                    cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+                )
+                deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+                points.append((1.0 - deadtime, ge_surv, M, W))
+
+        if not points:
+            continue
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+        pcm = _fom_colormap_background(ax, xs, ys)
+        if pcm is not None:
+            fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+
+        for x, y, M, W in points:
+            ax.scatter([x], [y], color=m_colors[M], s=30, alpha=0.85, zorder=3)
+            ax.annotate(f"W={W}", xy=(x, y), xytext=(3, 2),
+                        textcoords="offset points", fontsize=6,
+                        color=m_colors[M], alpha=0.9)
+
+        ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
+        ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+        ax.set_title(
+            f"Ge77 Survival vs Signal Livetime — {r.label}\n"
+            "(each point = one (M, W) combination; colour = M; label = W)",
+            fontsize=12,
+        )
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+        ax.legend(
+            handles=[
+                plt.Line2D([0], [0], marker="o", color="w",
+                           markerfacecolor=m_colors[M], markersize=7,
+                           label=f"M={M}")
+                for M in M_values
+            ],
+            fontsize=8, loc="best", title="M threshold",
+        )
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        safe = r.label.translate(safe_label)
+        fname = f"25c_ge_surv_vs_livetime_{safe}.png"
+        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        plt.close(fig)
+        print(f"  Saved {fname}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2783,6 +3035,17 @@ def parse_args() -> argparse.Namespace:
             "(e.g. --omit-runs run_002 run_003)."
         ),
     )
+    parser.add_argument(
+        "--advisor-csv", default=None, metavar="CSV",
+        help=(
+            "Path to advisor's fom_data.csv for plot 25b overlay "
+            "(key=value format: threshold, signal_surv, ge_surv, FOM)."
+        ),
+    )
+    parser.add_argument(
+        "--advisor-M", type=int, default=6,
+        help="Fixed M value used in the advisor comparison plot (default: 6).",
+    )
     return parser.parse_args()
 
 
@@ -2984,6 +3247,16 @@ def main() -> None:
                                      total_primaries=_total_primaries, color_map=color_map)
     plot_ge_surv_vs_livetime(results, M_values, W_values, args.output_dir,
                              total_primaries=_total_primaries, color_map=color_map)
+    if args.advisor_csv:
+        plot_ge_surv_vs_livetime_advisor(
+            results, W_values, args.output_dir,
+            advisor_csv=args.advisor_csv,
+            total_primaries=_total_primaries,
+            color_map=color_map,
+            M_fixed=args.advisor_M,
+        )
+    plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
+                                       total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")

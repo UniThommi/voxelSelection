@@ -371,3 +371,4 @@ def calc_fom_confusion(
     ge_surv  = calc_ge_survival_confusion(_tp_w, _fn_w)
     deadtime = calc_deadtime_confusion(TP, FP, TN, FN, musun_rate)
     return figure_of_merit(ge_surv, 1.0 - deadtime)
+
