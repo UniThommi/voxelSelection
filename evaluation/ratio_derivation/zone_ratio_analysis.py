@@ -1074,8 +1074,9 @@ def parse_args() -> argparse.Namespace:
                    help="Geometry name tag stored in output JSON metadata")
     # per-PMT-position ratio analysis (independent mode)
     p.add_argument('--per-pmt-ratio', action='store_true',
-                   help="Run per-PMT-position ratio analysis instead of the zone scan. "
-                        "Requires --ssd-postprocessed-file.")
+                   help="Run per-PMT-position ratio analysis in addition to the zone scan. "
+                        "Requires --ssd-postprocessed-file. "
+                        "Results are saved to <output-dir>/per_pmt/.")
     p.add_argument('--ssd-postprocessed-file', type=Path, default=None,
                    metavar='HDF5',
                    help="SSD postprocessed ncscore_output_*.hdf5 (target_matrix). "
@@ -1093,7 +1094,6 @@ def main() -> None:
     # Decide which analyses to run BEFORE filling path defaults so we can
     # detect whether --ssd-dir was explicitly provided by the user.
     run_per_pmt = args.per_pmt_ratio
-    run_zone    = not run_per_pmt or (args.ssd_dir is not None)
 
     # Fill mode-specific path defaults
     if args.ssd_dir is None:
@@ -1122,23 +1122,8 @@ def main() -> None:
         print("\n[Pre-flight] Validating per-PMT inputs...")
         _validate_input_data(args.mode, args.pmt_dir, args.ssd_postprocessed_file)
 
-    if run_zone:
-        print("\n[Pre-flight] Validating raw SSD/PMT directories...")
-        _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir)
-    else:
-        # Per-PMT only: validation already done; run and exit.
-        analyze_per_pmt_ratio(
-            mode=args.mode,
-            pmt_dir=args.pmt_dir,
-            ssd_postprocessed_file=args.ssd_postprocessed_file,
-            pmt_json=args.pmt_json,
-            geometry=geometry,
-            chunk_size=chunk_size,
-            output_dir=args.output_dir,
-            _skip_validation=True,
-        )
-        print("\nDone.")
-        return
+    print("\n[Pre-flight] Validating raw SSD/PMT directories...")
+    _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir)
 
     output_file = args.output_dir / "zone_ratio_results.txt"
 
@@ -1458,7 +1443,7 @@ def main() -> None:
             pmt_json=args.pmt_json,
             geometry=geometry,
             chunk_size=chunk_size,
-            output_dir=args.output_dir,
+            output_dir=args.output_dir / "per_pmt",
             _skip_validation=True,
         )
 
