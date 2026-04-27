@@ -1248,6 +1248,74 @@ def plot_fom_summary(
     print(f"  Saved {fname}")
 
 
+def plot_fom_summary_min_m(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_M: int = 6,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Horizontal bar chart: max FoM per setup restricted to M ≥ min_M.
+
+    Identical to plot_fom_summary but only considers (M, W) pairs where
+    M >= min_M.  Saved as 12b_fom_summary_M{min_M}plus.png.
+    """
+    eligible_M = [M for M in M_values if M >= min_M]
+    if not eligible_M:
+        print(f"  [SKIP] 12b_fom_summary_M{min_M}plus.png: no M values ≥ {min_M} in M_values.")
+        return
+
+    results = _w2_sorted(results)
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+    max_foms: list[float] = []
+    best_mw:  list[str]   = []
+
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid  = _cc_fom_grid(r, eligible_M, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if valid:
+            best = max(valid, key=valid.__getitem__)
+            max_foms.append(valid[best])
+            best_mw.append(f"M{best[0]}W{best[1]}")
+        else:
+            max_foms.append(float("nan"))
+            best_mw.append("N/A")
+
+    y_max = max((f for f in max_foms if np.isfinite(f)), default=1.0)
+    y     = np.arange(len(results))
+    fig, ax = plt.subplots(figsize=(8, max(4, len(results) * 0.55)))
+    bars = ax.barh(y, max_foms, color=colors, height=0.6)
+
+    for bar, mw, fom in zip(bars, best_mw, max_foms):
+        if np.isfinite(fom):
+            ax.text(
+                fom + 0.01 * y_max,
+                bar.get_y() + bar.get_height() / 2,
+                f"{fom:.4g}  [{mw}]", va="center", ha="left", fontsize=8,
+            )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_xlim(right=y_max * 1.35)
+    ax.set_xlabel(f"Figure of Merit  (max over M≥{min_M}, all W)", fontsize=11)
+    ax.set_title(
+        f"Ge-77 Muon Figure of Merit — Best (M≥{min_M}, W) per Configuration",
+        fontsize=12, pad=10,
+    )
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    fname = f"12b_fom_summary_M{min_M}plus.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 def plot_fom_per_setup(
     results: list[SetupResult],
     M_values: list[int],
@@ -3225,6 +3293,8 @@ def main() -> None:
                   total_primaries=_total_primaries, color_map=color_map)
     plot_fom_summary(results, M_values, W_values, args.output_dir,
                      total_primaries=_total_primaries, color_map=color_map)
+    plot_fom_summary_min_m(results, M_values, W_values, args.output_dir,
+                           min_M=6, total_primaries=_total_primaries, color_map=color_map)
     # plot_fom_per_setup: per-setup FoM heatmaps deactivated.
     # plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
     plot_w2_fom_best(results, M_values, W_values, args.output_dir,
