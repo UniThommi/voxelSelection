@@ -223,6 +223,11 @@ def _setup_color(results: list, r) -> str:
     return _SETUP_PALETTE[results.index(r) % len(_SETUP_PALETTE)]
 
 
+def _w2_sorted(results: list) -> list:
+    """Return results sorted by ascending W2 (None values last)."""
+    return sorted(results, key=lambda r: (r.w2 is None, r.w2 or 0.0))
+
+
 def _annotate_bar(
     ax: plt.Axes, bar, value: int, total: Optional[int] = None,
     fontsize: int = 8, rotation: int = 0,
@@ -385,10 +390,12 @@ def _draw_detectability_panels(
     identical across all setups (shared NC truth).
     """
     n = len(results)
+    ref_result = results[0]
     if color_map is None:
         _pal = _colors(n)
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
-    colors = [color_map.get(r.label, "gray") for r in results]
+    results = _w2_sorted(results)
+    colors  = [color_map.get(r.label, "gray") for r in results]
 
     only_outside_key = (
         nc_key + "only_outside_200ns" if nc_key == "nc_"
@@ -476,10 +483,11 @@ def _draw_detectability_panels(
     n_cats    = len(delta_cat_labels)
     bar_h     = 0.8 / n_non_ref
     y_base    = np.arange(n_cats, dtype=float)
-    ref_total = results[0].nc[total_key]
-    ref_vals  = [_get(results[0], vk) for vk in delta_val_keys]
+    ref_total = ref_result.nc[total_key]
+    ref_vals  = [_get(ref_result, vk) for vk in delta_val_keys]
+    non_ref   = [(r, color_map.get(r.label, "gray")) for r in results if r is not ref_result]
 
-    for j, (r, c) in enumerate(zip(results[1:], colors[1:])):
+    for j, (r, c) in enumerate(non_ref):
         vals   = [_get(r, vk) for vk in delta_val_keys]
         deltas = [v - rv for v, rv in zip(vals, ref_vals)]
         offset = (j - (n_non_ref - 1) / 2) * bar_h
@@ -516,9 +524,9 @@ def _draw_detectability_panels(
     ax_delta.axvline(0, color="black", linewidth=0.9)
     ax_delta.set_yticks(y_base)
     ax_delta.set_yticklabels(delta_cat_labels, fontsize=9)
-    ax_delta.set_xlabel(f"Δ count vs reference ({results[0].label})", fontsize=9)
+    ax_delta.set_xlabel(f"Δ count vs reference ({ref_result.label})", fontsize=9)
     ax_delta.set_title(
-        f"Δ from reference: {results[0].label}", fontsize=10
+        f"Δ from reference: {ref_result.label}", fontsize=10
     )
     ax_delta.legend(fontsize=8, title="vs reference")
     ax_delta.xaxis.set_major_formatter(
@@ -609,10 +617,12 @@ def plot_ge77_muon_overview(
       → Detected (TP at M_default, W_default)  ← identical to heatmap TP
     """
     n = len(results)
+    ref_result = results[0]
     if color_map is None:
         _pal = _colors(n)
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
-    colors = [color_map.get(r.label, "gray") for r in results]
+    results = _w2_sorted(results)
+    colors  = [color_map.get(r.label, "gray") for r in results]
     has_photon_info = all(
         r.muon["ge77_muon_detectability"]["any_photon"] >= 0 for r in results
     )
@@ -647,7 +657,7 @@ def plot_ge77_muon_overview(
     )
 
     # ── Left panel: absolute grouped bars ────────────────────────────
-    _ge77_total = results[0].muon["muon_stats"]["n_ge77"] if results else 0
+    _ge77_total = ref_result.muon["muon_stats"]["n_ge77"] if results else 0
     for i, (r, c) in enumerate(zip(results, colors)):
         vals   = _vals(r)
         offset = (i - (n - 1) / 2) * width
@@ -691,10 +701,11 @@ def plot_ge77_muon_overview(
         n_cats     = len(delta_cat_labels)
         bar_h      = 0.8 / n_non_ref
         y_base     = np.arange(n_cats, dtype=float)
-        ref_vals   = _vals(results[0])
-        ref_total  = results[0].muon["muon_stats"]["n_ge77"]
+        ref_vals   = _vals(ref_result)
+        ref_total  = ref_result.muon["muon_stats"]["n_ge77"]
+        non_ref    = [(r, color_map.get(r.label, "gray")) for r in results if r is not ref_result]
 
-        for j, (r, c) in enumerate(zip(results[1:], colors[1:])):
+        for j, (r, c) in enumerate(non_ref):
             vals   = _vals(r)
             deltas = [v - rv for v, rv in zip(vals, ref_vals)]
             offset = (j - (n_non_ref - 1) / 2) * bar_h
@@ -723,8 +734,8 @@ def plot_ge77_muon_overview(
         ax_delta.axvline(0, color="black", linewidth=0.9)
         ax_delta.set_yticks(y_base)
         ax_delta.set_yticklabels(delta_cat_labels, fontsize=9)
-        ax_delta.set_xlabel(f"Δ muon count vs reference ({results[0].label})", fontsize=9)
-        ax_delta.set_title(f"Δ from reference: {results[0].label}", fontsize=10)
+        ax_delta.set_xlabel(f"Δ muon count vs reference ({ref_result.label})", fontsize=9)
+        ax_delta.set_title(f"Δ from reference: {ref_result.label}", fontsize=10)
         ax_delta.legend(fontsize=8, title="vs reference")
         ax_delta.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):+,}"))
         ax_delta.grid(True, axis="x", alpha=0.3)
@@ -753,8 +764,9 @@ def plot_muon_heatmaps(
     Both metric panels share the same logarithmic colour scale.
     """
     metrics_to_plot = ["Recall", "Precision"]
-    n_setups = len(results)
-    labels = [r.label for r in results]
+    sorted_results = _w2_sorted(results)
+    n_setups = len(sorted_results)
+    labels = [r.label for r in sorted_results]
 
     # Shared LogNorm across all M values and all metrics (0–1 range)
     shared_norm = mcolors.LogNorm(vmin=1e-4, vmax=1.0)
@@ -765,7 +777,7 @@ def plot_muon_heatmaps(
         for metric in metrics_to_plot:
             grid = np.zeros((len(W_values), n_setups))
             for wi, W in enumerate(W_values):
-                for si, r in enumerate(results):
+                for si, r in enumerate(sorted_results):
                     conf = r.muon["confusion"][(M, W)]
                     m = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
                     grid[wi, si] = max(m[metric], 1e-4)
@@ -819,6 +831,7 @@ def plot_confusion_bar(
     Each panel shows one confusion metric with linear scale and y-axis zoomed
     to the data range so differences across setups are clearly visible.
     """
+    results = _w2_sorted(results)
     n = len(results)
     if color_map is None:
         _pal = _colors(n)
@@ -1186,6 +1199,7 @@ def plot_fom_summary(
     ``total_primaries`` is the total number of simulated primary muons
     (all muons).  Pass 0 to fall back to the per-setup NC-muon count.
     """
+    results = _w2_sorted(results)
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
@@ -2232,6 +2246,7 @@ def plot_recall_at_best_fom(
 
     Each bar is annotated with its optimal (M, W) pair and Recall value.
     """
+    results = _w2_sorted(results)
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
@@ -2377,6 +2392,7 @@ def plot_ge77_survival_at_best_fom(
     Ge77 survival = TP / (TP + FN) = Recall.
     Each point is annotated with the (M, W) pair that maximises FoM for that setup.
     """
+    results = _w2_sorted(results)
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
@@ -2446,6 +2462,7 @@ def plot_signal_survival_at_best_fom(
     Signal survival = (TN+FN) / (TP+FP+TN+FN) — fraction of muons that did NOT
     trigger a veto at the optimal operating point.
     """
+    results = _w2_sorted(results)
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
