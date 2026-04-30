@@ -29,14 +29,20 @@ def load_nc_data_dict_musun(csv_path: Path) -> Dict[Tuple, Dict]:
 
     Key: (muon_track_id, nC_track_id) → {'nC_time': float}
     Matches against hit/optical/muon_track_id and hit/optical/nC_track_id.
+
+    Raises:
+        RuntimeError: if any data line has fewer than 6 comma-separated columns.
     """
     nc_data_dict = {}
     with open(csv_path, 'r') as f:
         f.readline()  # skip header
-        for line in f:
+        for lineno, line in enumerate(f, start=2):
             parts = line.strip().split(',')
             if len(parts) < 6:
-                continue
+                raise RuntimeError(
+                    f"{csv_path.name}: malformed line {lineno} "
+                    f"(expected >= 6 columns, got {len(parts)}): {line.strip()!r}"
+                )
             muon_id = int(parts[0])
             nc_id   = int(parts[1])
             nc_time = float(parts[5])
