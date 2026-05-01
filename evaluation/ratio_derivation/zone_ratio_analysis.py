@@ -771,69 +771,82 @@ def _load_ssd_voxel_hits_from_postprocessed(
     return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}, n_ncs
 
 
-def _plot_per_pmt_delta_histogram(
-    all_deltas: List[float],
-    area_deltas: Dict[str, List[float]],
-    ref_record: Dict,
-    ref_ratio: float,
+def _plot_ratio_histogram(
+    all_ratios: List[float],
     out_path: Path,
 ) -> None:
-    """Two-panel figure: overall delta histogram (left) and area-coloured histogram (right).
+    """Single-panel histogram of SSD/PMT photon detection ratios across all PMT positions."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bins = np.histogram_bin_edges(all_ratios, bins=30)
+    mean_r = np.mean(all_ratios)
+    ax.hist(all_ratios, bins=bins, color='steelblue', alpha=0.75,
+            edgecolor='black', linewidth=0.4, label=f"all PMTs  (N={len(all_ratios)})")
+    ax.axvline(mean_r, color='darkorange', linestyle='-', linewidth=1.5,
+               label=f'mean = {mean_r:.4f}')
+    ax.set_xlabel("(SSD hits/NC) / (PMT hits/NC)", fontsize=11)
+    ax.set_ylabel("Number of PMT positions", fontsize=11)
+    ax.set_title("Per-PMT SSD/PMT photon detection ratio (NC-normalised)", fontsize=11)
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
-    delta = ssd_hits/pmt_hits - ssd_ref/pmt_ref, where ref is the PMT closest to the
-    mean pmt_hits across all positions. delta = 0 for the reference PMT by construction.
-    """
+
+def _plot_per_area_ratio_histograms(
+    area_ratios: Dict[str, List[float]],
+    out_path: Path,
+) -> None:
+    """2×2 figure with one ratio histogram per detector area; mean shown per subplot."""
     area_colors = {
         'pit':  'royalblue',
         'bot':  'darkcyan',
         'top':  'firebrick',
         'wall': 'forestgreen',
     }
+    areas = ['pit', 'bot', 'top', 'wall']
+    all_vals = [r for a in areas for r in area_ratios.get(a, [])]
+    bins = np.histogram_bin_edges(all_vals, bins=20)
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-    bins = np.histogram_bin_edges(all_deltas, bins=30)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    for ax, area in zip(axes.flatten(), areas):
+        ratios = area_ratios.get(area, [])
+        if ratios:
+            ax.hist(ratios, bins=bins, color=area_colors[area], alpha=0.75,
+                    edgecolor='black', linewidth=0.4)
+            mean_r = np.mean(ratios)
+            ax.axvline(mean_r, color='black', linestyle='--', linewidth=1.5,
+                       label=f'mean = {mean_r:.4f}')
+            ax.legend(fontsize=9)
+        ax.set_title(f"{area}  (N={len(ratios)})", fontsize=11)
+        ax.set_xlabel("(SSD hits/NC) / (PMT hits/NC)", fontsize=9)
+        ax.set_ylabel("Number of PMT positions", fontsize=9)
 
-    ref_label = (f"reference PMT: {ref_record['voxel_id']} ({ref_record['layer']}), "
-                 f"pmt_hits={ref_record['pmt_hits']:,}, "
-                 f"ssd/pmt={ref_ratio:.4f}")
-
-    # Left: overall histogram (single colour)
-    ax = axes[0]
-    ax.hist(all_deltas, bins=bins, color='steelblue', alpha=0.75,
-            edgecolor='black', linewidth=0.4, label=f"all PMTs  (N={len(all_deltas)})")
-    ax.axvline(0, color='black', linestyle='--', linewidth=1.5, label='delta = 0')
-    ax.axvline(np.mean(all_deltas), color='darkorange', linestyle='-', linewidth=1.5,
-               label=f'mean = {np.mean(all_deltas):+.4f}')
-    ax.set_xlabel("delta = (SSD hits/NC) / (PMT hits/NC)  −  reference ratio", fontsize=11)
-    ax.set_ylabel("Number of PMT positions", fontsize=11)
-    ax.set_title(
-        f"Per-PMT SSD/PMT ratio deviation from reference (NC-normalised)\n({ref_label})",
-        fontsize=9,
-    )
-    ax.legend(fontsize=8)
-
-    # Right: same histogram split by area with different colours
-    ax = axes[1]
-    for area in ['pit', 'bot', 'top', 'wall']:
-        if area_deltas.get(area):
-            ax.hist(
-                area_deltas[area], bins=bins,
-                color=area_colors[area], alpha=0.6,
-                label=f"{area}  (N={len(area_deltas[area])})",
-                edgecolor='black', linewidth=0.4,
-            )
-    ax.axvline(0, color='black', linestyle='--', linewidth=1.5, label='delta = 0')
-    ax.axvline(np.mean(all_deltas), color='darkorange', linestyle='-', linewidth=1.5,
-               label=f'mean = {np.mean(all_deltas):+.4f}')
-    ax.set_xlabel("delta = (SSD hits/NC) / (PMT hits/NC)  −  reference ratio", fontsize=11)
-    ax.set_ylabel("Number of PMT positions", fontsize=11)
-    ax.set_title(
-        "Per-PMT SSD/PMT ratio deviation — split by area (NC-normalised)", fontsize=10)
-    ax.legend(fontsize=8)
-
+    fig.suptitle("Per-PMT SSD/PMT ratio by detector area (NC-normalised)", fontsize=12)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
+
+
+def _save_ratio_txt(
+    records: List[Dict],
+    ssd_nc: int,
+    pmt_nc: int,
+    out_path: Path,
+) -> None:
+    """Write per-PMT-position SSD/PMT ratios to a text file, sorted by layer then voxel_id."""
+    with open(out_path, 'w') as f:
+        f.write("# Per-PMT SSD/PMT photon detection ratios\n")
+        f.write(f"# NC events: SSD={ssd_nc}, PMT={pmt_nc}\n")
+        f.write("# ratio = (ssd_hits/ssd_nc) / (pmt_hits/pmt_nc)\n")
+        f.write(f"# {'voxel_id':<15} {'layer':<6} {'ssd_hits':>12} {'pmt_hits':>12} "
+                f"{'ssd_per_nc':>12} {'pmt_per_nc':>12} {'ratio':>12}\n")
+        for r in sorted(records, key=lambda x: (x['layer'], x['voxel_id'])):
+            ssd_pnc = r['ssd_hits'] / ssd_nc
+            pmt_pnc = r['pmt_hits'] / pmt_nc
+            ratio   = ssd_pnc / pmt_pnc if pmt_pnc > 0 else float('nan')
+            f.write(f"  {r['voxel_id']:<15} {r['layer']:<6} {r['ssd_hits']:>12d} "
+                    f"{r['pmt_hits']:>12d} {ssd_pnc:>12.6f} {pmt_pnc:>12.6f} "
+                    f"{ratio:>12.6f}\n")
 
 
 def analyze_per_pmt_ratio(
@@ -848,25 +861,21 @@ def analyze_per_pmt_ratio(
 ) -> None:
     """Per-PMT-position ratio analysis (independent of zone scan).
 
-    For each PMT position computes the raw ratio ssd_hits/pmt_hits and measures
-    how much it deviates from the same ratio at the reference PMT (the position
-    whose pmt_hits is closest to the global mean).  No NC normalisation is applied.
+    For each PMT position computes ratio_i = (ssd_hits[i]/ssd_nc) / (pmt_hits[i]/pmt_nc)
+    and produces:
+      - per_pmt_ratios.png       : overall histogram of all 300 ratios
+      - per_pmt_ratios_by_area.png : 2x2 histogram, one subplot per area (pit/bot/top/wall)
+      - per_pmt_ratios.txt       : table with voxel_id, layer, raw hit counts, and ratio
 
     Algorithm
     ---------
     1. Load 300 PMT positions (JSON) -> UID -> voxel_id mapping via pmt.index.
-    2. Scan raw PMT sim files with the NC time-window filter (+/-200 ns around
-       each NC event, same filter as the main pipeline) -> per-UID photon count.
+    2. Scan raw PMT sim files with the NC time-window filter (hit time in
+       [NC_time, NC_time+200 ns], same as the main pipeline) -> per-UID photon count.
     3. Load SSD postprocessed target_matrix (already time-filtered during
        simPostProcessing) -> sum over NC rows -> per-voxel photon count.
-    4. Select the reference PMT: position whose pmt_hits is closest to the mean
-       pmt_hits over all positions with pmt_hits > 0.
-    5. For every PMT position i with pmt_hits > 0:
-            ratio_i = ssd_hits[i] / pmt_hits[i]
-            delta_i = ratio_i - ratio_ref
-       By construction delta = 0 for the reference position; other values show
-       how the local SSD/PMT ratio deviates from the global average position.
-    6. Plot: left panel = overall histogram, right panel = same split by area.
+    4. For every PMT position i:
+            ratio_i = (ssd_hits[i] / ssd_nc) / (pmt_hits[i] / pmt_nc)
 
     Assumptions / uncertainties
     ---------------------------
@@ -968,43 +977,40 @@ def analyze_per_pmt_ratio(
                 "Every PMT position must have at least 1 hit — check simulation coverage."
             )
 
-    # Reference PMT: closest to the mean (pmt_hits/NC) across all positions
-    mean_pmt_per_nc = np.mean([r['pmt_hits'] / pmt_nc for r in records])
-    ref_record = min(records, key=lambda r: abs(r['pmt_hits'] / pmt_nc - mean_pmt_per_nc))
-    ref_ratio  = (ref_record['ssd_hits'] / ssd_nc) / (ref_record['pmt_hits'] / pmt_nc)
-
-    print(f"\n  Mean PMT hits/NC across {len(records)} positions: {mean_pmt_per_nc:.6f}")
-    print(f"  Reference PMT: voxel_id={ref_record['voxel_id']}, "
-          f"layer={ref_record['layer']}, "
-          f"pmt_hits/NC={ref_record['pmt_hits']/pmt_nc:.6f}, "
-          f"ssd_hits/NC={ref_record['ssd_hits']/ssd_nc:.6f}, "
-          f"(ssd/NC)/(pmt/NC)={ref_ratio:.6f}")
-
-    # delta[i] = (ssd[i]/ssd_nc)/(pmt[i]/pmt_nc) - ref_ratio
+    # Compute per-PMT SSD/PMT ratios
     areas = ['pit', 'bot', 'top', 'wall']
-    all_deltas:  List[float]            = []
-    area_deltas: Dict[str, List[float]] = {a: [] for a in areas}
+    all_ratios:  List[float]            = []
+    area_ratios: Dict[str, List[float]] = {a: [] for a in areas}
 
     for r in records:
         ratio_i = (r['ssd_hits'] / ssd_nc) / (r['pmt_hits'] / pmt_nc)
-        delta = ratio_i - ref_ratio
-        all_deltas.append(delta)
-        area_deltas[r['layer']].append(delta)
+        r['ratio'] = ratio_i
+        all_ratios.append(ratio_i)
+        area_ratios[r['layer']].append(ratio_i)
 
-    print(f"\n  Delta summary over {len(all_deltas)} PMT positions "
-          f"(delta = (ssd/NC)/(pmt/NC) − reference ratio):")
-    print(f"    Global mean   = {np.mean(all_deltas):+.6f}")
-    print(f"    Global std    = {np.std(all_deltas):.6f}")
-    print(f"    Global median = {np.median(all_deltas):+.6f}")
-    print(f"    Min / Max     = {np.min(all_deltas):+.6f} / {np.max(all_deltas):+.6f}")
+    print(f"\n  Ratio summary over {len(all_ratios)} PMT positions "
+          f"(ratio = (ssd/NC) / (pmt/NC)):")
+    print(f"    Global mean   = {np.mean(all_ratios):.6f}")
+    print(f"    Global std    = {np.std(all_ratios):.6f}")
+    print(f"    Global median = {np.median(all_ratios):.6f}")
+    print(f"    Min / Max     = {np.min(all_ratios):.6f} / {np.max(all_ratios):.6f}")
     for area in areas:
-        if area_deltas[area]:
-            print(f"    {area:<5}  mean={np.mean(area_deltas[area]):+.6f}  "
-                  f"std={np.std(area_deltas[area]):.6f}  N={len(area_deltas[area])}")
+        if area_ratios[area]:
+            print(f"    {area:<5}  mean={np.mean(area_ratios[area]):.6f}  "
+                  f"std={np.std(area_ratios[area]):.6f}  N={len(area_ratios[area])}")
 
-    out_path = output_dir / "per_pmt_delta_hits.png"
-    _plot_per_pmt_delta_histogram(all_deltas, area_deltas, ref_record, ref_ratio, out_path)
-    print(f"\n  Saved: {out_path}")
+    plot_path = output_dir / "per_pmt_ratios.png"
+    _plot_ratio_histogram(all_ratios, plot_path)
+    print(f"\n  Saved: {plot_path}")
+
+    area_plot_path = output_dir / "per_pmt_ratios_by_area.png"
+    _plot_per_area_ratio_histograms(area_ratios, area_plot_path)
+    print(f"  Saved: {area_plot_path}")
+
+    txt_path = output_dir / "per_pmt_ratios.txt"
+    _save_ratio_txt(records, ssd_nc, pmt_nc, txt_path)
+    print(f"  Saved: {txt_path}")
+
     print("Per-PMT ratio analysis done.")
 
 
