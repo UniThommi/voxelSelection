@@ -1,992 +1,1291 @@
+"""
+Level-1 MUSUN analysis: MUSUN muon simulation → Neutron Capture (NC) extraction.
+
+10 simulation runs with 1×10^7 muons each.
+
+Outputs (all to <output_path>/musun_nc_analysis/):
+  - Standard distributions: all muons + Ge77 only + Ge77 vs non-Ge77 + NC vs non-NC
+  - NC spatial / time distributions
+  - Outlier analysis (muons above 99th-percentile NC count on log scale)
+  - Convergence analysis: W1 + KS vs number of runs
+  - statistics.txt
+"""
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from dataclasses import dataclass, field
-from glob import glob
 from pathlib import Path
 
 import h5py
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.stats import ks_2samp, wasserstein_distance
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 NC_GROUP = "/hit/MyNeutronCaptureOutput"
+VERTICES_GROUP = "/hit/vertices"
+PARTICLES_GROUP = "/hit/particles"
+
+DEFAULT_DATA_PATH = (
+    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
+)
+NUM_RUNS_DEFAULT = 10
+N_PERMUTATIONS = 20   # random subsets per k in convergence analysis
+RANDOM_SEED = 42
+W1_THRESHOLD_FRAC = 0.05   # convergence threshold = 5% of W1 at k=1
+MAX_SCATTER_PTS = 5_000    # max points for 3-D scatter / arrow plots
+
+COLORS = {
+    "blue": "#4C72B0",
+    "red": "#C44E52",
+    "green": "#55A868",
+    "orange": "#DD8452",
+    "purple": "#8172B2",
+}
 
 
+# ---------------------------------------------------------------------------
+# Data container
+# ---------------------------------------------------------------------------
 @dataclass
-class RunStats:
-    """Aggregated statistics for a single simulation run."""
+class RunData:
+    """Extracted and derived data for one simulation run."""
+
     run_name: str = ""
     n_files: int = 0
-    nc_total: int = 0
-    nc_ge77: int = 0
-    muons_total: int = 0
-    muons_with_ge77: int = 0
+    n_muons_total: int = 0  # unique evtids found in vertices/particles groups
+
+    # NC-level (one row per unique (evtid, nC_track_id) after deduplication)
+    nc_evtid: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    nc_ge77: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    nc_time_ns: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    nc_phi_rad: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    nc_z_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+
+    # Per NC-producing muon (sorted by evtid)
+    muon_nc_evtids: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    nc_counts: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+
+    # Ge77-producing muon evtids
+    ge77_evtids: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    # Number of Ge77-flagged NCs per Ge77-producing muon (length == ge77_evtids.size)
+    ge77_nc_per_ge77muon: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+
+    # All muons: one row per unique evtid (first occurrence)
+    muon_evtid: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    muon_ekin_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_zenith_deg: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_azimuth_deg: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_x_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_y_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_z_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_px_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_py_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    muon_pz_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
 
-def read_pages(group: h5py.Group, field_name: str) -> np.ndarray:
-    """Read a 'pages'-style field from the NC output group."""
-    return group[field_name]["pages"][:]
+# ---------------------------------------------------------------------------
+# HDF5 reading helpers
+# ---------------------------------------------------------------------------
+def _pages(grp: h5py.Group, name: str) -> np.ndarray:
+    """Read grp[name]['pages'] dataset."""
+    return grp[name]["pages"][:]
 
 
-def make_log_bins(vmin: int, vmax: int) -> np.ndarray:
+def read_nc_data_file(fp: Path) -> dict[str, np.ndarray]:
+    """Return NC fields from one HDF5 file; empty arrays if group absent/empty."""
+    empty: dict[str, np.ndarray] = {
+        "evtid": np.array([], dtype=np.int64),
+        "track_id": np.array([], dtype=np.int64),
+        "ge77": np.array([], dtype=np.int32),
+        "time_ns": np.array([], dtype=np.float64),
+        "x_m": np.array([], dtype=np.float64),
+        "y_m": np.array([], dtype=np.float64),
+        "z_m": np.array([], dtype=np.float64),
+    }
+    try:
+        with h5py.File(fp, "r") as f:
+            if NC_GROUP not in f:
+                return empty
+            grp = f[NC_GROUP]
+            if int(grp["entries"][()]) == 0:
+                return empty
+            return {
+                "evtid": _pages(grp, "evtid").astype(np.int64),
+                "track_id": _pages(grp, "nC_track_id").astype(np.int64),
+                "ge77": _pages(grp, "nC_flag_Ge77").astype(np.int32),
+                "time_ns": _pages(grp, "nC_time_in_ns"),
+                "x_m": _pages(grp, "nC_x_position_in_m"),
+                "y_m": _pages(grp, "nC_y_position_in_m"),
+                "z_m": _pages(grp, "nC_z_position_in_m"),
+            }
+    except Exception as exc:
+        print(f"  ERROR reading NC data from {fp.name}: {exc}")
+        return empty
+
+
+def read_muon_data_file(fp: Path) -> dict[str, np.ndarray]:
+    """Return muon kinematics + positions from one HDF5 file.
+
+    Joins /hit/vertices (positions) with /hit/particles (kinematics) on
+    evtid.  Zenith and azimuth are computed from the momentum vector.
     """
-    Create bin edges that are linear within each decade:
-    1,2,3,...,9, 10,20,30,...,90, 100,200,...,900, 1000,2000,...
-    """
+    empty: dict[str, np.ndarray] = {
+        k: np.array([], dtype=dt)
+        for k, dt in [
+            ("evtid", np.int64), ("ekin_mev", np.float64),
+            ("zenith_deg", np.float64), ("azimuth_deg", np.float64),
+            ("x_m", np.float64), ("y_m", np.float64), ("z_m", np.float64),
+            ("px_mev", np.float64), ("py_mev", np.float64), ("pz_mev", np.float64),
+        ]
+    }
+    try:
+        with h5py.File(fp, "r") as f:
+            if VERTICES_GROUP not in f or PARTICLES_GROUP not in f:
+                return empty
+            vgrp, pgrp = f[VERTICES_GROUP], f[PARTICLES_GROUP]
+            if int(vgrp["entries"][()]) == 0 or int(pgrp["entries"][()]) == 0:
+                return empty
+
+            evtid_v = _pages(vgrp, "evtid").astype(np.int64)
+            x_m = _pages(vgrp, "xloc_in_m")
+            y_m = _pages(vgrp, "yloc_in_m")
+            z_m = _pages(vgrp, "zloc_in_m")
+
+            evtid_p = _pages(pgrp, "evtid").astype(np.int64)
+            ekin = _pages(pgrp, "ekin_in_MeV")
+            px = _pages(pgrp, "px_in_MeV")
+            py = _pages(pgrp, "py_in_MeV")
+            pz = _pages(pgrp, "pz_in_MeV")
+
+        # Align by evtid (both are sorted per MUSUN event order, but join safely)
+        sv = np.argsort(evtid_v, kind="stable")
+        sp = np.argsort(evtid_p, kind="stable")
+        common, iv, ip = np.intersect1d(
+            evtid_v[sv], evtid_p[sp], return_indices=True
+        )
+        if common.size == 0:
+            return empty
+
+        evtid = common
+        x_m = x_m[sv][iv]
+        y_m = y_m[sv][iv]
+        z_m = z_m[sv][iv]
+        ekin = ekin[sp][ip]
+        px = px[sp][ip]
+        py = py[sp][ip]
+        pz = pz[sp][ip]
+
+        p_mag = np.sqrt(px**2 + py**2 + pz**2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cos_theta = np.where(p_mag > 0, pz / p_mag, 0.0)
+        zenith_deg = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+        azimuth_deg = np.degrees(np.arctan2(py, px))
+
+        return {
+            "evtid": evtid,
+            "ekin_mev": ekin,
+            "zenith_deg": zenith_deg,
+            "azimuth_deg": azimuth_deg,
+            "x_m": x_m,
+            "y_m": y_m,
+            "z_m": z_m,
+            "px_mev": px,
+            "py_mev": py,
+            "pz_mev": pz,
+        }
+    except Exception as exc:
+        print(f"  ERROR reading muon data from {fp.name}: {exc}")
+        return empty
+
+
+# ---------------------------------------------------------------------------
+# Run loading
+# ---------------------------------------------------------------------------
+def load_run(run_dir: Path) -> RunData:
+    """Load, merge and deduplicate all HDF5 files in one run directory."""
+    rd = RunData(run_name=run_dir.name)
+    hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
+    rd.n_files = len(hdf5_files)
+
+    if rd.n_files == 0:
+        print(f"  WARNING: no output_t*.hdf5 found in {run_dir}", flush=True)
+        return rd
+
+    nc_parts: dict[str, list[np.ndarray]] = {
+        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
+    }
+    mu_parts: dict[str, list[np.ndarray]] = {
+        k: [] for k in (
+            "evtid", "ekin_mev", "zenith_deg", "azimuth_deg",
+            "x_m", "y_m", "z_m", "px_mev", "py_mev", "pz_mev",
+        )
+    }
+
+    for fp in hdf5_files:
+        nc = read_nc_data_file(fp)
+        if nc["evtid"].size > 0:
+            for k in nc_parts:
+                nc_parts[k].append(nc[k])
+
+        mu = read_muon_data_file(fp)
+        if mu["evtid"].size > 0:
+            for k in mu_parts:
+                mu_parts[k].append(mu[k])
+
+    # ---- NC deduplication on (evtid, nC_track_id) ----
+    if nc_parts["evtid"]:
+        evtid_arr = np.concatenate(nc_parts["evtid"])
+        track_arr = np.concatenate(nc_parts["track_id"])
+        ge77_arr = np.concatenate(nc_parts["ge77"])
+        time_arr = np.concatenate(nc_parts["time_ns"])
+        x_arr = np.concatenate(nc_parts["x_m"])
+        y_arr = np.concatenate(nc_parts["y_m"])
+        z_arr = np.concatenate(nc_parts["z_m"])
+
+        pair_keys = np.stack([evtid_arr, track_arr], axis=1)
+        _, unique_idx, inverse = np.unique(
+            pair_keys, axis=0, return_index=True, return_inverse=True
+        )
+        # For duplicate NC records keep max Ge77 flag (1 beats 0)
+        unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
+        np.maximum.at(unique_ge77, inverse, ge77_arr)
+
+        rd.nc_evtid = evtid_arr[unique_idx]
+        rd.nc_ge77 = unique_ge77
+        rd.nc_time_ns = time_arr[unique_idx]
+        rd.nc_phi_rad = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
+        rd.nc_z_m = z_arr[unique_idx]
+
+        # Per-muon NC counts
+        mu_nc_ids, counts = np.unique(rd.nc_evtid, return_counts=True)
+        rd.muon_nc_evtids = mu_nc_ids
+        rd.nc_counts = counts
+
+        # Ge77 info
+        ge77_nc_mask = rd.nc_ge77 == 1
+        rd.ge77_evtids = np.unique(rd.nc_evtid[ge77_nc_mask])
+        ge77_nc_evtids_only = rd.nc_evtid[ge77_nc_mask]
+        _, ge77_nc_per = np.unique(ge77_nc_evtids_only, return_counts=True)
+        rd.ge77_nc_per_ge77muon = ge77_nc_per
+
+    # ---- Muon deduplication: keep first occurrence per evtid ----
+    if mu_parts["evtid"]:
+        evtid_all = np.concatenate(mu_parts["evtid"])
+        _, first_idx = np.unique(evtid_all, return_index=True)
+        rd.muon_evtid = evtid_all[first_idx]
+        for k in ("ekin_mev", "zenith_deg", "azimuth_deg",
+                  "x_m", "y_m", "z_m", "px_mev", "py_mev", "pz_mev"):
+            arr = np.concatenate(mu_parts[k])
+            setattr(rd, f"muon_{k}", arr[first_idx])
+        rd.n_muons_total = rd.muon_evtid.size
+
+    return rd
+
+
+# ---------------------------------------------------------------------------
+# Aggregation across all runs
+# ---------------------------------------------------------------------------
+def aggregate_runs(run_list: list[RunData]) -> dict:
+    """Combine all runs into flat arrays; add boolean muon flags."""
+    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l = [], [], [], [], []
+    nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
+    ge77_nc_per_mu_l = []
+    mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
+    mu_x_l, mu_y_l, mu_z_l = [], [], []
+    mu_px_l, mu_py_l, mu_pz_l = [], [], []
+    mu_is_ge77_l, mu_has_nc_l = [], []
+
+    stats = dict(n_muons_total=0, n_nc_total=0, n_nc_ge77=0,
+                 n_muons_ge77=0, n_muons_with_nc=0)
+
+    for rd in run_list:
+        stats["n_muons_total"] += rd.n_muons_total
+        stats["n_nc_total"] += rd.nc_evtid.size
+        stats["n_nc_ge77"] += int((rd.nc_ge77 == 1).sum())
+        stats["n_muons_ge77"] += rd.ge77_evtids.size
+        stats["n_muons_with_nc"] += rd.muon_nc_evtids.size
+
+        if rd.nc_evtid.size > 0:
+            nc_ge77_l.append(rd.nc_ge77)
+            nc_time_l.append(rd.nc_time_ns)
+            nc_phi_l.append(rd.nc_phi_rad)
+            nc_z_l.append(rd.nc_z_m)
+            nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
+
+        if rd.nc_counts.size > 0:
+            ge77_mu_mask = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
+            nc_counts_all_l.append(rd.nc_counts)
+            nc_counts_ge77mu_l.append(rd.nc_counts[ge77_mu_mask])
+            nc_counts_noge77mu_l.append(rd.nc_counts[~ge77_mu_mask])
+
+        if rd.ge77_nc_per_ge77muon.size > 0:
+            ge77_nc_per_mu_l.append(rd.ge77_nc_per_ge77muon)
+
+        if rd.muon_evtid.size > 0:
+            is_ge77 = np.isin(rd.muon_evtid, rd.ge77_evtids)
+            has_nc = np.isin(rd.muon_evtid, rd.muon_nc_evtids)
+            mu_ekin_l.append(rd.muon_ekin_mev)
+            mu_zen_l.append(rd.muon_zenith_deg)
+            mu_az_l.append(rd.muon_azimuth_deg)
+            mu_x_l.append(rd.muon_x_m)
+            mu_y_l.append(rd.muon_y_m)
+            mu_z_l.append(rd.muon_z_m)
+            mu_px_l.append(rd.muon_px_mev)
+            mu_py_l.append(rd.muon_py_mev)
+            mu_pz_l.append(rd.muon_pz_mev)
+            mu_is_ge77_l.append(is_ge77)
+            mu_has_nc_l.append(has_nc)
+
+    def cat(lst: list, dtype=None) -> np.ndarray:
+        if not lst:
+            return np.array([], dtype=dtype)
+        return np.concatenate(lst)
+
+    agg: dict = {
+        # NC-level
+        "nc_ge77": cat(nc_ge77_l, np.int32),
+        "nc_time_ns": cat(nc_time_l, np.float64),
+        "nc_phi_rad": cat(nc_phi_l, np.float64),
+        "nc_z_m": cat(nc_z_l, np.float64),
+        "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
+        # Per-muon NC counts
+        "nc_counts": cat(nc_counts_all_l, np.int64),
+        "nc_counts_ge77mu": cat(nc_counts_ge77mu_l, np.int64),
+        "nc_counts_noge77mu": cat(nc_counts_noge77mu_l, np.int64),
+        "ge77_nc_per_mu": cat(ge77_nc_per_mu_l, np.int64),
+        # Muon-level
+        "mu_ekin_mev": cat(mu_ekin_l, np.float64),
+        "mu_zenith_deg": cat(mu_zen_l, np.float64),
+        "mu_azimuth_deg": cat(mu_az_l, np.float64),
+        "mu_x_m": cat(mu_x_l, np.float64),
+        "mu_y_m": cat(mu_y_l, np.float64),
+        "mu_z_m": cat(mu_z_l, np.float64),
+        "mu_px_mev": cat(mu_px_l, np.float64),
+        "mu_py_mev": cat(mu_py_l, np.float64),
+        "mu_pz_mev": cat(mu_pz_l, np.float64),
+        "mu_is_ge77": cat(mu_is_ge77_l, bool),
+        "mu_has_nc": cat(mu_has_nc_l, bool),
+    }
+    agg.update(stats)
+    return agg
+
+
+# ---------------------------------------------------------------------------
+# Plot utilities
+# ---------------------------------------------------------------------------
+def make_log_bins(vmin: float, vmax: float) -> np.ndarray:
+    """Linear bins within each decade: 1,2,...,9,10,20,...,90,100,..."""
+    if vmax <= vmin or vmin <= 0:
+        return np.array([max(vmin, 1e-10), max(vmax, 2e-10)])
     edges: list[float] = []
-    decade = 10 ** int(np.floor(np.log10(max(vmin, 1))))
+    decade = 10.0 ** int(np.floor(np.log10(max(vmin, 1e-10))))
     val = decade
-    while val <= vmax:
+    while val <= vmax * 1.01:
         edges.append(val)
         val += decade
         if val >= decade * 10:
             decade *= 10
-    edges.append(max(val, vmax + decade))  # upper edge of last bin
+    if not edges or edges[-1] < vmax:
+        edges.append(val)
     return np.array(edges, dtype=float)
 
 
-def analyze_file(filepath: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Extract evtid, nC_track_id, nC_flag_Ge77, and nC_time_in_ns from a single HDF5 file.
-
-    Returns:
-        Tuple of (evtid, nc_track_id, ge77_flag, nc_time), all 1D np.ndarray.
-        Returns empty arrays if the group has no entries.
-    """
-    empty_i = np.array([], dtype=np.int32)
-    empty_f = np.array([], dtype=np.float64)
-    with h5py.File(filepath, "r") as f:
-        if NC_GROUP not in f:
-            return empty_i, empty_i, empty_i, empty_f
-
-        grp = f[NC_GROUP]
-        n_entries = int(grp["entries"][()])
-        if n_entries == 0:
-            return empty_i, empty_i, empty_i, empty_f
-
-        evtid = read_pages(grp, "evtid")
-        nc_track_id = read_pages(grp, "nC_track_id")
-        ge77_flag = read_pages(grp, "nC_flag_Ge77")
-        nc_time = read_pages(grp, "nC_time_in_ns")
-
-    return evtid, nc_track_id, ge77_flag, nc_time
+def _save(fig: plt.Figure, path: Path) -> None:
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {path.name}")
 
 
-def analyze_run(run_dir: Path) -> RunStats:
-    """
-    Analyze all HDF5 files in a single run directory.
+def _draw_cylinder(ax: "plt.Axes", r: float = 4300.0,
+                   z_min: float = -5000.0, z_max: float = 3900.0) -> None:
+    """Draw a wireframe cylinder on a 3-D axes (dimensions in mm)."""
+    theta = np.linspace(0, 2 * np.pi, 80)
+    z_grid, th_grid = np.meshgrid([z_min, z_max], theta)
+    ax.plot_surface(r * np.cos(th_grid), r * np.sin(th_grid), z_grid,
+                    alpha=0.06, color="gray")
+    for z in (z_min, z_max):
+        ax.plot(r * np.cos(theta), r * np.sin(theta), z,
+                color="gray", linewidth=0.8, alpha=0.5)
 
-    Deduplicates NCs on unique (evtid, nc_track_id) pairs within a run,
-    then counts unique muons (evtid) that have at least one Ge77-flagged NC.
-    """
-    stats = RunStats(run_name=run_dir.name)
 
-    hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
-    stats.n_files = len(hdf5_files)
+# ---------------------------------------------------------------------------
+# Muon property plots  (4 variants × 3 observables = 12 PNGs)
+# ---------------------------------------------------------------------------
+def _single_hist(
+    data: np.ndarray, color: str, title: str, xlabel: str,
+    out_path: Path, bins: np.ndarray,
+    log_x: bool = False, log_y: bool = False, normalized: bool = True,
+) -> None:
+    if data.size == 0:
+        return
+    fig, ax = plt.subplots(figsize=(10, 6))
+    w = np.ones(len(data)) / len(data) if normalized else None
+    ax.hist(data, bins=bins, weights=w, color=color,
+            edgecolor="black", linewidth=0.3, alpha=0.85)
+    if log_x:
+        ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel(xlabel, fontsize=13)
+    ax.set_ylabel("Fraction" if normalized else "Count", fontsize=13)
+    ax.set_title(f"{title}  (N = {len(data):,})", fontsize=14)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_path)
 
-    if stats.n_files == 0:
-        print(f"  WARNING: No output_t*.hdf5 files found in {run_dir}")
-        empty_i = np.array([], dtype=np.int64)
-        empty_f = np.array([], dtype=np.float64)
-        return stats, empty_i, empty_i, empty_f, empty_f
 
-    all_evtid: list[np.ndarray] = []
-    all_nc_id: list[np.ndarray] = []
-    all_ge77: list[np.ndarray] = []
-    all_time: list[np.ndarray] = []
-
-    for fp in hdf5_files:
-        try:
-            evtid, nc_id, ge77, nc_time = analyze_file(fp)
-        except Exception as e:
-            print(f"  ERROR reading {fp.name}: {e}")
+def _comparison_hist(
+    d1: np.ndarray, d2: np.ndarray,
+    l1: str, l2: str, c1: str, c2: str,
+    title: str, xlabel: str, out_path: Path,
+    bins: np.ndarray,
+    log_x: bool = False, log_y: bool = False, normalized: bool = True,
+) -> None:
+    if d1.size == 0 and d2.size == 0:
+        return
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
+        if data.size == 0:
             continue
-
-        if evtid.size > 0:
-            all_evtid.append(evtid)
-            all_nc_id.append(nc_id)
-            all_ge77.append(ge77)
-            all_time.append(nc_time)
-
-    if not all_evtid:
-        empty_i = np.array([], dtype=np.int64)
-        empty_f = np.array([], dtype=np.float64)
-        return stats, empty_i, empty_i, empty_f, empty_f
-
-    evtid_arr = np.concatenate(all_evtid)
-    nc_id_arr = np.concatenate(all_nc_id)
-    ge77_arr = np.concatenate(all_ge77)
-    time_arr = np.concatenate(all_time)
-
-    # Deduplicate on unique (evtid, nc_track_id) pairs within this run.
-    # For duplicates, keep the row with the max ge77 flag (1 wins over 0).
-    pair_keys = np.stack([evtid_arr, nc_id_arr], axis=1)
-    _, unique_idx, inverse = np.unique(
-        pair_keys, axis=0, return_index=True, return_inverse=True
-    )
-
-    # For each unique pair, take max ge77 flag across duplicates
-    unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
-    np.maximum.at(unique_ge77, inverse, ge77_arr)
-
-    # For time, take the value at unique_idx (arbitrary pick among duplicates)
-    unique_time = time_arr[unique_idx]
-
-    unique_evtid = evtid_arr[unique_idx]
-    ge77_mask = unique_ge77 == 1
-
-    stats.nc_total = len(unique_idx)
-    stats.nc_ge77 = int(ge77_mask.sum())
-    stats.muons_total = len(np.unique(unique_evtid))
-    stats.muons_with_ge77 = len(np.unique(unique_evtid[ge77_mask]))
-
-    # Per-muon NC counts for histogram
-    muon_ids, nc_counts = np.unique(unique_evtid, return_counts=True)
-
-    # Per-muon NC counts only for muons with at least one Ge77 NC
-    ge77_muon_ids = np.unique(unique_evtid[ge77_mask])
-    ge77_muon_mask = np.isin(muon_ids, ge77_muon_ids)
-    nc_counts_ge77 = nc_counts[ge77_muon_mask]
-
-    # Time arrays: all NCs and Ge77-only NCs
-    # For the "Ge77 muons only" time histogram: all NCs belonging to Ge77-producing muons
-    is_ge77_muon = np.isin(unique_evtid, ge77_muon_ids)
-    time_all = unique_time
-    time_ge77_flag = unique_time[ge77_mask]
-    time_ge77_muons_all = unique_time[is_ge77_muon]
-    time_ge77_muons_ge77flag = unique_time[is_ge77_muon & ge77_mask]
-
-    return stats, nc_counts, nc_counts_ge77, time_all, time_ge77_flag, time_ge77_muons_all, time_ge77_muons_ge77flag
-
-
-base = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCsSSD")
-
-if not base.exists():
-    print(f"ERROR: Base directory not found: {base}")
-    sys.exit(1)
-
-run_dirs = sorted(base.glob("run_0*"))
-if not run_dirs:
-    print(f"ERROR: No run_* directories found in {base}")
-    sys.exit(1)
-
-print(f"Base directory: {base}")
-print(f"Found {len(run_dirs)} run directories\n")
-print(f"{'Run':<12} {'Files':>6} {'NC total':>10} {'NC Ge77':>10} "
-        f"{'Muons tot':>10} {'Muons Ge77':>11}")
-print("-" * 65)
-
-all_stats: list[RunStats] = []
-all_nc_counts: list[np.ndarray] = []
-all_nc_counts_ge77: list[np.ndarray] = []
-all_time: list[np.ndarray] = []
-all_time_ge77flag: list[np.ndarray] = []
-all_time_ge77muons: list[np.ndarray] = []
-all_time_ge77muons_ge77flag: list[np.ndarray] = []
-for rd in run_dirs:
-    print(f"Processing {rd.name}...", end=" ", flush=True)
-    s, nc_counts, nc_counts_ge77, t_all, t_ge77f, t_ge77m, t_ge77mf = analyze_run(rd)
-    all_stats.append(s)
-    if nc_counts.size > 0:
-        all_nc_counts.append(nc_counts)
-    if nc_counts_ge77.size > 0:
-        all_nc_counts_ge77.append(nc_counts_ge77)
-    if t_all.size > 0:
-        all_time.append(t_all)
-        all_time_ge77flag.append(t_ge77f)
-    if t_ge77m.size > 0:
-        all_time_ge77muons.append(t_ge77m)
-        all_time_ge77muons_ge77flag.append(t_ge77mf)
-    print(f"\r{s.run_name:<12} {s.n_files:>6} {s.nc_total:>10} {s.nc_ge77:>10} "
-            f"{s.muons_total:>10} {s.muons_with_ge77:>11}")
-
-# --- Totals ---
-print("-" * 65)
-total_files = sum(s.n_files for s in all_stats)
-total_nc = sum(s.nc_total for s in all_stats)
-total_ge77 = sum(s.nc_ge77 for s in all_stats)
-total_muons = sum(s.muons_total for s in all_stats)
-total_muons_ge77 = sum(s.muons_with_ge77 for s in all_stats)
-
-print(f"{'TOTAL':<12} {total_files:>6} {total_nc:>10} {total_ge77:>10} "
-        f"{total_muons:>10} {total_muons_ge77:>11}")
-
-if total_nc > 0:
-    print(f"\nGe77 fraction: {total_ge77 / total_nc:.4f} "
-            f"({total_ge77}/{total_nc})")
-if total_muons > 0:
-    print(f"Muons producing Ge77 capture: {total_muons_ge77 / total_muons:.4f} "
-            f"({total_muons_ge77}/{total_muons})")
-
-# --- Histogram: NCs per muon ---
-if all_nc_counts:
-    counts = np.concatenate(all_nc_counts)
-    max_nc = int(counts.max())
-    median_nc = np.median(counts)
-    mean_nc = counts.mean()
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bins = make_log_bins(int(counts.min()), int(counts.max()))
-    ax.hist(counts, bins=bins, edgecolor="black", linewidth=0.5, color="#4C72B0")
-
-    ax.set_xlabel("Number of neutron captures per muon", fontsize=13)
-    ax.set_ylabel("Number of muons", fontsize=13)
-    ax.set_title(
-        f"NC multiplicity per muon (all runs, N = {len(counts)} muons)",
-        fontsize=14,
-    )
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.axvline(mean_nc, color="red", linestyle="--", linewidth=1.2,
-                label=f"Mean = {mean_nc:.2f}")
-    ax.axvline(median_nc, color="orange", linestyle="--", linewidth=1.2,
-                label=f"Median = {median_nc:.0f}")
+        w = np.ones(len(data)) / len(data) if normalized else None
+        ax.hist(data, bins=bins, weights=w, color=color, alpha=0.7,
+                edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
+    if log_x:
+        ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel(xlabel, fontsize=13)
+    ax.set_ylabel("Fraction" if normalized else "Count", fontsize=13)
+    ax.set_title(title, fontsize=14)
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
-
-    out_path = base / "nc_per_muon_histogram.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"\nHistogram saved to: {out_path}")
-
-# --- Histogram: NCs per muon (Ge77-producing muons only) ---
-if all_nc_counts_ge77:
-    counts_ge77 = np.concatenate(all_nc_counts_ge77)
-    max_nc = int(counts_ge77.max())
-    median_nc = np.median(counts_ge77)
-    mean_nc = counts_ge77.mean()
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bins = make_log_bins(int(counts_ge77.min()), int(counts_ge77.max()))
-    ax.hist(counts_ge77, bins=bins, edgecolor="black", linewidth=0.5,
-            color="#C44E52")
-
-    ax.set_xlabel("Number of neutron captures per muon", fontsize=13)
-    ax.set_ylabel("Number of muons", fontsize=13)
-    ax.set_title(
-        f"NC multiplicity per Ge77-producing muon "
-        f"(all runs, N = {len(counts_ge77)} muons)",
-        fontsize=14,
-    )
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.axvline(mean_nc, color="red", linestyle="--", linewidth=1.2,
-                label=f"Mean = {mean_nc:.2f}")
-    ax.axvline(median_nc, color="orange", linestyle="--", linewidth=1.2,
-                label=f"Median = {median_nc:.0f}")
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-
-    out_path = base / "nc_per_muon_ge77_histogram.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Histogram (Ge77) saved to: {out_path}")
-
-# --- Histogram: NC capture time (all muons), Ge77 NCs stacked in red ---
-if all_time:
-    t_all = np.concatenate(all_time)
-    t_ge77f = np.concatenate(all_time_ge77flag) if all_time_ge77flag else np.array([])
-    t_non_ge77 = t_all[~np.isin(np.arange(len(t_all)), [])]  # placeholder
-
-    # Filter to positive times for log scale
-    mask_pos = t_all > 0
-    t_all_pos = t_all[mask_pos]
-
-    if t_all_pos.size > 0:
-        bins = make_log_bins(max(1, int(t_all_pos.min())), int(t_all_pos.max()))
-
-        # Split into non-Ge77 and Ge77 for stacking
-        # We need to re-collect with a flag; easier: histogram both and overlay
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(t_all_pos, bins=bins, edgecolor="black", linewidth=0.3,
-                color="#4C72B0", label=f"All NCs (N={len(t_all_pos)})")
-
-        if t_ge77f.size > 0:
-            t_ge77f_pos = t_ge77f[t_ge77f > 0]
-            if t_ge77f_pos.size > 0:
-                ax.hist(t_ge77f_pos, bins=bins, edgecolor="black", linewidth=0.3,
-                        color="#C44E52", label=f"Ge77 NCs (N={len(t_ge77f_pos)})")
-
-        ax.set_xlabel("Neutron capture time [ns]", fontsize=13)
-        ax.set_ylabel("Number of neutron captures", fontsize=13)
-        ax.set_title("NC capture time — all muons", fontsize=14)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.legend(fontsize=11)
-        ax.tick_params(labelsize=11)
-
-        out_path = base / "nc_time_all_muons_histogram.png"
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Time histogram (all muons) saved to: {out_path}")
-
-# --- Histogram: NC capture time (Ge77-producing muons only), Ge77 NCs stacked in red ---
-if all_time_ge77muons:
-    t_gm = np.concatenate(all_time_ge77muons)
-    t_gmf = np.concatenate(all_time_ge77muons_ge77flag) if all_time_ge77muons_ge77flag else np.array([])
-
-    mask_pos = t_gm > 0
-    t_gm_pos = t_gm[mask_pos]
-
-    if t_gm_pos.size > 0:
-        bins = make_log_bins(max(1, int(t_gm_pos.min())), int(t_gm_pos.max()))
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(t_gm_pos, bins=bins, edgecolor="black", linewidth=0.3,
-                color="#4C72B0", label=f"All NCs of Ge77 muons (N={len(t_gm_pos)})")
-
-        if t_gmf.size > 0:
-            t_gmf_pos = t_gmf[t_gmf > 0]
-            if t_gmf_pos.size > 0:
-                ax.hist(t_gmf_pos, bins=bins, edgecolor="black", linewidth=0.3,
-                        color="#C44E52", label=f"Ge77 NCs (N={len(t_gmf_pos)})")
-
-        ax.set_xlabel("Neutron capture time [ns]", fontsize=13)
-        ax.set_ylabel("Number of neutron captures", fontsize=13)
-        ax.set_title("NC capture time — Ge77-producing muons only", fontsize=14)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.legend(fontsize=11)
-        ax.tick_params(labelsize=11)
-
-        out_path = base / "nc_time_ge77_muons_histogram.png"
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Time histogram (Ge77 muons) saved to: {out_path}")
-
-# =============================================================================
-# Muon property analysis: Ge77-producing vs non-Ge77 muons
-#
-# Plots:
-# 1. Kinetic energy histogram (Ge77 vs non-Ge77, normalized)
-# 2. Zenith angle histogram (Ge77 vs non-Ge77, normalized)
-# 3. Azimuth angle histogram (Ge77 vs non-Ge77, normalized)
-# 4. 3D scatter of Ge77-muon positions with momentum arrows + cylinder
-#
-# Append after imports of main analysis script.
-# =============================================================================
-
-VERTICES_GROUP = "/hit/vertices"
-PARTICLES_GROUP = "/hit/particles"
+    _save(fig, out_path)
 
 
-def read_muon_data_file(
-    filepath: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Read vertices and particles data from a single HDF5 file.
-    1:1 index mapping between vertices and particles.
+def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
+    """Azimuth, zenith, energy — 4 variants each."""
+    is_ge77 = agg["mu_is_ge77"]
+    has_nc = agg["mu_has_nc"]
+    ekin = agg["mu_ekin_mev"]
+    zenith = agg["mu_zenith_deg"]
+    azimuth = agg["mu_azimuth_deg"]
 
-    Returns:
-        (evtid, x, y, z, ekin, px, py, pz) — all 1D arrays, same length.
-    """
-    empty_i = np.array([], dtype=np.int32)
-    empty_f = np.array([], dtype=np.float64)
-    empty = (empty_i, empty_f, empty_f, empty_f, empty_f, empty_f, empty_f, empty_f)
-    with h5py.File(filepath, "r") as f:
-        if VERTICES_GROUP not in f or PARTICLES_GROUP not in f:
-            return empty
+    observables = [
+        {
+            "data": ekin,
+            "mask_ge77": is_ge77 & (ekin > 0),
+            "mask_noge77": ~is_ge77 & (ekin > 0),
+            "mask_nc": has_nc & (ekin > 0),
+            "mask_nonc": ~has_nc & (ekin > 0),
+            "all_mask": ekin > 0,
+            "xlabel": "Muon kinetic energy [MeV]",
+            "base": "muon_energy",
+            "title": "Muon kinetic energy",
+            "log_x": True,
+            "bins_fn": lambda d: make_log_bins(max(1.0, float(d.min())), float(d.max())),
+        },
+        {
+            "data": zenith,
+            "mask_ge77": is_ge77,
+            "mask_noge77": ~is_ge77,
+            "mask_nc": has_nc,
+            "mask_nonc": ~has_nc,
+            "all_mask": np.ones(len(zenith), dtype=bool),
+            "xlabel": "Zenith angle θ [°]",
+            "base": "muon_zenith",
+            "title": "Muon zenith angle",
+            "log_x": False,
+            "bins_fn": lambda _: np.linspace(0, 180, 91),
+        },
+        {
+            "data": azimuth,
+            "mask_ge77": is_ge77,
+            "mask_noge77": ~is_ge77,
+            "mask_nc": has_nc,
+            "mask_nonc": ~has_nc,
+            "all_mask": np.ones(len(azimuth), dtype=bool),
+            "xlabel": "Azimuth angle φ [°]",
+            "base": "muon_azimuth",
+            "title": "Muon azimuth angle",
+            "log_x": False,
+            "bins_fn": lambda _: np.linspace(-180, 180, 91),
+        },
+    ]
 
-        vgrp = f[VERTICES_GROUP]
-        pgrp = f[PARTICLES_GROUP]
+    for obs in observables:
+        d = obs["data"]
+        m_all = obs["all_mask"]
+        d_all = d[m_all]
+        if d_all.size == 0:
+            continue
+        bins = obs["bins_fn"](d_all)
+        lx = obs["log_x"]
+        base = obs["base"]
+        xl = obs["xlabel"]
+        title = obs["title"]
 
-        n_vert = int(vgrp["entries"][()])
-        n_part = int(pgrp["entries"][()])
-        if n_vert == 0 or n_part == 0:
-            return empty
-
-        assert n_vert == n_part, (
-            f"vertices ({n_vert}) and particles ({n_part}) entry count mismatch in {filepath}"
+        _single_hist(d_all, COLORS["blue"], f"{title} — all muons",
+                     xl, out_dir / f"{base}_all.png", bins, log_x=lx)
+        _single_hist(d[obs["mask_ge77"]], COLORS["red"],
+                     f"{title} — Ge77-producing muons",
+                     xl, out_dir / f"{base}_ge77.png", bins, log_x=lx)
+        _comparison_hist(
+            d[obs["mask_noge77"]], d[obs["mask_ge77"]],
+            "Non-Ge77", "Ge77", COLORS["blue"], COLORS["red"],
+            f"{title}: Ge77 vs non-Ge77", xl,
+            out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx,
+        )
+        _comparison_hist(
+            d[obs["mask_nonc"]], d[obs["mask_nc"]],
+            "No NC", "NC-producing", COLORS["blue"], COLORS["red"],
+            f"{title}: NC-producing vs non-NC", xl,
+            out_dir / f"{base}_nc_vs_nonc.png", bins, log_x=lx,
         )
 
-        evtid = vgrp["evtid"]["pages"][:]
-        x = vgrp["xloc_in_m"]["pages"][:]
-        y = vgrp["yloc_in_m"]["pages"][:]
-        z = vgrp["zloc_in_m"]["pages"][:]
-        ekin = pgrp["ekin_in_MeV"]["pages"][:]
-        px = pgrp["px_in_MeV"]["pages"][:]
-        py = pgrp["py_in_MeV"]["pages"][:]
-        pz = pgrp["pz_in_MeV"]["pages"][:]
 
-    return evtid, x, y, z, ekin, px, py, pz
+def plot_ge77_fraction_bar(agg: dict, out_dir: Path) -> None:
+    """Bar chart showing Ge77-producing muon fraction with count annotations."""
+    n_total = agg["n_muons_total"]
+    n_ge77 = agg["n_muons_ge77"]
+    if n_total == 0:
+        return
+    n_other = n_total - n_ge77
+    fig, ax = plt.subplots(figsize=(6, 5))
+    bars = ax.bar(
+        ["Ge77-producing", "Non-Ge77"],
+        [n_ge77 / n_total, n_other / n_total],
+        color=[COLORS["red"], COLORS["blue"]],
+        edgecolor="black", linewidth=0.8,
+    )
+    for bar, count in zip(bars, [n_ge77, n_other]):
+        ax.annotate(
+            f"{count:,}\n({count / n_total:.3%})",
+            xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            xytext=(0, 6), textcoords="offset points",
+            ha="center", va="bottom", fontsize=11,
+        )
+    ax.set_ylabel("Fraction of muons", fontsize=13)
+    ax.set_title(f"Ge77-producing muon fraction  (total: {n_total:,})", fontsize=14)
+    ax.set_ylim(0, max(n_ge77, n_other) / n_total * 1.3)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "ge77_fraction_bar.png")
 
 
-def collect_muon_data(run_dirs: list[Path]) -> dict:
+# ---------------------------------------------------------------------------
+# NC count per muon
+# ---------------------------------------------------------------------------
+def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
+    """NC count per muon: separate all/Ge77 + comparison overlay."""
+    counts_all = agg["nc_counts"]
+    counts_ge77 = agg["nc_counts_ge77mu"]
+    counts_noge77 = agg["nc_counts_noge77mu"]
+
+    if counts_all.size == 0:
+        return
+    bins = make_log_bins(1, int(counts_all.max()))
+
+    for data, color, tag, title in [
+        (counts_all, COLORS["blue"], "all",
+         "NC count per muon — all NC-producing muons"),
+        (counts_ge77, COLORS["red"], "ge77",
+         "NC count per muon — Ge77-producing muons"),
+    ]:
+        if data.size == 0:
+            continue
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(data, bins=bins, color=color, edgecolor="black", linewidth=0.4)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.axvline(data.mean(), color="red", linestyle="--", linewidth=1.2,
+                   label=f"Mean = {data.mean():.2f}")
+        ax.axvline(np.median(data), color="orange", linestyle="--", linewidth=1.2,
+                   label=f"Median = {np.median(data):.0f}")
+        ax.set_xlabel("NC count per muon", fontsize=13)
+        ax.set_ylabel("Number of muons", fontsize=13)
+        ax.set_title(f"{title}  (N = {len(data):,})", fontsize=14)
+        ax.legend(fontsize=11)
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / f"nc_count_per_muon_{tag}.png")
+
+    # Comparison overlay
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for data, label, color in [
+        (counts_noge77, "Non-Ge77 NC-producing", COLORS["blue"]),
+        (counts_ge77, "Ge77-producing", COLORS["red"]),
+    ]:
+        if data.size == 0:
+            continue
+        ax.hist(data, bins=bins, color=color, alpha=0.7,
+                edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("NC count per muon", fontsize=13)
+    ax.set_ylabel("Number of muons", fontsize=13)
+    ax.set_title("NC count per muon: Ge77 vs non-Ge77 NC-producing", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_count_per_muon_comparison.png")
+
+
+# ---------------------------------------------------------------------------
+# Ge77 NCs per Ge77 muon
+# ---------------------------------------------------------------------------
+def plot_ge77_per_ge77muon(agg: dict, out_dir: Path) -> None:
+    """Histogram: how many Ge77-flagged NCs does each Ge77 muon produce?"""
+    data = agg["ge77_nc_per_mu"]
+    if data.size == 0:
+        return
+    bins = make_log_bins(1, int(data.max())) if data.max() > 1 else np.array([0.5, 1.5, 2.5])
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(data, bins=bins, color=COLORS["purple"],
+            edgecolor="black", linewidth=0.4)
+    if data.max() > 1:
+        ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.axvline(data.mean(), color="red", linestyle="--", linewidth=1.2,
+               label=f"Mean = {data.mean():.2f}")
+    ax.axvline(np.median(data), color="orange", linestyle="--", linewidth=1.2,
+               label=f"Median = {np.median(data):.0f}")
+    ax.set_xlabel("Number of Ge77-flagged NCs per Ge77-producing muon", fontsize=13)
+    ax.set_ylabel("Number of Ge77-producing muons", fontsize=13)
+    ax.set_title(
+        f"Ge77 captures per Ge77-producing muon  (N = {len(data):,})", fontsize=14
+    )
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "ge77_per_ge77muon.png")
+
+
+# ---------------------------------------------------------------------------
+# NC time distributions
+# ---------------------------------------------------------------------------
+def plot_nc_times(agg: dict, out_dir: Path) -> None:
+    """NC capture time: all muons + Ge77-muons (all NCs + Ge77-flagged)."""
+    nc_time = agg["nc_time_ns"]
+    nc_ge77_flag = agg["nc_ge77"]
+    nc_is_ge77mu = agg["nc_is_ge77mu"]
+
+    if nc_time.size == 0:
+        return
+
+    pos = nc_time > 0
+    t_pos = nc_time[pos]
+    if t_pos.size == 0:
+        return
+    bins = make_log_bins(max(1.0, float(t_pos.min())), float(t_pos.max()))
+
+    # ---- All muons: all NCs + Ge77-flagged NCs highlighted ----
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(t_pos, bins=bins, color=COLORS["blue"], edgecolor="black",
+            linewidth=0.3, label=f"All NCs (N={len(t_pos):,})")
+    ge77_t = nc_time[pos & (nc_ge77_flag == 1)]
+    if ge77_t.size > 0:
+        ax.hist(ge77_t, bins=bins, color=COLORS["red"], edgecolor="black",
+                linewidth=0.3, label=f"Ge77-flagged NCs (N={len(ge77_t):,})")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("NC capture time [ns]", fontsize=13)
+    ax.set_ylabel("Number of NCs", fontsize=13)
+    ax.set_title("NC capture time — all muons", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_time_all.png")
+
+    # ---- Ge77-producing muons only ----
+    ge77mu_mask = pos & nc_is_ge77mu
+    t_ge77mu = nc_time[ge77mu_mask]
+    if t_ge77mu.size == 0:
+        return
+    bins2 = make_log_bins(max(1.0, float(t_ge77mu.min())), float(t_ge77mu.max()))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(t_ge77mu, bins=bins2, color=COLORS["blue"], edgecolor="black",
+            linewidth=0.3,
+            label=f"All NCs of Ge77 muons (N={len(t_ge77mu):,})")
+    ge77_only = nc_time[ge77mu_mask & (nc_ge77_flag == 1)]
+    if ge77_only.size > 0:
+        ax.hist(ge77_only, bins=bins2, color=COLORS["red"], edgecolor="black",
+                linewidth=0.3, label=f"Ge77-flagged NCs (N={len(ge77_only):,})")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("NC capture time [ns]", fontsize=13)
+    ax.set_ylabel("Number of NCs", fontsize=13)
+    ax.set_title("NC capture time — Ge77-producing muons only", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_time_ge77muons.png")
+
+
+# ---------------------------------------------------------------------------
+# NC spatial distributions
+# ---------------------------------------------------------------------------
+def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     """
-    Collect all muon vertex/particle data across runs,
-    and determine which evtids are Ge77-producing per run.
-
-    Returns dict with arrays: x, y, z, ekin, px, py, pz, is_ge77
+    1-D histograms of φ and z (all NCs + Ge77-muon NCs).
+    2-D histogram φ vs z (all NCs + Ge77-muon NCs).
     """
-    all_x, all_y, all_z = [], [], []
-    all_ekin, all_px, all_py, all_pz = [], [], [], []
-    all_is_ge77 = []
+    phi = np.degrees(agg["nc_phi_rad"])   # convert to degrees for readability
+    z_mm = agg["nc_z_m"] * 1e3           # metres → mm
+    is_ge77mu = agg["nc_is_ge77mu"]
 
-    for run_dir in run_dirs:
-        hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
-        if not hdf5_files:
+    if phi.size == 0:
+        return
+
+    # ---- 1-D φ ----
+    bins_phi = np.linspace(-180, 180, 73)
+    for mask, tag, title in [
+        (np.ones(phi.size, dtype=bool), "all", "NC azimuthal position — all NCs"),
+        (is_ge77mu, "ge77muons", "NC azimuthal position — NCs of Ge77-producing muons"),
+    ]:
+        d = phi[mask]
+        if d.size == 0:
+            continue
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(d, bins=bins_phi, color=COLORS["blue"],
+                edgecolor="black", linewidth=0.3)
+        ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
+        ax.set_ylabel("Number of NCs", fontsize=13)
+        ax.set_title(f"{title}  (N = {len(d):,})", fontsize=14)
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / f"nc_phi_1d_{tag}.png")
+
+    # ---- 1-D z ----
+    bins_z = np.linspace(float(z_mm.min()), float(z_mm.max()), 100)
+    for mask, tag, title in [
+        (np.ones(z_mm.size, dtype=bool), "all", "NC z position — all NCs"),
+        (is_ge77mu, "ge77muons", "NC z position — NCs of Ge77-producing muons"),
+    ]:
+        d = z_mm[mask]
+        if d.size == 0:
+            continue
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(d, bins=bins_z, color=COLORS["blue"],
+                edgecolor="black", linewidth=0.3)
+        ax.set_xlabel("NC z position [mm]", fontsize=13)
+        ax.set_ylabel("Number of NCs", fontsize=13)
+        ax.set_title(f"{title}  (N = {len(d):,})", fontsize=14)
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / f"nc_z_1d_{tag}.png")
+
+    # ---- 2-D φ vs z ----
+    for mask, tag, title in [
+        (np.ones(phi.size, dtype=bool), "all", "NC positions φ vs z — all NCs"),
+        (is_ge77mu, "ge77muons",
+         "NC positions φ vs z — NCs of Ge77-producing muons"),
+    ]:
+        ph = phi[mask]
+        zm = z_mm[mask]
+        if ph.size == 0:
+            continue
+        fig, ax = plt.subplots(figsize=(10, 7))
+        h = ax.hist2d(ph, zm, bins=[72, 100], cmap="viridis")
+        plt.colorbar(h[3], ax=ax, label="Number of NCs")
+        ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
+        ax.set_ylabel("NC z position [mm]", fontsize=13)
+        ax.set_title(f"{title}  (N = {len(ph):,})", fontsize=14)
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / f"nc_phi_z_2d_{tag}.png")
+
+
+# ---------------------------------------------------------------------------
+# 3-D muon position scatter plots
+# ---------------------------------------------------------------------------
+def _plot_3d_scatter(
+    x_mm: np.ndarray, y_mm: np.ndarray, z_mm: np.ndarray,
+    px: np.ndarray, py: np.ndarray, pz: np.ndarray,
+    title: str, out_path: Path,
+    max_pts: int = MAX_SCATTER_PTS,
+) -> None:
+    """3-D scatter of muon entry points with down-sampled momentum arrows."""
+    n = len(x_mm)
+    if n == 0:
+        return
+    rng = np.random.default_rng(RANDOM_SEED)
+    idx = rng.choice(n, min(n, max_pts), replace=False)
+    xs, ys, zs = x_mm[idx], y_mm[idx], z_mm[idx]
+    pxs, pys, pzs = px[idx], py[idx], pz[idx]
+
+    p_mag = np.sqrt(pxs**2 + pys**2 + pzs**2)
+    p_mag = np.where(p_mag > 0, p_mag, 1.0)
+    scale = 500.0   # arrow length in mm
+    dx, dy, dz = pxs / p_mag * scale, pys / p_mag * scale, pzs / p_mag * scale
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(xs, ys, zs, c="red", s=8, alpha=0.5, label=f"Muon vertex (N={n:,})")
+    for i in range(len(xs)):
+        ax.plot([xs[i], xs[i] + dx[i]], [ys[i], ys[i] + dy[i]],
+                [zs[i], zs[i] + dz[i]], color="red", alpha=0.2, linewidth=0.4)
+    _draw_cylinder(ax)
+    ax.set_xlabel("X [mm]", fontsize=11)
+    ax.set_ylabel("Y [mm]", fontsize=11)
+    ax.set_zlabel("Z [mm]", fontsize=11)
+    ax.set_title(
+        f"{title}  (N = {n:,}; showing {min(n, max_pts):,})", fontsize=13
+    )
+    ax.legend(fontsize=10)
+    _save(fig, out_path)
+
+
+def plot_muon_3d_scatters(agg: dict, out_dir: Path) -> None:
+    """3-D position scatter for Ge77 muons and NC-producing muons."""
+    x_mm = agg["mu_x_m"] * 1e3
+    y_mm = agg["mu_y_m"] * 1e3
+    z_mm = agg["mu_z_m"] * 1e3
+    px = agg["mu_px_mev"]
+    py = agg["mu_py_mev"]
+    pz = agg["mu_pz_mev"]
+    is_ge77 = agg["mu_is_ge77"]
+    has_nc = agg["mu_has_nc"]
+
+    for mask, fname, title in [
+        (is_ge77, "muon_ge77_3d.png", "Ge77-producing muon entry vertices"),
+        (has_nc, "muon_nc_3d.png", "NC-producing muon entry vertices"),
+    ]:
+        if mask.sum() == 0:
+            continue
+        _plot_3d_scatter(
+            x_mm[mask], y_mm[mask], z_mm[mask],
+            px[mask], py[mask], pz[mask],
+            title, out_dir / fname,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Outlier analysis
+# ---------------------------------------------------------------------------
+def analyze_outliers(agg: dict, run_list: list[RunData], out_dir: Path) -> dict:
+    """
+    Outlier muons = NC count above 99th percentile on log scale.
+    threshold = exp(np.percentile(np.log(nc_counts), 99))
+    """
+    counts = agg["nc_counts"]
+    if counts.size == 0:
+        return {}
+
+    threshold = float(np.exp(np.percentile(np.log(counts), 99)))
+    outlier_mask = counts > threshold
+    n_outliers = int(outlier_mask.sum())
+    print(f"\n  Outlier threshold (99th pct log scale): {threshold:.1f} NCs/muon")
+    print(f"  Outlier muons: {n_outliers:,}  "
+          f"({n_outliers / len(counts) * 100:.2f}% of NC-producing muons)")
+
+    # Fraction of total NCs from outlier muons
+    outlier_nc_total = int(counts[outlier_mask].sum())
+    total_nc = int(agg["n_nc_total"])
+    frac_nc = outlier_nc_total / total_nc if total_nc > 0 else 0.0
+    print(f"  NCs from outlier muons: {outlier_nc_total:,} ({frac_nc * 100:.2f}% of all NCs)")
+
+    # ---- Plot 1: NC count distribution with outlier threshold ----
+    bins = make_log_bins(1, int(counts.max()))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(counts, bins=bins, color=COLORS["blue"], edgecolor="black", linewidth=0.4,
+            label="All NC-producing muons")
+    ax.axvline(threshold, color="red", linestyle="--", linewidth=1.5,
+               label=f"99th pct threshold = {threshold:.0f}")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("NC count per muon", fontsize=13)
+    ax.set_ylabel("Number of muons", fontsize=13)
+    ax.set_title(
+        f"NC count per muon with outlier threshold  "
+        f"({n_outliers:,} outliers = {frac_nc * 100:.1f}% of NCs)",
+        fontsize=13,
+    )
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "outlier_nc_count.png")
+
+    # ---- Gather outlier NC data from per-run arrays ----
+    outlier_nc_phi, outlier_nc_z, outlier_nc_time = [], [], []
+    max_single_count = int(counts[outlier_mask].max()) if n_outliers > 0 else 0
+
+    for rd in run_list:
+        if rd.nc_counts.size == 0:
+            continue
+        out_mu_mask = rd.nc_counts > threshold
+        out_evtids = rd.muon_nc_evtids[out_mu_mask]
+        if out_evtids.size == 0:
+            continue
+        nc_mask = np.isin(rd.nc_evtid, out_evtids)
+        outlier_nc_phi.append(rd.nc_phi_rad[nc_mask])
+        outlier_nc_z.append(rd.nc_z_m[nc_mask])
+        outlier_nc_time.append(rd.nc_time_ns[nc_mask])
+
+    if not outlier_nc_phi:
+        return {"n_outliers": n_outliers, "threshold": threshold,
+                "frac_nc": frac_nc}
+
+    phi_out = np.degrees(np.concatenate(outlier_nc_phi))
+    z_out_mm = np.concatenate(outlier_nc_z) * 1e3
+    t_out = np.concatenate(outlier_nc_time)
+
+    # ---- Plot 2: Outlier NC positions φ vs z ----
+    fig, ax = plt.subplots(figsize=(10, 7))
+    h = ax.hist2d(phi_out, z_out_mm, bins=[72, 100], cmap="hot")
+    plt.colorbar(h[3], ax=ax, label="Number of NCs from outlier muons")
+    ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
+    ax.set_ylabel("NC z position [mm]", fontsize=13)
+    ax.set_title(
+        f"NC positions from outlier muons  (N_NCs = {len(phi_out):,})", fontsize=14
+    )
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "outlier_nc_positions.png")
+
+    # ---- Plot 3: Outlier NC time ----
+    t_pos = t_out[t_out > 0]
+    if t_pos.size > 0:
+        bins_t = make_log_bins(max(1.0, float(t_pos.min())), float(t_pos.max()))
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(t_pos, bins=bins_t, color=COLORS["orange"],
+                edgecolor="black", linewidth=0.3)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("NC capture time [ns]", fontsize=13)
+        ax.set_ylabel("Number of NCs", fontsize=13)
+        ax.set_title(
+            f"NC capture time — outlier muons  (N_NCs = {len(t_pos):,})", fontsize=14
+        )
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / "outlier_nc_time.png")
+
+    # Warn if single outlier muon dominates spatial distribution
+    if max_single_count / total_nc > 0.05:
+        print(
+            f"\n  *** WARNING: single outlier muon has {max_single_count:,} NCs "
+            f"= {max_single_count / total_nc * 100:.1f}% of all NCs. "
+            f"NC spatial distribution may be dominated by this muon. ***"
+        )
+
+    return {
+        "n_outliers": n_outliers,
+        "threshold": threshold,
+        "frac_nc": frac_nc,
+        "max_single_count": max_single_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Convergence analysis
+# ---------------------------------------------------------------------------
+def _w1_ks(
+    sample: np.ndarray, reference: np.ndarray
+) -> tuple[float, float]:
+    """Return (W1, KS) distance of sample vs reference."""
+    if sample.size == 0 or reference.size == 0:
+        return float("nan"), float("nan")
+    w1 = float(wasserstein_distance(sample, reference))
+    ks = float(ks_2samp(sample, reference).statistic)
+    return w1, ks
+
+
+def _transform(data: np.ndarray, obs: str) -> np.ndarray:
+    """Apply observable-specific transform before computing distances."""
+    if obs in ("nc_count", "energy"):
+        return np.log(data + 1.0)
+    return data   # zenith and azimuth: raw degrees
+
+
+def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, int]:
+    """
+    Compute W1 and KS convergence metrics vs number of runs k.
+
+    Two strategies:
+    - Deterministic: first k runs in order
+    - Random subsets: N_PERMUTATIONS draws of k runs
+
+    Returns recommended minimum k per observable.
+    """
+    n_runs = len(run_list)
+    if n_runs < 2:
+        print("  Convergence analysis requires >= 2 runs; skipping.")
+        return {}
+
+    rng = random.Random(RANDOM_SEED)
+    run_indices = list(range(n_runs))
+
+    # Collect per-run arrays for each observable
+    def get_obs(rd: RunData, obs: str) -> np.ndarray:
+        if obs == "nc_count":
+            return rd.nc_counts
+        if obs == "zenith":
+            return rd.muon_zenith_deg
+        if obs == "azimuth":
+            return rd.muon_azimuth_deg
+        if obs == "energy":
+            return rd.muon_ekin_mev[rd.muon_ekin_mev > 0]
+        raise ValueError(obs)
+
+    observables = [
+        ("nc_count", "log(NC count + 1)", "NC count per muon"),
+        ("zenith",   "Zenith [°]",          "Muon zenith"),
+        ("azimuth",  "Azimuth [°]",          "Muon azimuth"),
+        ("energy",   "log(E_kin [MeV] + 1)", "Muon energy"),
+    ]
+
+    recommendations: dict[str, int] = {}
+
+    for obs_key, obs_xlabel, obs_title in observables:
+        print(f"  Convergence: {obs_title} ...", flush=True)
+        full_data = _transform(
+            np.concatenate([get_obs(rd, obs_key) for rd in run_list]), obs_key
+        )
+        if full_data.size == 0:
             continue
 
-        # --- Collect NC data for this run to find Ge77 muon evtids ---
-        nc_evtids_list = []
-        nc_ge77_list = []
-        nc_trackid_list = []
-        for fp in hdf5_files:
-            try:
-                with h5py.File(fp, "r") as f:
-                    if NC_GROUP not in f:
-                        continue
-                    grp = f[NC_GROUP]
-                    if int(grp["entries"][()]) == 0:
-                        continue
-                    nc_evtids_list.append(grp["evtid"]["pages"][:])
-                    nc_trackid_list.append(grp["nC_track_id"]["pages"][:])
-                    nc_ge77_list.append(grp["nC_flag_Ge77"]["pages"][:])
-            except Exception:
-                continue
+        k_vals = list(range(1, n_runs + 1))
 
-        ge77_muon_evtids = set()
-        if nc_evtids_list:
-            nc_evtid = np.concatenate(nc_evtids_list)
-            nc_tid = np.concatenate(nc_trackid_list)
-            nc_ge77 = np.concatenate(nc_ge77_list)
-
-            # Deduplicate NCs on (evtid, nc_track_id)
-            pair_keys = np.stack([nc_evtid, nc_tid], axis=1)
-            _, unique_idx, inverse = np.unique(
-                pair_keys, axis=0, return_index=True, return_inverse=True
+        # Deterministic
+        det_w1, det_ks = [], []
+        for k in k_vals:
+            sample = _transform(
+                np.concatenate([get_obs(run_list[i], obs_key) for i in range(k)]),
+                obs_key,
             )
-            unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
-            np.maximum.at(unique_ge77, inverse, nc_ge77)
-            unique_nc_evtid = nc_evtid[unique_idx]
+            w1, ks = _w1_ks(sample, full_data)
+            det_w1.append(w1)
+            det_ks.append(ks)
 
-            ge77_mask = unique_ge77 == 1
-            ge77_muon_evtids = set(unique_nc_evtid[ge77_mask].tolist())
+        # Random subsets
+        rand_w1 = np.zeros((n_runs, N_PERMUTATIONS))
+        rand_ks = np.zeros((n_runs, N_PERMUTATIONS))
+        for perm_i in range(N_PERMUTATIONS):
+            shuffled = run_indices.copy()
+            rng.shuffle(shuffled)
+            for k in k_vals:
+                sample = _transform(
+                    np.concatenate(
+                        [get_obs(run_list[shuffled[i]], obs_key) for i in range(k)]
+                    ),
+                    obs_key,
+                )
+                w1, ks = _w1_ks(sample, full_data)
+                rand_w1[k - 1, perm_i] = w1
+                rand_ks[k - 1, perm_i] = ks
 
-        # --- Collect vertex/particle data for this run ---
-        run_evtid_set = set()
-        for fp in hdf5_files:
-            try:
-                evtid, x, y, z, ekin, px, py, pz = read_muon_data_file(fp)
-            except Exception as e:
-                print(f"  ERROR reading muon data from {fp.name}: {e}")
-                continue
+        rand_w1_mean = rand_w1.mean(axis=1)
+        rand_w1_std = rand_w1.std(axis=1)
+        rand_ks_mean = rand_ks.mean(axis=1)
+        rand_ks_std = rand_ks.std(axis=1)
 
-            if evtid.size == 0:
-                continue
+        # Recommended k: first k where deterministic W1 < 5% of W1 at k=1
+        w1_at_k1 = det_w1[0]
+        threshold = W1_THRESHOLD_FRAC * w1_at_k1 if w1_at_k1 > 0 else 0.0
+        rec_k = next(
+            (k for k, w in enumerate(det_w1, start=1) if w <= threshold),
+            n_runs,
+        )
+        recommendations[obs_key] = rec_k
+        print(f"    W1 threshold = {threshold:.4f}  →  recommended k = {rec_k}")
 
-            # Deduplicate: keep only first occurrence per evtid within run
-            new_mask = np.array([eid not in run_evtid_set for eid in evtid])
-            run_evtid_set.update(evtid[new_mask].tolist())
+        # ---- Plot ----
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f"Convergence analysis: {obs_title}", fontsize=14)
 
-            evtid = evtid[new_mask]
-            x, y, z = x[new_mask], y[new_mask], z[new_mask]
-            ekin = ekin[new_mask]
-            px, py, pz = px[new_mask], py[new_mask], pz[new_mask]
+        for ax, metric, det_vals, r_mean, r_std, ylabel in [
+            (axes[0], "W₁ distance", det_w1, rand_w1_mean, rand_w1_std,
+             f"W₁ ({obs_xlabel})"),
+            (axes[1], "KS statistic", det_ks, rand_ks_mean, rand_ks_std,
+             "KS statistic D"),
+        ]:
+            ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
+                    linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
+            ax.plot(k_vals, r_mean, "s--", color=COLORS["orange"],
+                    linewidth=1.5, markersize=5, label="Random subsets (mean)")
+            ax.fill_between(
+                k_vals,
+                r_mean - r_std, r_mean + r_std,
+                color=COLORS["orange"], alpha=0.25,
+                label=f"±1σ  ({N_PERMUTATIONS} permutations)",
+            )
+            ax.axhline(0, color="gray", linestyle=":", linewidth=1.0,
+                       label="Reference (k=10 vs k=10)")
+            if metric == "W₁ distance" and threshold > 0:
+                ax.axhline(threshold, color="red", linestyle="--", linewidth=1.2,
+                           label=f"5% threshold = {threshold:.4f}")
+                ax.axvline(rec_k, color="red", linestyle=":", linewidth=1.2,
+                           label=f"Rec. k = {rec_k}")
+            ax.set_xlabel("Number of runs k", fontsize=12)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.set_title(metric, fontsize=13)
+            ax.set_xticks(k_vals)
+            ax.legend(fontsize=9)
+            ax.tick_params(labelsize=10)
 
-            is_ge77 = np.array([eid in ge77_muon_evtids for eid in evtid], dtype=bool)
+        _save(fig, out_dir / f"convergence_{obs_key}.png")
 
-            all_x.append(x)
-            all_y.append(y)
-            all_z.append(z)
-            all_ekin.append(ekin)
-            all_px.append(px)
-            all_py.append(py)
-            all_pz.append(pz)
-            all_is_ge77.append(is_ge77)
+    return recommendations
 
-    return {
-        "x": np.concatenate(all_x),
-        "y": np.concatenate(all_y),
-        "z": np.concatenate(all_z),
-        "ekin": np.concatenate(all_ekin),
-        "px": np.concatenate(all_px),
-        "py": np.concatenate(all_py),
-        "pz": np.concatenate(all_pz),
-        "is_ge77": np.concatenate(all_is_ge77),
+
+# ---------------------------------------------------------------------------
+# Statistics output
+# ---------------------------------------------------------------------------
+def write_statistics(
+    agg: dict,
+    outlier_info: dict,
+    recommendations: dict[str, int],
+    run_list: list[RunData],
+    out_dir: Path,
+) -> None:
+    """Write a statistics.txt summary file."""
+    lines = [
+        "=== MUSUN NC Analysis — Statistics ===",
+        "",
+        f"Runs loaded:               {len(run_list)}",
+        f"Total muons:               {agg['n_muons_total']:,}",
+        f"Muons producing NCs:       {agg['n_muons_with_nc']:,}"
+        f"  ({agg['n_muons_with_nc'] / max(agg['n_muons_total'], 1) * 100:.3f}%)",
+        f"Ge77-producing muons:      {agg['n_muons_ge77']:,}"
+        f"  ({agg['n_muons_ge77'] / max(agg['n_muons_total'], 1) * 100:.3f}%)",
+        f"Total NCs:                 {agg['n_nc_total']:,}",
+        f"Ge77-flagged NCs:          {agg['n_nc_ge77']:,}"
+        f"  ({agg['n_nc_ge77'] / max(agg['n_nc_total'], 1) * 100:.3f}%)",
+        "",
+        "--- Outlier analysis ---",
+    ]
+    if outlier_info:
+        lines += [
+            f"Threshold (99th pct log):  {outlier_info.get('threshold', 'n/a'):.1f} NCs/muon",
+            f"Outlier muons:             {outlier_info.get('n_outliers', 'n/a'):,}",
+            f"NC fraction from outliers: {outlier_info.get('frac_nc', 0) * 100:.2f}%",
+        ]
+        max_single = outlier_info.get("max_single_count", 0)
+        if max_single > 0:
+            lines.append(
+                f"Max single-muon NC count:  {max_single:,}"
+                f"  ({max_single / max(agg['n_nc_total'], 1) * 100:.2f}% of all NCs)"
+            )
+    else:
+        lines.append("  (no outlier data)")
+
+    lines += ["", "--- Convergence: recommended minimum number of runs ---"]
+    obs_labels = {
+        "nc_count": "NC count per muon",
+        "zenith":   "Muon zenith",
+        "azimuth":  "Muon azimuth",
+        "energy":   "Muon energy",
     }
+    for key, label in obs_labels.items():
+        k = recommendations.get(key, "n/a")
+        lines.append(f"  {label:<25} k = {k}")
 
-
-def plot_muon_properties(data: dict, base: Path) -> None:
-    """Create all muon property comparison plots."""
-    is_ge77 = data["is_ge77"]
-    not_ge77 = ~is_ge77
-
-    ekin = data["ekin"]
-    px, py, pz = data["px"], data["py"], data["pz"]
-    p_mag = np.sqrt(px**2 + py**2 + pz**2)
-
-    # Zenith angle: theta = arccos(pz / |p|)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        cos_theta = np.where(p_mag > 0, pz / p_mag, 0.0)
-    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-    theta_deg = np.degrees(np.arccos(cos_theta))
-
-    # Azimuth angle: phi = atan2(py, px)
-    phi_deg = np.degrees(np.arctan2(py, px))
-
-    n_ge77 = int(is_ge77.sum())
-    n_other = int(not_ge77.sum())
-    print(f"\nMuon properties: {n_ge77} Ge77-producing, {n_other} non-Ge77")
-
-    # --- 1. Kinetic energy histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ekin_ge77 = ekin[is_ge77 & (ekin > 0)]
-    ekin_other = ekin[not_ge77 & (ekin > 0)]
-
-    if ekin_ge77.size > 0 and ekin_other.size > 0:
-        vmin = max(1, int(min(ekin_ge77.min(), ekin_other.min())))
-        vmax = int(max(ekin_ge77.max(), ekin_other.max()))
-        bins = make_log_bins(vmin, vmax)
-
-        w_other = np.ones(len(ekin_other)) / len(ekin_other)
-        w_ge77 = np.ones(len(ekin_ge77)) / len(ekin_ge77)
-        ax.hist(ekin_other, bins=bins, weights=w_other, edgecolor="black",
-                linewidth=0.3, color="#4C72B0", alpha=0.7,
-                label=f"Non-Ge77 (N={len(ekin_other)})")
-        ax.hist(ekin_ge77, bins=bins, weights=w_ge77, edgecolor="black",
-                linewidth=0.3, color="#C44E52", alpha=0.7,
-                label=f"Ge77 (N={len(ekin_ge77)})")
-
-        ax.set_xlabel("Muon kinetic energy [MeV]", fontsize=13)
-        ax.set_ylabel("Fraction of muons", fontsize=13)
-        ax.set_title("Muon kinetic energy: Ge77 vs non-Ge77", fontsize=14)
-        ax.set_xscale("log")
-        ax.legend(fontsize=11)
-        ax.tick_params(labelsize=11)
-
-        out_path = base / "muon_energy_ge77_comparison.png"
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        print(f"Energy histogram saved to: {out_path}")
-    plt.close(fig)
-
-    # --- 2. Zenith angle histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    theta_ge77 = theta_deg[is_ge77]
-    theta_other = theta_deg[not_ge77]
-
-    bins_angle = np.linspace(0, 180, 91)
-    w_other = np.ones(len(theta_other)) / len(theta_other)
-    w_ge77 = np.ones(len(theta_ge77)) / len(theta_ge77)
-    ax.hist(theta_other, bins=bins_angle, weights=w_other, edgecolor="black",
-            linewidth=0.3, color="#4C72B0", alpha=0.7,
-            label=f"Non-Ge77 (N={len(theta_other)})")
-    ax.hist(theta_ge77, bins=bins_angle, weights=w_ge77, edgecolor="black",
-            linewidth=0.3, color="#C44E52", alpha=0.7,
-            label=f"Ge77 (N={len(theta_ge77)})")
-
-    ax.set_xlabel("Zenith angle θ [deg]", fontsize=13)
-    ax.set_ylabel("Fraction of muons", fontsize=13)
-    ax.set_title("Muon zenith angle: Ge77 vs non-Ge77", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-
-    out_path = base / "muon_zenith_ge77_comparison.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Zenith histogram saved to: {out_path}")
-
-    # --- 3. Azimuth angle histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    phi_ge77 = phi_deg[is_ge77]
-    phi_other = phi_deg[not_ge77]
-
-    bins_phi = np.linspace(-180, 180, 91)
-    w_other = np.ones(len(phi_other)) / len(phi_other)
-    w_ge77 = np.ones(len(phi_ge77)) / len(phi_ge77)
-    ax.hist(phi_other, bins=bins_phi, weights=w_other, edgecolor="black",
-            linewidth=0.3, color="#4C72B0", alpha=0.7,
-            label=f"Non-Ge77 (N={len(phi_other)})")
-    ax.hist(phi_ge77, bins=bins_phi, weights=w_ge77, edgecolor="black",
-            linewidth=0.3, color="#C44E52", alpha=0.7,
-            label=f"Ge77 (N={len(phi_ge77)})")
-
-    ax.set_xlabel("Azimuth angle φ [deg]", fontsize=13)
-    ax.set_ylabel("Fraction of muons", fontsize=13)
-    ax.set_title("Muon azimuth angle: Ge77 vs non-Ge77", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-
-    out_path = base / "muon_azimuth_ge77_comparison.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Azimuth histogram saved to: {out_path}")
-
-    # --- 4. 3D scatter of Ge77 muon positions with momentum arrows ---
-    fig = plt.figure(figsize=(12, 10))
-    ax3d = fig.add_subplot(111, projection="3d")
-
-    # Ge77 muon positions in mm
-    x_ge77 = data["x"][is_ge77] * 1000
-    y_ge77 = data["y"][is_ge77] * 1000
-    z_ge77 = data["z"][is_ge77] * 1000
-    px_ge77 = px[is_ge77]
-    py_ge77 = py[is_ge77]
-    pz_ge77 = pz[is_ge77]
-
-    # Normalize momentum for arrow direction
-    p_mag_ge77 = np.sqrt(px_ge77**2 + py_ge77**2 + pz_ge77**2)
-    p_mag_ge77 = np.where(p_mag_ge77 > 0, p_mag_ge77, 1.0)
-    arrow_scale = 500.0  # mm
-    dx = px_ge77 / p_mag_ge77 * arrow_scale
-    dy = py_ge77 / p_mag_ge77 * arrow_scale
-    dz = pz_ge77 / p_mag_ge77 * arrow_scale
-
-    ax3d.scatter(x_ge77, y_ge77, z_ge77, c="red", s=10, alpha=0.6,
-                 label=f"Ge77 muon vertex (N={n_ge77})")
-
-    for i in range(len(x_ge77)):
-        ax3d.plot(
-            [x_ge77[i], x_ge77[i] + dx[i]],
-            [y_ge77[i], y_ge77[i] + dy[i]],
-            [z_ge77[i], z_ge77[i] + dz[i]],
-            color="red", alpha=0.3, linewidth=0.5,
+    lines += ["", "--- Per-run summary ---",
+              f"{'Run':<12} {'Files':>6} {'NCs':>10} {'Ge77 NCs':>10} "
+              f"{'NC muons':>10} {'Ge77 muons':>11}"]
+    lines.append("-" * 65)
+    for rd in run_list:
+        lines.append(
+            f"{rd.run_name:<12} {rd.n_files:>6} {rd.nc_evtid.size:>10} "
+            f"{int((rd.nc_ge77 == 1).sum()):>10} "
+            f"{rd.muon_nc_evtids.size:>10} {rd.ge77_evtids.size:>11}"
         )
 
-    # Draw cylinder: radius=4300mm, z from -5000 to 3900 mm
-    cyl_r = 4300.0
-    cyl_z_min, cyl_z_max = -5000.0, 3900.0
-    theta_cyl = np.linspace(0, 2 * np.pi, 80)
-    z_cyl_arr = np.array([cyl_z_min, cyl_z_max])
-    theta_grid, z_grid = np.meshgrid(theta_cyl, z_cyl_arr)
-    x_cyl = cyl_r * np.cos(theta_grid)
-    y_cyl = cyl_r * np.sin(theta_grid)
-
-    ax3d.plot_surface(x_cyl, y_cyl, z_grid, alpha=0.08, color="gray")
-
-    # Top and bottom circles
-    circle_theta = np.linspace(0, 2 * np.pi, 100)
-    cx = cyl_r * np.cos(circle_theta)
-    cy = cyl_r * np.sin(circle_theta)
-    ax3d.plot(cx, cy, cyl_z_min, color="gray", linewidth=0.8, alpha=0.5)
-    ax3d.plot(cx, cy, cyl_z_max, color="gray", linewidth=0.8, alpha=0.5)
-
-    ax3d.set_xlabel("X [mm]", fontsize=11)
-    ax3d.set_ylabel("Y [mm]", fontsize=11)
-    ax3d.set_zlabel("Z [mm]", fontsize=11)
-    ax3d.set_title(f"Ge77-producing muon vertices (N={n_ge77})", fontsize=14)
-    ax3d.legend(fontsize=10)
-
-    out_path = base / "muon_ge77_3d_positions.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"3D plot saved to: {out_path}")
+    txt = "\n".join(lines) + "\n"
+    out_path = out_dir / "statistics.txt"
+    out_path.write_text(txt)
+    print(f"  saved: {out_path.name}")
+    print(txt)
 
 
-# --- Run ---
-base = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCsSSD")
-run_dirs = sorted(base.glob("run_0*"))
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Level-1 MUSUN analysis: muon simulation → NC extraction."
+    )
+    p.add_argument(
+        "--data-path",
+        default=DEFAULT_DATA_PATH,
+        help="Root directory containing run_001/ … run_010/ sub-directories.",
+    )
+    p.add_argument(
+        "--output-path",
+        default=None,
+        help="Base output directory.  A 'musun_nc_analysis/' sub-directory is "
+             "created inside it.  Defaults to --data-path.",
+    )
+    p.add_argument(
+        "--runs",
+        type=int,
+        default=NUM_RUNS_DEFAULT,
+        help=f"Number of runs to load (default: {NUM_RUNS_DEFAULT}).",
+    )
+    return p.parse_args()
 
-print(f"Collecting muon vertex/particle data from {len(run_dirs)} runs...")
-muon_data = collect_muon_data(run_dirs)
-plot_muon_properties(muon_data, base)
 
-# =============================================================================
-# Muon property analysis: NC-producing vs non-NC-producing muons
-#
-# Plots:
-# 1. Kinetic energy histogram (NC vs no-NC, normalized)
-# 2. Zenith angle histogram (NC vs no-NC, normalized)
-# 3. Azimuth angle histogram (NC vs no-NC, normalized)
-# 4. 3D scatter of NC-producing muon positions with momentum arrows + cylinder
-#
-# Append after imports of main analysis script.
-# Uses: NC_GROUP, make_log_bins, h5py, np, plt, Path
-# =============================================================================
+def main() -> None:
+    args = parse_args()
+    data_path = Path(args.data_path)
+    output_base = Path(args.output_path) if args.output_path else data_path
+    out_dir = output_base / "musun_nc_analysis"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-VERTICES_GROUP = "/hit/vertices"
-PARTICLES_GROUP = "/hit/particles"
+    if not data_path.exists():
+        print(f"ERROR: data path not found: {data_path}")
+        sys.exit(1)
 
+    run_dirs = sorted(data_path.glob("run_*"))[: args.runs]
+    if not run_dirs:
+        print(f"ERROR: no run_* directories in {data_path}")
+        sys.exit(1)
+    print(f"Data path  : {data_path}")
+    print(f"Output dir : {out_dir}")
+    print(f"Runs found : {len(run_dirs)}\n")
 
-def read_muon_data_file_nc(
-    filepath: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Read vertices and particles data from a single HDF5 file.
-    1:1 index mapping between vertices and particles.
-    """
-    empty_i = np.array([], dtype=np.int32)
-    empty_f = np.array([], dtype=np.float64)
-    empty = (empty_i, empty_f, empty_f, empty_f, empty_f, empty_f, empty_f, empty_f)
-    with h5py.File(filepath, "r") as f:
-        if VERTICES_GROUP not in f or PARTICLES_GROUP not in f:
-            return empty
-
-        vgrp = f[VERTICES_GROUP]
-        pgrp = f[PARTICLES_GROUP]
-
-        n_vert = int(vgrp["entries"][()])
-        n_part = int(pgrp["entries"][()])
-        if n_vert == 0 or n_part == 0:
-            return empty
-
-        assert n_vert == n_part, (
-            f"vertices ({n_vert}) and particles ({n_part}) mismatch in {filepath}"
+    # ---- Load ----
+    run_list: list[RunData] = []
+    for rd_path in run_dirs:
+        print(f"Loading {rd_path.name} ...", flush=True)
+        rd = load_run(rd_path)
+        run_list.append(rd)
+        print(
+            f"  {rd.n_files} files | "
+            f"{rd.nc_evtid.size:,} NCs | "
+            f"{rd.muon_nc_evtids.size:,} NC muons | "
+            f"{rd.ge77_evtids.size:,} Ge77 muons | "
+            f"{rd.n_muons_total:,} total muons"
         )
 
-        evtid = vgrp["evtid"]["pages"][:]
-        x = vgrp["xloc_in_m"]["pages"][:]
-        y = vgrp["yloc_in_m"]["pages"][:]
-        z = vgrp["zloc_in_m"]["pages"][:]
-        ekin = pgrp["ekin_in_MeV"]["pages"][:]
-        px = pgrp["px_in_MeV"]["pages"][:]
-        py = pgrp["py_in_MeV"]["pages"][:]
-        pz = pgrp["pz_in_MeV"]["pages"][:]
+    # ---- Aggregate ----
+    print("\nAggregating ...", flush=True)
+    agg = aggregate_runs(run_list)
+    print(
+        f"Total: {agg['n_muons_total']:,} muons | "
+        f"{agg['n_nc_total']:,} NCs | "
+        f"{agg['n_muons_ge77']:,} Ge77 muons"
+    )
 
-    return evtid, x, y, z, ekin, px, py, pz
+    # ---- Plots ----
+    print("\n--- Standard muon distributions ---")
+    plot_muon_distributions(agg, out_dir)
+    plot_ge77_fraction_bar(agg, out_dir)
 
+    print("\n--- NC distributions ---")
+    plot_nc_count_per_muon(agg, out_dir)
+    plot_ge77_per_ge77muon(agg, out_dir)
+    plot_nc_times(agg, out_dir)
+    plot_nc_positions(agg, out_dir)
 
-def collect_muon_data_nc(run_dirs: list[Path]) -> dict:
-    """
-    Collect all muon vertex/particle data across runs,
-    and determine which evtids produce any NC (regardless of Ge77).
-    """
-    all_x, all_y, all_z = [], [], []
-    all_ekin, all_px, all_py, all_pz = [], [], [], []
-    all_has_nc = []
+    print("\n--- 3-D muon position scatter ---")
+    plot_muon_3d_scatters(agg, out_dir)
 
-    for run_dir in run_dirs:
-        hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
-        if not hdf5_files:
-            continue
+    print("\n--- Outlier analysis ---")
+    outlier_info = analyze_outliers(agg, run_list, out_dir)
 
-        # --- Collect NC evtids for this run (any NC, deduplicated) ---
-        nc_evtids_list = []
-        nc_trackid_list = []
-        for fp in hdf5_files:
-            try:
-                with h5py.File(fp, "r") as f:
-                    if NC_GROUP not in f:
-                        continue
-                    grp = f[NC_GROUP]
-                    if int(grp["entries"][()]) == 0:
-                        continue
-                    nc_evtids_list.append(grp["evtid"]["pages"][:])
-                    nc_trackid_list.append(grp["nC_track_id"]["pages"][:])
-            except Exception:
-                continue
+    print("\n--- Convergence analysis ---")
+    recommendations = convergence_analysis(run_list, out_dir)
 
-        nc_muon_evtids = set()
-        if nc_evtids_list:
-            nc_evtid = np.concatenate(nc_evtids_list)
-            nc_tid = np.concatenate(nc_trackid_list)
+    print("\n--- Statistics ---")
+    write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
 
-            # Deduplicate on (evtid, nc_track_id)
-            pair_keys = np.stack([nc_evtid, nc_tid], axis=1)
-            unique_pairs = np.unique(pair_keys, axis=0)
-            nc_muon_evtids = set(unique_pairs[:, 0].tolist())
-
-        # --- Collect vertex/particle data for this run ---
-        run_evtid_set = set()
-        for fp in hdf5_files:
-            try:
-                evtid, x, y, z, ekin, px, py, pz = read_muon_data_file_nc(fp)
-            except Exception as e:
-                print(f"  ERROR reading muon data from {fp.name}: {e}")
-                continue
-
-            if evtid.size == 0:
-                continue
-
-            # Deduplicate: first occurrence per evtid within run
-            new_mask = np.array([eid not in run_evtid_set for eid in evtid])
-            run_evtid_set.update(evtid[new_mask].tolist())
-
-            evtid = evtid[new_mask]
-            x, y, z = x[new_mask], y[new_mask], z[new_mask]
-            ekin = ekin[new_mask]
-            px, py, pz = px[new_mask], py[new_mask], pz[new_mask]
-
-            has_nc = np.array([eid in nc_muon_evtids for eid in evtid], dtype=bool)
-
-            all_x.append(x)
-            all_y.append(y)
-            all_z.append(z)
-            all_ekin.append(ekin)
-            all_px.append(px)
-            all_py.append(py)
-            all_pz.append(pz)
-            all_has_nc.append(has_nc)
-
-    return {
-        "x": np.concatenate(all_x),
-        "y": np.concatenate(all_y),
-        "z": np.concatenate(all_z),
-        "ekin": np.concatenate(all_ekin),
-        "px": np.concatenate(all_px),
-        "py": np.concatenate(all_py),
-        "pz": np.concatenate(all_pz),
-        "has_nc": np.concatenate(all_has_nc),
-    }
+    print("\nDone.")
 
 
-def plot_muon_properties_nc(data: dict, base: Path) -> None:
-    """Create muon property comparison plots: NC-producing vs no-NC."""
-    has_nc = data["has_nc"]
-    no_nc = ~has_nc
-
-    ekin = data["ekin"]
-    px, py, pz = data["px"], data["py"], data["pz"]
-    p_mag = np.sqrt(px**2 + py**2 + pz**2)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        cos_theta = np.where(p_mag > 0, pz / p_mag, 0.0)
-    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-    theta_deg = np.degrees(np.arccos(cos_theta))
-
-    phi_deg = np.degrees(np.arctan2(py, px))
-
-    n_nc = int(has_nc.sum())
-    n_no_nc = int(no_nc.sum())
-    print(f"\nMuon properties: {n_nc} NC-producing, {n_no_nc} non-NC")
-
-    # --- 1. Kinetic energy histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ekin_nc = ekin[has_nc & (ekin > 0)]
-    ekin_no = ekin[no_nc & (ekin > 0)]
-
-    if ekin_nc.size > 0 and ekin_no.size > 0:
-        vmin = max(1, int(min(ekin_nc.min(), ekin_no.min())))
-        vmax = int(max(ekin_nc.max(), ekin_no.max()))
-        bins = make_log_bins(vmin, vmax)
-
-        w_no = np.ones(len(ekin_no)) / len(ekin_no)
-        w_nc = np.ones(len(ekin_nc)) / len(ekin_nc)
-        ax.hist(ekin_no, bins=bins, weights=w_no, edgecolor="black",
-                linewidth=0.3, color="#4C72B0", alpha=0.7,
-                label=f"No NC (N={len(ekin_no)})")
-        ax.hist(ekin_nc, bins=bins, weights=w_nc, edgecolor="black",
-                linewidth=0.3, color="#C44E52", alpha=0.7,
-                label=f"NC-producing (N={len(ekin_nc)})")
-
-        ax.set_xlabel("Muon kinetic energy [MeV]", fontsize=13)
-        ax.set_ylabel("Fraction of muons", fontsize=13)
-        ax.set_title("Muon kinetic energy: NC-producing vs no-NC", fontsize=14)
-        ax.set_xscale("log")
-        ax.legend(fontsize=11)
-        ax.tick_params(labelsize=11)
-
-        out_path = base / "muon_energy_nc_comparison.png"
-        fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        print(f"Energy histogram saved to: {out_path}")
-    plt.close(fig)
-
-    # --- 2. Zenith angle histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    theta_nc = theta_deg[has_nc]
-    theta_no = theta_deg[no_nc]
-
-    bins_angle = np.linspace(0, 180, 91)
-    w_no = np.ones(len(theta_no)) / len(theta_no)
-    w_nc = np.ones(len(theta_nc)) / len(theta_nc)
-    ax.hist(theta_no, bins=bins_angle, weights=w_no, edgecolor="black",
-            linewidth=0.3, color="#4C72B0", alpha=0.7,
-            label=f"No NC (N={len(theta_no)})")
-    ax.hist(theta_nc, bins=bins_angle, weights=w_nc, edgecolor="black",
-            linewidth=0.3, color="#C44E52", alpha=0.7,
-            label=f"NC-producing (N={len(theta_nc)})")
-
-    ax.set_xlabel("Zenith angle θ [deg]", fontsize=13)
-    ax.set_ylabel("Fraction of muons", fontsize=13)
-    ax.set_title("Muon zenith angle: NC-producing vs no-NC", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-
-    out_path = base / "muon_zenith_nc_comparison.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Zenith histogram saved to: {out_path}")
-
-    # --- 3. Azimuth angle histogram ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    phi_nc = phi_deg[has_nc]
-    phi_no = phi_deg[no_nc]
-
-    bins_phi = np.linspace(-180, 180, 91)
-    w_no = np.ones(len(phi_no)) / len(phi_no)
-    w_nc = np.ones(len(phi_nc)) / len(phi_nc)
-    ax.hist(phi_no, bins=bins_phi, weights=w_no, edgecolor="black",
-            linewidth=0.3, color="#4C72B0", alpha=0.7,
-            label=f"No NC (N={len(phi_no)})")
-    ax.hist(phi_nc, bins=bins_phi, weights=w_nc, edgecolor="black",
-            linewidth=0.3, color="#C44E52", alpha=0.7,
-            label=f"NC-producing (N={len(phi_nc)})")
-
-    ax.set_xlabel("Azimuth angle φ [deg]", fontsize=13)
-    ax.set_ylabel("Fraction of muons", fontsize=13)
-    ax.set_title("Muon azimuth angle: NC-producing vs no-NC", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-
-    out_path = base / "muon_azimuth_nc_comparison.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Azimuth histogram saved to: {out_path}")
-
-    # --- 4. 3D scatter of NC-producing muon positions with momentum arrows ---
-    fig = plt.figure(figsize=(12, 10))
-    ax3d = fig.add_subplot(111, projection="3d")
-
-    x_nc = data["x"][has_nc] * 1000
-    y_nc = data["y"][has_nc] * 1000
-    z_nc = data["z"][has_nc] * 1000
-    px_nc = px[has_nc]
-    py_nc = py[has_nc]
-    pz_nc = pz[has_nc]
-
-    p_mag_nc = np.sqrt(px_nc**2 + py_nc**2 + pz_nc**2)
-    p_mag_nc = np.where(p_mag_nc > 0, p_mag_nc, 1.0)
-    arrow_scale = 500.0
-    dx = px_nc / p_mag_nc * arrow_scale
-    dy = py_nc / p_mag_nc * arrow_scale
-    dz = pz_nc / p_mag_nc * arrow_scale
-
-    ax3d.scatter(x_nc, y_nc, z_nc, c="red", s=10, alpha=0.6,
-                 label=f"NC-producing muon vertex (N={n_nc})")
-
-    for i in range(len(x_nc)):
-        ax3d.plot(
-            [x_nc[i], x_nc[i] + dx[i]],
-            [y_nc[i], y_nc[i] + dy[i]],
-            [z_nc[i], z_nc[i] + dz[i]],
-            color="red", alpha=0.3, linewidth=0.5,
-        )
-
-    # Cylinder: radius=4300mm, z from -5000 to 3900 mm
-    cyl_r = 4300.0
-    cyl_z_min, cyl_z_max = -5000.0, 3900.0
-    theta_cyl = np.linspace(0, 2 * np.pi, 80)
-    z_cyl_arr = np.array([cyl_z_min, cyl_z_max])
-    theta_grid, z_grid = np.meshgrid(theta_cyl, z_cyl_arr)
-    x_cyl = cyl_r * np.cos(theta_grid)
-    y_cyl = cyl_r * np.sin(theta_grid)
-
-    ax3d.plot_surface(x_cyl, y_cyl, z_grid, alpha=0.08, color="gray")
-
-    circle_theta = np.linspace(0, 2 * np.pi, 100)
-    cx = cyl_r * np.cos(circle_theta)
-    cy = cyl_r * np.sin(circle_theta)
-    ax3d.plot(cx, cy, cyl_z_min, color="gray", linewidth=0.8, alpha=0.5)
-    ax3d.plot(cx, cy, cyl_z_max, color="gray", linewidth=0.8, alpha=0.5)
-
-    ax3d.set_xlabel("X [mm]", fontsize=11)
-    ax3d.set_ylabel("Y [mm]", fontsize=11)
-    ax3d.set_zlabel("Z [mm]", fontsize=11)
-    ax3d.set_title(f"NC-producing muon vertices (N={n_nc})", fontsize=14)
-    ax3d.legend(fontsize=10)
-
-    out_path = base / "muon_nc_3d_positions.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"3D plot saved to: {out_path}")
-
-
-# --- Run ---
-base = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCsSSD")
-run_dirs = sorted(base.glob("run_0*"))
-
-print(f"Collecting muon vertex/particle data from {len(run_dirs)} runs...")
-muon_data_nc = collect_muon_data_nc(run_dirs)
-plot_muon_properties_nc(muon_data_nc, base)
-
+if __name__ == "__main__":
+    main()
