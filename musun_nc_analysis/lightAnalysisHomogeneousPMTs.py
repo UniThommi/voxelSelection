@@ -235,22 +235,25 @@ def load_light_run(
         if evtid_t.size == 0:
             continue
 
-        # ---- Filter 3: NC match (must exist in sim 1) -----------------------
+        # ---- Filter 3: NC match (every photon must exist in sim 1) ----------
         match_mask = np.fromiter(
             ((int(e), int(t)) in valid_nc_set
              for e, t in zip(evtid_t.tolist(), nc_tid_t.tolist())),
             dtype=bool, count=len(evtid_t),
         )
+        n_unmatched = int((~match_mask).sum())
+        if n_unmatched > 0:
+            raise RuntimeError(
+                f"{n_unmatched} photon(s) in {fp} passed PMT mask and 200 ns cut "
+                "but have no matching (evtid, nC_track_id) in sim 1. "
+                "Sim 2 should only contain NC events that exist in sim 1."
+            )
         filter_counts["n_after_nc_match"] += int(match_mask.sum())
 
         # Count photons per NC using Counter (batch, no per-photon loop)
-        c = Counter(zip(
-            evtid_t[match_mask].tolist(),
-            nc_tid_t[match_mask].tolist(),
-        ))
+        c = Counter(zip(evtid_t.tolist(), nc_tid_t.tolist()))
         for key, cnt in c.items():
-            if key in nc_counter:
-                nc_counter[key] += cnt
+            nc_counter[key] += cnt
 
     # Build output arrays — one entry per sim 1 NC (preserves 0-photon NCs)
     nc_keys_list = list(nc_ge77.keys())
