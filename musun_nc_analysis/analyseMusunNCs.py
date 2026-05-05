@@ -1206,7 +1206,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--output-path",
-        default=None,
+        default=DEFAULT_DATA_PATH,
         help="Base output directory.  A 'musun_nc_analysis/' sub-directory is "
              "created inside it.  Defaults to --data-path.",
     )
