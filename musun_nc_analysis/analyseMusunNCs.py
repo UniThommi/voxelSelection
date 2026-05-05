@@ -23,6 +23,7 @@ from pathlib import Path
 import h5py
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -980,6 +981,228 @@ def analyze_outliers(agg: dict, run_list: list[RunData], out_dir: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Outlier muon fingerprint analysis
+# ---------------------------------------------------------------------------
+def _muon_fingerprint(rd: RunData, evtid: int) -> tuple[float, ...] | None:
+    """Return (ekin, px, py, pz, x, y, z) for evtid, or None if not found.
+
+    muon_evtid is sorted (np.unique in load_run), so searchsorted is O(log n).
+    """
+    idx = int(np.searchsorted(rd.muon_evtid, evtid))
+    if idx >= len(rd.muon_evtid) or rd.muon_evtid[idx] != evtid:
+        return None
+    return (
+        float(rd.muon_ekin_mev[idx]),
+        float(rd.muon_px_mev[idx]),
+        float(rd.muon_py_mev[idx]),
+        float(rd.muon_pz_mev[idx]),
+        float(rd.muon_x_m[idx]),
+        float(rd.muon_y_m[idx]),
+        float(rd.muon_z_m[idx]),
+    )
+
+
+def _fp_rounded(fp: tuple[float, ...], sigfigs: int = 5) -> tuple[float, ...]:
+    """Round each component of a fingerprint to sigfigs significant figures."""
+    out: list[float] = []
+    for v in fp:
+        if v == 0.0:
+            out.append(0.0)
+        else:
+            mag = 10 ** (sigfigs - 1 - int(np.floor(np.log10(abs(v)))))
+            out.append(round(v * mag) / mag)
+    return tuple(out)
+
+
+def analyze_repeated_outlier_muons(
+    run_list: list[RunData],
+    out_dir: Path,
+    top_n: int = 10,
+) -> None:
+    """Check whether the top-N highest-NC muons repeat within or across runs.
+
+    Within each run: scans the top_n*10 outlier muons for pairs of different
+    evtids sharing the same kinematic fingerprint — a MUSUN trajectory replay.
+
+    Across runs: compares the top-N fingerprints from every run and counts
+    in how many runs each fingerprint appears, using both exact float equality
+    and a 5-significant-figure tolerance.
+
+    Produces one PNG heatmap: rows = unique fingerprints (sorted by max NC
+    count), columns = runs, colour = NC count (log scale), grey = absent.
+    """
+    n_runs = len(run_list)
+    if n_runs == 0:
+        return
+
+    # ------------------------------------------------------------------ #
+    # 1. Collect top-N fingerprints per run                               #
+    # ------------------------------------------------------------------ #
+    # run_top[i] = list of (nc_count, fingerprint) sorted desc by nc_count
+    run_top: list[list[tuple[int, tuple[float, ...]]]] = []
+
+    for rd in run_list:
+        if rd.nc_counts.size == 0:
+            run_top.append([])
+            continue
+        n = min(top_n, len(rd.nc_counts))
+        top_idx = np.argsort(rd.nc_counts)[-n:][::-1]
+        entries: list[tuple[int, tuple[float, ...]]] = []
+        for i in top_idx:
+            evtid = int(rd.muon_nc_evtids[i])
+            nc_count = int(rd.nc_counts[i])
+            fp = _muon_fingerprint(rd, evtid)
+            if fp is not None:
+                entries.append((nc_count, fp))
+        run_top.append(entries)
+
+    # ------------------------------------------------------------------ #
+    # 2. Within-run duplicate check                                       #
+    # ------------------------------------------------------------------ #
+    # Among the top_n*10 NC-producing muons in each run, look for two
+    # different evtids that share the same rounded fingerprint.
+    print(f"\n  Within-run fingerprint check (top-{top_n * 10} NC muons per run):")
+    any_within = False
+    for rd in run_list:
+        if rd.nc_counts.size == 0:
+            continue
+        n_check = min(top_n * 10, len(rd.nc_counts))
+        check_idx = np.argsort(rd.nc_counts)[-n_check:]
+
+        fp_seen: dict[tuple, list[int]] = {}
+        for i in check_idx:
+            evtid = int(rd.muon_nc_evtids[i])
+            fp = _muon_fingerprint(rd, evtid)
+            if fp is None:
+                continue
+            fp_r = _fp_rounded(fp)
+            fp_seen.setdefault(fp_r, []).append(evtid)
+
+        dups = {fp: evtids for fp, evtids in fp_seen.items() if len(evtids) > 1}
+        if dups:
+            any_within = True
+            print(f"    {rd.run_name}: {len(dups)} repeated trajectory(ies) "
+                  f"among top-{n_check}")
+            for fp_r, evtids in list(dups.items())[:3]:
+                print(f"      evtids {evtids[:6]}  ekin={fp_r[0]:.5g} MeV  "
+                      f"x={fp_r[4]:.4g} m")
+        else:
+            print(f"    {rd.run_name}: no duplicates among top-{n_check}")
+
+    if not any_within:
+        print("    → No within-run trajectory replays detected.")
+
+    # ------------------------------------------------------------------ #
+    # 3. Across-run fingerprint matching                                  #
+    # ------------------------------------------------------------------ #
+    # fp_exact[fp]   = {run_idx: nc_count}
+    # fp_tol[fp_r]   = {run_idx: nc_count}  (5 sig-fig rounded keys)
+    fp_exact: dict[tuple, dict[int, int]] = {}
+    fp_tol:   dict[tuple, dict[int, int]] = {}
+
+    for run_idx, entries in enumerate(run_top):
+        for nc_count, fp in entries:
+            d = fp_exact.setdefault(fp, {})
+            d[run_idx] = max(d.get(run_idx, 0), nc_count)
+
+            fp_r = _fp_rounded(fp)
+            d2 = fp_tol.setdefault(fp_r, {})
+            d2[run_idx] = max(d2.get(run_idx, 0), nc_count)
+
+    multi_exact = sum(1 for d in fp_exact.values() if len(d) > 1)
+    multi_tol   = sum(1 for d in fp_tol.values()   if len(d) > 1)
+    n_exact = len(fp_exact)
+    n_tol   = len(fp_tol)
+
+    print(f"\n  Across-run match (exact):          "
+          f"{multi_exact}/{n_exact} fingerprints in >1 run")
+    print(f"  Across-run match (5 sig-fig tol.): "
+          f"{multi_tol}/{n_tol} fingerprints in >1 run")
+
+    for fp, run_nc in sorted(fp_exact.items(),
+                             key=lambda kv: max(kv[1].values()), reverse=True):
+        if len(run_nc) > 1:
+            runs_str = ", ".join(
+                f"{run_list[ri].run_name}(NC={nc:,})"
+                for ri, nc in sorted(run_nc.items())
+            )
+            print(f"    ekin={fp[0]:.5g} MeV  x={fp[4]:.4g} m  → {runs_str}")
+
+    # ------------------------------------------------------------------ #
+    # 4. Heatmap                                                          #
+    # ------------------------------------------------------------------ #
+    sorted_fps = sorted(
+        fp_exact.keys(),
+        key=lambda fp: max(fp_exact[fp].values()),
+        reverse=True,
+    )
+    n_fps = len(sorted_fps)
+    if n_fps == 0:
+        return
+
+    nc_matrix = np.full((n_fps, n_runs), np.nan)
+    for row, fp in enumerate(sorted_fps):
+        for col, nc_count in fp_exact[fp].items():
+            nc_matrix[row, col] = float(nc_count)
+
+    run_names = [rd.run_name for rd in run_list]
+    row_labels = []
+    for fp in sorted_fps:
+        max_nc = max(fp_exact[fp].values())
+        n_present = len(fp_exact[fp])
+        row_labels.append(
+            f"E={fp[0] / 1000:.2f} TeV  "
+            f"p=({fp[1]:.0f},{fp[2]:.0f},{fp[3]:.0f}) MeV  "
+            f"[{n_present}/{n_runs}]  max NC={max_nc:,}"
+        )
+
+    valid = nc_matrix[~np.isnan(nc_matrix)]
+    vmin = float(valid.min()) if valid.size > 0 else 1.0
+    vmax = float(valid.max()) if valid.size > 0 else 2.0
+    norm = mcolors.LogNorm(vmin=max(vmin, 1.0), vmax=max(vmax, 2.0))
+    text_thresh = np.exp(0.5 * (np.log(max(vmin, 1.0)) + np.log(max(vmax, 1.0))))
+
+    fig_h = max(5.0, n_fps * 0.75 + 3.0)
+    fig_w = max(9.0, n_runs * 1.5 + 5.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    cmap = plt.cm.plasma.copy()
+    cmap.set_bad("#d0d0d0")
+    im = ax.imshow(nc_matrix, aspect="auto", cmap=cmap, norm=norm)
+    plt.colorbar(im, ax=ax, label="NC count (log scale)", pad=0.01)
+
+    ax.set_xticks(range(n_runs))
+    ax.set_xticklabels(run_names, rotation=45, ha="right", fontsize=9)
+    ax.set_yticks(range(n_fps))
+    ax.set_yticklabels(row_labels, fontsize=7)
+
+    for row in range(n_fps):
+        for col in range(n_runs):
+            v = nc_matrix[row, col]
+            if not np.isnan(v):
+                txt_color = "white" if v > text_thresh else "black"
+                ax.text(col, row, f"{int(v):,}",
+                        ha="center", va="center", fontsize=7, color=txt_color)
+            else:
+                ax.text(col, row, "—",
+                        ha="center", va="center", fontsize=8, color="#aaaaaa")
+
+    ax.set_title(
+        f"Top-{top_n} NC muons per run — kinematic fingerprint matching\n"
+        f"Exact: {multi_exact}/{n_exact} fingerprints in >1 run  |  "
+        f"Tolerance (5 s.f.): {multi_tol}/{n_tol} in >1 run",
+        fontsize=12,
+    )
+    ax.set_xlabel("Simulation run", fontsize=11)
+    ax.set_ylabel(
+        f"Muon fingerprint — top-{top_n} per run, sorted by max NC count",
+        fontsize=10,
+    )
+    plt.tight_layout()
+    _save(fig, out_dir / "outlier_muon_fingerprint_heatmap.png")
+
+
+# ---------------------------------------------------------------------------
 # Convergence analysis
 # ---------------------------------------------------------------------------
 def _transform(data: np.ndarray, obs: str) -> np.ndarray:
@@ -1352,6 +1575,10 @@ def main() -> None:
     print("\n--- Outlier analysis ---")
     outlier_info = analyze_outliers(agg, run_list, out_dir)
     _log_resources("outlier analysis done", t_main)
+
+    print("\n--- Outlier muon fingerprint analysis ---")
+    analyze_repeated_outlier_muons(run_list, out_dir)
+    _log_resources("fingerprint analysis done", t_main)
 
     print("\n--- Convergence analysis ---")
     recommendations = convergence_analysis(run_list, out_dir)
