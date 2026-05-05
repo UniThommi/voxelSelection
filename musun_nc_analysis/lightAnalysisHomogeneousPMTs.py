@@ -731,7 +731,7 @@ def main() -> None:
                         help="Sim 2 root directory (default: %(default)s)")
     parser.add_argument("--sim1-path", default=DEFAULT_SIM1_PATH,
                         help="Sim 1 (MUSUN NC) root directory (default: %(default)s)")
-    parser.add_argument("--output-path", default=None,
+    parser.add_argument("--output-path", default=DEFAULT_SIM2_PATH,
                         help="Output directory (default: <data-path>/light_analysis)")
     parser.add_argument("--runs", type=int, default=NUM_RUNS_DEFAULT,
                         help="Max number of runs to process (default: %(default)s)")
