@@ -24,6 +24,7 @@ import h5py
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 from scipy.stats import ks_2samp, wasserstein_distance
 
@@ -555,11 +556,6 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
         xl = obs["xlabel"]
         title = obs["title"]
 
-        _single_hist(d_all, COLORS["blue"], f"{title} — all muons",
-                     xl, out_dir / f"{base}_all.png", bins, log_x=lx)
-        _single_hist(d[obs["mask_ge77"]], COLORS["red"],
-                     f"{title} — Ge77-producing muons",
-                     xl, out_dir / f"{base}_ge77.png", bins, log_x=lx)
         _comparison_hist(
             d[obs["mask_noge77"]], d[obs["mask_ge77"]],
             "Non-Ge77", "Ge77", COLORS["blue"], COLORS["red"],
@@ -606,39 +602,17 @@ def plot_ge77_fraction_bar(agg: dict, out_dir: Path) -> None:
 # NC count per muon
 # ---------------------------------------------------------------------------
 def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
-    """NC count per muon: separate all/Ge77 + comparison overlay."""
+    """NC count per muon: comparison overlay (Ge77 vs non-Ge77) with log-spaced bins."""
     counts_all = agg["nc_counts"]
     counts_ge77 = agg["nc_counts_ge77mu"]
     counts_noge77 = agg["nc_counts_noge77mu"]
 
     if counts_all.size == 0:
         return
-    bins = make_log_bins(1, int(counts_all.max()))
 
-    for data, color, tag, title in [
-        (counts_all, COLORS["blue"], "all",
-         "NC count per muon — all NC-producing muons"),
-        (counts_ge77, COLORS["red"], "ge77",
-         "NC count per muon — Ge77-producing muons"),
-    ]:
-        if data.size == 0:
-            continue
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(data, bins=bins, color=color, edgecolor="black", linewidth=0.4)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.axvline(data.mean(), color="red", linestyle="--", linewidth=1.2,
-                   label=f"Mean = {data.mean():.2f}")
-        ax.axvline(np.median(data), color="orange", linestyle="--", linewidth=1.2,
-                   label=f"Median = {np.median(data):.0f}")
-        ax.set_xlabel("NC count per muon", fontsize=13)
-        ax.set_ylabel("Number of muons", fontsize=13)
-        ax.set_title(f"{title}  (N = {len(data):,})", fontsize=14)
-        ax.legend(fontsize=11)
-        ax.tick_params(labelsize=11)
-        _save(fig, out_dir / f"nc_count_per_muon_{tag}.png")
+    max_count = int(counts_all.max())
+    bins = np.logspace(0, np.log10(max(max_count, 10)), 50)
 
-    # Comparison overlay
     fig, ax = plt.subplots(figsize=(10, 6))
     for data, label, color in [
         (counts_noge77, "Non-Ge77 NC-producing", COLORS["blue"]),
@@ -650,6 +624,8 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
                 edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.xaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0]))
+    ax.xaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10))
     ax.set_xlabel("NC count per muon", fontsize=13)
     ax.set_ylabel("Number of muons", fontsize=13)
     ax.set_title("NC count per muon: Ge77 vs non-Ge77 NC-producing", fontsize=14)
@@ -662,27 +638,37 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
 # Ge77 NCs per Ge77 muon
 # ---------------------------------------------------------------------------
 def plot_ge77_per_ge77muon(agg: dict, out_dir: Path) -> None:
-    """Histogram: how many Ge77-flagged NCs does each Ge77 muon produce?"""
+    """Bar chart: how many Ge77-flagged NCs does each Ge77 muon produce?"""
     data = agg["ge77_nc_per_mu"]
     if data.size == 0:
         return
-    bins = make_log_bins(1, int(data.max())) if data.max() > 1 else np.array([0.5, 1.5, 2.5])
+
+    x_max = min(int(data.max()), 7)
+    x_vals = np.arange(1, x_max + 1)
+    n_total = len(data)
+    bar_counts = np.array([(data == x).sum() for x in x_vals], dtype=np.int64)
+
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(data, bins=bins, color=COLORS["purple"],
-            edgecolor="black", linewidth=0.4)
-    if data.max() > 1:
-        ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.axvline(data.mean(), color="red", linestyle="--", linewidth=1.2,
-               label=f"Mean = {data.mean():.2f}")
-    ax.axvline(np.median(data), color="orange", linestyle="--", linewidth=1.2,
-               label=f"Median = {np.median(data):.0f}")
+    bars = ax.bar(x_vals, bar_counts, color=COLORS["purple"],
+                  edgecolor="black", linewidth=0.8)
+
+    for bar, cnt in zip(bars, bar_counts):
+        pct = cnt / n_total * 100
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() * 1.015,
+            f"{cnt:,}\n({pct:.1f}%)",
+            ha="center", va="bottom", fontsize=10, rotation=90,
+        )
+
     ax.set_xlabel("Number of Ge77-flagged NCs per Ge77-producing muon", fontsize=13)
     ax.set_ylabel("Number of Ge77-producing muons", fontsize=13)
     ax.set_title(
-        f"Ge77 captures per Ge77-producing muon  (N = {len(data):,})", fontsize=14
+        f"Ge77 captures per Ge77-producing muon  (N = {n_total:,})", fontsize=14
     )
-    ax.legend(fontsize=11)
+    ax.set_xticks(x_vals)
+    ax.set_xlim(0.4, x_max + 0.6)
+    ax.set_ylim(0, max(bar_counts) * 1.55)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "ge77_per_ge77muon.png")
 
@@ -761,41 +747,39 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     if phi.size == 0:
         return
 
-    # ---- 1-D φ ----
+    # ---- 1-D φ: comparison overlay (all NCs vs Ge77-muon NCs) ----
     bins_phi = np.linspace(-180, 180, 73)
-    for mask, tag, title in [
-        (np.ones(phi.size, dtype=bool), "all", "NC azimuthal position — all NCs"),
-        (is_ge77mu, "ge77muons", "NC azimuthal position — NCs of Ge77-producing muons"),
-    ]:
-        d = phi[mask]
-        if d.size == 0:
-            continue
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(d, bins=bins_phi, color=COLORS["blue"],
-                edgecolor="black", linewidth=0.3)
-        ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
-        ax.set_ylabel("Number of NCs", fontsize=13)
-        ax.set_title(f"{title}  (N = {len(d):,})", fontsize=14)
-        ax.tick_params(labelsize=11)
-        _save(fig, out_dir / f"nc_phi_1d_{tag}.png")
+    phi_ge77mu = phi[is_ge77mu]
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(phi, bins=bins_phi, color=COLORS["blue"], alpha=0.7,
+            edgecolor="black", linewidth=0.3, label=f"All NCs (N={phi.size:,})")
+    if phi_ge77mu.size > 0:
+        ax.hist(phi_ge77mu, bins=bins_phi, color=COLORS["red"], alpha=0.7,
+                edgecolor="black", linewidth=0.3,
+                label=f"NCs of Ge77-producing muons (N={phi_ge77mu.size:,})")
+    ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
+    ax.set_ylabel("Number of NCs", fontsize=13)
+    ax.set_title("NC azimuthal position: all NCs vs Ge77-muon NCs", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_phi_1d_comparison.png")
 
-    # ---- 1-D z ----
+    # ---- 1-D z: comparison overlay (all NCs vs Ge77-muon NCs) ----
     bins_z = np.linspace(float(z_mm.min()), float(z_mm.max()), 100)
-    for mask, tag, title in [
-        (np.ones(z_mm.size, dtype=bool), "all", "NC z position — all NCs"),
-        (is_ge77mu, "ge77muons", "NC z position — NCs of Ge77-producing muons"),
-    ]:
-        d = z_mm[mask]
-        if d.size == 0:
-            continue
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(d, bins=bins_z, color=COLORS["blue"],
-                edgecolor="black", linewidth=0.3)
-        ax.set_xlabel("NC z position [mm]", fontsize=13)
-        ax.set_ylabel("Number of NCs", fontsize=13)
-        ax.set_title(f"{title}  (N = {len(d):,})", fontsize=14)
-        ax.tick_params(labelsize=11)
-        _save(fig, out_dir / f"nc_z_1d_{tag}.png")
+    z_ge77mu = z_mm[is_ge77mu]
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(z_mm, bins=bins_z, color=COLORS["blue"], alpha=0.7,
+            edgecolor="black", linewidth=0.3, label=f"All NCs (N={z_mm.size:,})")
+    if z_ge77mu.size > 0:
+        ax.hist(z_ge77mu, bins=bins_z, color=COLORS["red"], alpha=0.7,
+                edgecolor="black", linewidth=0.3,
+                label=f"NCs of Ge77-producing muons (N={z_ge77mu.size:,})")
+    ax.set_xlabel("NC z position [mm]", fontsize=13)
+    ax.set_ylabel("Number of NCs", fontsize=13)
+    ax.set_title("NC z position: all NCs vs Ge77-muon NCs", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_z_1d_comparison.png")
 
     # ---- 2-D φ vs z ----
     for mask, tag, title in [
@@ -1364,10 +1348,6 @@ def main() -> None:
     plot_nc_times(agg, out_dir)
     plot_nc_positions(agg, out_dir)
     _log_resources("NC distribution plots done", t_main)
-
-    print("\n--- 3-D muon position scatter ---")
-    plot_muon_3d_scatters(agg, out_dir)
-    _log_resources("3D scatter plots done", t_main)
 
     print("\n--- Outlier analysis ---")
     outlier_info = analyze_outliers(agg, run_list, out_dir)
