@@ -13,8 +13,10 @@ Outputs (all to <output_path>/musun_nc_analysis/):
 from __future__ import annotations
 
 import argparse
+import gc
 import random
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import ks_2samp, wasserstein_distance
+
+try:
+    import psutil as _psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,6 +56,23 @@ COLORS = {
     "orange": "#DD8452",
     "purple": "#8172B2",
 }
+
+_T0_GLOBAL = time.perf_counter()
+
+
+def _log_resources(label: str, t_ref: float | None = None) -> float:
+    """Print wall-clock time and RSS; return current time."""
+    now = time.perf_counter()
+    elapsed = now - (t_ref if t_ref is not None else _T0_GLOBAL)
+    if _HAS_PSUTIL:
+        import os
+        rss_gb = _psutil.Process(os.getpid()).memory_info().rss / 1e9
+        print(f"  [RESOURCE] {label:50s}  "
+              f"elapsed={elapsed:7.1f}s  RSS={rss_gb:.2f} GB", flush=True)
+    else:
+        print(f"  [RESOURCE] {label:50s}  "
+              f"elapsed={elapsed:7.1f}s  (no psutil)", flush=True)
+    return now
 
 
 # ---------------------------------------------------------------------------
@@ -973,22 +998,62 @@ def analyze_outliers(agg: dict, run_list: list[RunData], out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Convergence analysis
 # ---------------------------------------------------------------------------
-def _w1_ks(
-    sample: np.ndarray, reference: np.ndarray
-) -> tuple[float, float]:
-    """Return (W1, KS) distance of sample vs reference."""
-    if sample.size == 0 or reference.size == 0:
-        return float("nan"), float("nan")
-    w1 = float(wasserstein_distance(sample, reference))
-    ks = float(ks_2samp(sample, reference).statistic)
-    return w1, ks
-
-
 def _transform(data: np.ndarray, obs: str) -> np.ndarray:
     """Apply observable-specific transform before computing distances."""
     if obs in ("nc_count", "energy"):
         return np.log(data + 1.0)
     return data   # zenith and azimuth: raw degrees
+
+
+def _w1_ks_sorted(sorted_p: np.ndarray, sorted_q: np.ndarray) -> tuple[float, float]:
+    """W1 and KS between two *pre-sorted* empirical distributions.
+
+    Memory layout (peak = 3 × (n+m) × 8 bytes, vs scipy's ~4×):
+      1. all_vals  — merged sorted union, freed after np.diff
+      2. deltas    — interval widths (nm-1,)
+      3. cdf_diff  — |F_p - F_q| at each breakpoint (nm-1,)
+    """
+    n, m = len(sorted_p), len(sorted_q)
+    if n == 0 or m == 0:
+        return float("nan"), float("nan")
+
+    nm = n + m
+    all_vals = np.empty(nm, dtype=np.float64)
+    all_vals[:n] = sorted_p
+    all_vals[n:] = sorted_q
+    all_vals.sort(kind="mergesort")   # O(nm): fast for two sorted halves
+
+    deltas = np.diff(all_vals)        # (nm-1,) — new allocation
+    bpts = all_vals[:-1]              # view, no copy
+
+    # |F_p(x) - F_q(x)| at each left-breakpoint
+    cdf_diff = (np.searchsorted(sorted_p, bpts, side="right") / n
+                - np.searchsorted(sorted_q, bpts, side="right") / m)
+    del all_vals                      # free nm floats before taking abs + dot
+    np.abs(cdf_diff, out=cdf_diff)
+
+    w1 = float(np.dot(cdf_diff, deltas))
+    ks = float(cdf_diff.max())
+    del cdf_diff, deltas
+    return w1, ks
+
+
+def _merge_sorted_runs(sorted_runs: list[np.ndarray],
+                       indices: list[int]) -> np.ndarray:
+    """Concatenate pre-sorted per-run arrays and mergesort the result.
+
+    Using numpy's 'mergesort' on k pre-sorted blocks of total size N is
+    O(N log k), much faster than O(N log N) for unsorted data.
+    """
+    total = sum(len(sorted_runs[i]) for i in indices)
+    buf = np.empty(total, dtype=np.float64)
+    off = 0
+    for i in indices:
+        n_i = len(sorted_runs[i])
+        buf[off:off + n_i] = sorted_runs[i]
+        off += n_i
+    buf.sort(kind="mergesort")
+    return buf
 
 
 def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, int]:
@@ -998,6 +1063,12 @@ def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, in
     Two strategies:
     - Deterministic: first k runs in order
     - Random subsets: N_PERMUTATIONS draws of k runs
+
+    Optimisations vs naive approach:
+    - Each run's data is sorted once per observable (reused across all permutations).
+    - W1/KS uses _w1_ks_sorted: avoids scipy per-call overhead, frees the merged
+      array immediately after np.diff.
+    - sorted_runs and sorted_ref are explicitly freed between observables.
 
     Returns recommended minimum k per observable.
     """
@@ -1009,8 +1080,7 @@ def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, in
     rng = random.Random(RANDOM_SEED)
     run_indices = list(range(n_runs))
 
-    # Collect per-run arrays for each observable
-    def get_obs(rd: RunData, obs: str) -> np.ndarray:
+    def get_raw(rd: RunData, obs: str) -> np.ndarray:
         if obs == "nc_count":
             return rd.nc_counts
         if obs == "zenith":
@@ -1023,50 +1093,64 @@ def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, in
 
     observables = [
         ("nc_count", "log(NC count + 1)", "NC count per muon"),
-        ("zenith",   "Zenith [°]",          "Muon zenith"),
-        ("azimuth",  "Azimuth [°]",          "Muon azimuth"),
-        ("energy",   "log(E_kin [MeV] + 1)", "Muon energy"),
+        ("zenith",   "Zenith [°]",         "Muon zenith"),
+        ("azimuth",  "Azimuth [°]",        "Muon azimuth"),
+        ("energy",   "log(E_kin [MeV]+1)", "Muon energy"),
     ]
 
     recommendations: dict[str, int] = {}
+    t_conv = _log_resources("convergence start")
 
     for obs_key, obs_xlabel, obs_title in observables:
-        print(f"  Convergence: {obs_title} ...", flush=True)
-        full_data = _transform(
-            np.concatenate([get_obs(rd, obs_key) for rd in run_list]), obs_key
-        )
-        if full_data.size == 0:
+        print(f"\n  Convergence: {obs_title} ...", flush=True)
+        t_obs = _log_resources(f"{obs_key}: begin")
+
+        # ---- 1. Sort each run's data once (reused for all permutations) ----
+        sorted_runs: list[np.ndarray] = []
+        for rd in run_list:
+            raw = _transform(get_raw(rd, obs_key), obs_key)
+            sorted_runs.append(np.sort(raw))
+        t_obs = _log_resources(f"{obs_key}: sorted {n_runs} runs", t_obs)
+
+        # ---- 2. Build full reference distribution ----
+        sorted_ref = _merge_sorted_runs(sorted_runs, run_indices)
+        if sorted_ref.size == 0:
+            del sorted_runs, sorted_ref
             continue
+        t_obs = _log_resources(
+            f"{obs_key}: reference built  N={sorted_ref.size:,}", t_obs
+        )
 
         k_vals = list(range(1, n_runs + 1))
 
-        # Deterministic
+        # ---- 3. Deterministic: cumulative first k runs ----
         det_w1, det_ks = [], []
         for k in k_vals:
-            sample = _transform(
-                np.concatenate([get_obs(run_list[i], obs_key) for i in range(k)]),
-                obs_key,
-            )
-            w1, ks = _w1_ks(sample, full_data)
+            sorted_k = _merge_sorted_runs(sorted_runs, list(range(k)))
+            w1, ks = _w1_ks_sorted(sorted_k, sorted_ref)
+            del sorted_k
             det_w1.append(w1)
             det_ks.append(ks)
+        t_obs = _log_resources(f"{obs_key}: deterministic done", t_obs)
 
-        # Random subsets
+        # ---- 4. Random subsets ----
         rand_w1 = np.zeros((n_runs, N_PERMUTATIONS))
         rand_ks = np.zeros((n_runs, N_PERMUTATIONS))
         for perm_i in range(N_PERMUTATIONS):
             shuffled = run_indices.copy()
             rng.shuffle(shuffled)
             for k in k_vals:
-                sample = _transform(
-                    np.concatenate(
-                        [get_obs(run_list[shuffled[i]], obs_key) for i in range(k)]
-                    ),
-                    obs_key,
-                )
-                w1, ks = _w1_ks(sample, full_data)
+                sorted_k = _merge_sorted_runs(sorted_runs, shuffled[:k])
+                w1, ks = _w1_ks_sorted(sorted_k, sorted_ref)
+                del sorted_k
                 rand_w1[k - 1, perm_i] = w1
                 rand_ks[k - 1, perm_i] = ks
+        t_obs = _log_resources(f"{obs_key}: random subsets done", t_obs)
+
+        # ---- 5. Free large arrays before next observable ----
+        del sorted_runs, sorted_ref
+        gc.collect()
+        _log_resources(f"{obs_key}: freed — total conv elapsed", t_conv)
 
         rand_w1_mean = rand_w1.mean(axis=1)
         rand_w1_std = rand_w1.std(axis=1)
@@ -1238,23 +1322,30 @@ def main() -> None:
     print(f"Output dir : {out_dir}")
     print(f"Runs found : {len(run_dirs)}\n")
 
+    t_main = _log_resources("main start")
+
     # ---- Load ----
     run_list: list[RunData] = []
     for rd_path in run_dirs:
         print(f"Loading {rd_path.name} ...", flush=True)
+        t_run = time.perf_counter()
         rd = load_run(rd_path)
         run_list.append(rd)
+        elapsed = time.perf_counter() - t_run
         print(
             f"  {rd.n_files} files | "
             f"{rd.nc_evtid.size:,} NCs | "
             f"{rd.muon_nc_evtids.size:,} NC muons | "
             f"{rd.ge77_evtids.size:,} Ge77 muons | "
-            f"{rd.n_muons_total:,} total muons"
+            f"{rd.n_muons_total:,} total muons | "
+            f"{elapsed:.1f}s"
         )
+    _log_resources("all runs loaded", t_main)
 
     # ---- Aggregate ----
     print("\nAggregating ...", flush=True)
     agg = aggregate_runs(run_list)
+    _log_resources("aggregation done", t_main)
     print(
         f"Total: {agg['n_muons_total']:,} muons | "
         f"{agg['n_nc_total']:,} NCs | "
@@ -1265,24 +1356,30 @@ def main() -> None:
     print("\n--- Standard muon distributions ---")
     plot_muon_distributions(agg, out_dir)
     plot_ge77_fraction_bar(agg, out_dir)
+    _log_resources("muon distribution plots done", t_main)
 
     print("\n--- NC distributions ---")
     plot_nc_count_per_muon(agg, out_dir)
     plot_ge77_per_ge77muon(agg, out_dir)
     plot_nc_times(agg, out_dir)
     plot_nc_positions(agg, out_dir)
+    _log_resources("NC distribution plots done", t_main)
 
     print("\n--- 3-D muon position scatter ---")
     plot_muon_3d_scatters(agg, out_dir)
+    _log_resources("3D scatter plots done", t_main)
 
     print("\n--- Outlier analysis ---")
     outlier_info = analyze_outliers(agg, run_list, out_dir)
+    _log_resources("outlier analysis done", t_main)
 
     print("\n--- Convergence analysis ---")
     recommendations = convergence_analysis(run_list, out_dir)
+    _log_resources("convergence analysis done", t_main)
 
     print("\n--- Statistics ---")
     write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
+    _log_resources("total runtime", t_main)
 
     print("\nDone.")
 
