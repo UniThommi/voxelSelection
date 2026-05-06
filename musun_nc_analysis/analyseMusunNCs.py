@@ -1641,6 +1641,7 @@ def convergence_analysis(
         ylabel: str,
         threshold: float | None,
         rec_k: int | None,
+        w1_at_k1: float | None = None,
     ) -> None:
         ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
                 linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
@@ -1662,6 +1663,14 @@ def convergence_analysis(
         ax.set_xticks(k_vals)
         ax.legend(fontsize=8)
         ax.tick_params(labelsize=9)
+        if w1_at_k1 is not None and w1_at_k1 > 0:
+            ax2 = ax.twinx()
+            y_lo, y_hi = ax.get_ylim()
+            ax2.set_ylim(y_lo / w1_at_k1 * 100.0, y_hi / w1_at_k1 * 100.0)
+            ax2.set_ylabel("% of W₁(k=1)", fontsize=10)
+            ax2.yaxis.set_major_formatter(
+                mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+            ax2.tick_params(labelsize=9)
 
     recommendations: dict[str, int] = {}
     t_conv = _log_resources("convergence start")
@@ -1738,7 +1747,8 @@ def convergence_analysis(
         )
         _draw_panel(axes[0], "W₁  —  Full (all muons)",
                     d_w1, rw1_mean, rw1_std,
-                    f"W₁ ({xlabel})", thr, rec)
+                    f"W₁ ({xlabel})", thr, rec,
+                    w1_at_k1=d_w1[0] if d_w1[0] > 0 else None)
         _draw_panel(axes[1], "KS  —  Full (all muons)",
                     d_ks, rks_mean, rks_std,
                     "KS statistic D", None, None)
@@ -1775,7 +1785,8 @@ def convergence_analysis(
             _draw_panel(axes[row, 0],
                         f"W₁  —  {row_title}",
                         d_w1, rw1_mean, rw1_std,
-                        f"W₁ ({xlabel})", thr, rec)
+                        f"W₁ ({xlabel})", thr, rec,
+                        w1_at_k1=d_w1[0] if d_w1[0] > 0 else None)
             _draw_panel(axes[row, 1],
                         f"KS  —  {row_title}",
                         d_ks, rks_mean, rks_std,
@@ -1839,9 +1850,11 @@ def convergence_analysis(
             (axes[1], "KS statistic", det_ks, rand_ks_mean, rand_ks_std,
              "KS statistic D"),
         ]:
-            thr_v = threshold if metric == "W₁ distance" else None
-            rec_v = rec_k    if metric == "W₁ distance" else None
-            _draw_panel(ax, metric, det_vals, r_mean, r_std, ylabel, thr_v, rec_v)
+            thr_v     = threshold if metric == "W₁ distance" else None
+            rec_v     = rec_k    if metric == "W₁ distance" else None
+            w1_ref    = det_w1[0] if (metric == "W₁ distance" and det_w1[0] > 0) else None
+            _draw_panel(ax, metric, det_vals, r_mean, r_std, ylabel, thr_v, rec_v,
+                        w1_at_k1=w1_ref)
 
         _save(fig, out_dir / f"convergence_{obs_key}.png")
         _log_resources(f"{obs_key}: saved — total conv elapsed", t_conv)

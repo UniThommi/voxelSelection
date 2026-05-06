@@ -652,6 +652,14 @@ def convergence_analysis_light(
             ax.set_xticks(k_vals)
             ax.legend(fontsize=9)
             ax.tick_params(labelsize=10)
+            if metric == "W₁ distance" and w1_at_k1 > 0:
+                ax2 = ax.twinx()
+                y_lo, y_hi = ax.get_ylim()
+                ax2.set_ylim(y_lo / w1_at_k1 * 100.0, y_hi / w1_at_k1 * 100.0)
+                ax2.set_ylabel("% of W₁(k=1)", fontsize=11)
+                ax2.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+                ax2.tick_params(labelsize=10)
         _save(fig, out_dir / f"convergence_{obs_key}.png")
 
     return recommendations
