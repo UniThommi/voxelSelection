@@ -115,6 +115,8 @@ class RunData:
     muon_px_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     muon_py_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     muon_pz_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    # True if the NC occurred inside the water volume
+    nc_is_water: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
 
 
 # ---------------------------------------------------------------------------
@@ -128,13 +130,14 @@ def _pages(grp: h5py.Group, name: str) -> np.ndarray:
 def read_nc_data_file(fp: Path) -> dict[str, np.ndarray]:
     """Return NC fields from one HDF5 file; empty arrays if group absent/empty."""
     empty: dict[str, np.ndarray] = {
-        "evtid": np.array([], dtype=np.int64),
-        "track_id": np.array([], dtype=np.int64),
-        "ge77": np.array([], dtype=np.int32),
-        "time_ns": np.array([], dtype=np.float64),
-        "x_m": np.array([], dtype=np.float64),
-        "y_m": np.array([], dtype=np.float64),
-        "z_m": np.array([], dtype=np.float64),
+        "evtid":       np.array([], dtype=np.int64),
+        "track_id":    np.array([], dtype=np.int64),
+        "ge77":        np.array([], dtype=np.int32),
+        "time_ns":     np.array([], dtype=np.float64),
+        "x_m":         np.array([], dtype=np.float64),
+        "y_m":         np.array([], dtype=np.float64),
+        "z_m":         np.array([], dtype=np.float64),
+        "material_id": np.array([], dtype=np.int32),
     }
     try:
         with h5py.File(fp, "r") as f:
@@ -144,17 +147,34 @@ def read_nc_data_file(fp: Path) -> dict[str, np.ndarray]:
             if int(grp["entries"][()]) == 0:
                 return empty
             return {
-                "evtid": _pages(grp, "evtid").astype(np.int64),
-                "track_id": _pages(grp, "nC_track_id").astype(np.int64),
-                "ge77": _pages(grp, "nC_flag_Ge77").astype(np.int32),
-                "time_ns": _pages(grp, "nC_time_in_ns"),
-                "x_m": _pages(grp, "nC_x_position_in_m"),
-                "y_m": _pages(grp, "nC_y_position_in_m"),
-                "z_m": _pages(grp, "nC_z_position_in_m"),
+                "evtid":       _pages(grp, "evtid").astype(np.int64),
+                "track_id":    _pages(grp, "nC_track_id").astype(np.int64),
+                "ge77":        _pages(grp, "nC_flag_Ge77").astype(np.int32),
+                "time_ns":     _pages(grp, "nC_time_in_ns"),
+                "x_m":         _pages(grp, "nC_x_position_in_m"),
+                "y_m":         _pages(grp, "nC_y_position_in_m"),
+                "z_m":         _pages(grp, "nC_z_position_in_m"),
+                "material_id": _pages(grp, "nC_material_id").astype(np.int32),
             }
     except Exception as exc:
         print(f"  ERROR reading NC data from {fp.name}: {exc}")
         return empty
+
+
+def read_material_map(fp: Path) -> dict[int, str]:
+    """Read material-ID → name mapping from //hit/materials/ in an HDF5 file."""
+    try:
+        with h5py.File(fp, "r") as f:
+            grp = f["hit/materials"]
+            raw_names = grp["materialNames"]["pages"][:]
+            raw_ids   = grp["materialsID"]["pages"][:]
+        return {
+            int(mid): (name.decode() if isinstance(name, bytes) else str(name))
+            for mid, name in zip(raw_ids, raw_names)
+        }
+    except Exception as exc:
+        print(f"  WARNING: could not read material map from {fp.name}: {exc}")
+        return {}
 
 
 def read_muon_data_file(fp: Path) -> dict[str, np.ndarray]:
@@ -246,7 +266,8 @@ def load_run(run_dir: Path) -> RunData:
         return rd
 
     nc_parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
+        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m",
+                        "material_id")
     }
     mu_parts: dict[str, list[np.ndarray]] = {
         k: [] for k in (
@@ -268,13 +289,14 @@ def load_run(run_dir: Path) -> RunData:
 
     # ---- NC deduplication on (evtid, nC_track_id) ----
     if nc_parts["evtid"]:
-        evtid_arr = np.concatenate(nc_parts["evtid"])
-        track_arr = np.concatenate(nc_parts["track_id"])
-        ge77_arr = np.concatenate(nc_parts["ge77"])
-        time_arr = np.concatenate(nc_parts["time_ns"])
-        x_arr = np.concatenate(nc_parts["x_m"])
-        y_arr = np.concatenate(nc_parts["y_m"])
-        z_arr = np.concatenate(nc_parts["z_m"])
+        evtid_arr   = np.concatenate(nc_parts["evtid"])
+        track_arr   = np.concatenate(nc_parts["track_id"])
+        ge77_arr    = np.concatenate(nc_parts["ge77"])
+        time_arr    = np.concatenate(nc_parts["time_ns"])
+        x_arr       = np.concatenate(nc_parts["x_m"])
+        y_arr       = np.concatenate(nc_parts["y_m"])
+        z_arr       = np.concatenate(nc_parts["z_m"])
+        mat_id_arr  = np.concatenate(nc_parts["material_id"])
 
         pair_keys = np.stack([evtid_arr, track_arr], axis=1)
         _, unique_idx, inverse = np.unique(
@@ -284,11 +306,20 @@ def load_run(run_dir: Path) -> RunData:
         unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
         np.maximum.at(unique_ge77, inverse, ge77_arr)
 
-        rd.nc_evtid = evtid_arr[unique_idx]
-        rd.nc_ge77 = unique_ge77
+        rd.nc_evtid   = evtid_arr[unique_idx]
+        rd.nc_ge77    = unique_ge77
         rd.nc_time_ns = time_arr[unique_idx]
         rd.nc_phi_rad = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
-        rd.nc_z_m = z_arr[unique_idx]
+        rd.nc_z_m     = z_arr[unique_idx]
+
+        # Determine water flag: read material map from first file that has it
+        mat_map: dict[int, str] = {}
+        for fp in hdf5_files:
+            mat_map = read_material_map(fp)
+            if mat_map:
+                break
+        water_ids = [k for k, v in mat_map.items() if v == "Water"]
+        rd.nc_is_water = np.isin(mat_id_arr[unique_idx], water_ids)
 
         # Per-muon NC counts
         mu_nc_ids, counts = np.unique(rd.nc_evtid, return_counts=True)
@@ -321,7 +352,7 @@ def load_run(run_dir: Path) -> RunData:
 # ---------------------------------------------------------------------------
 def aggregate_runs(run_list: list[RunData]) -> dict:
     """Combine all runs into flat arrays; add boolean muon flags."""
-    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l = [], [], [], [], []
+    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l, nc_is_water_l = [], [], [], [], [], []
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
     mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
@@ -345,6 +376,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             nc_phi_l.append(rd.nc_phi_rad)
             nc_z_l.append(rd.nc_z_m)
             nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
+            nc_is_water_l.append(rd.nc_is_water)
 
         if rd.nc_counts.size > 0:
             ge77_mu_mask = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
@@ -382,6 +414,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_phi_rad": cat(nc_phi_l, np.float64),
         "nc_z_m": cat(nc_z_l, np.float64),
         "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
+        "nc_is_water":  cat(nc_is_water_l,  bool),
         # Per-muon NC counts
         "nc_counts": cat(nc_counts_all_l, np.int64),
         "nc_counts_ge77mu": cat(nc_counts_ge77mu_l, np.int64),
@@ -495,6 +528,47 @@ def _comparison_hist(
     _save(fig, out_path)
 
 
+def _ratio_plot(
+    d1: np.ndarray, d2: np.ndarray,
+    l1: str, l2: str,
+    bins: np.ndarray,
+    xlabel: str, out_path: Path,
+    log_x: bool = False,
+) -> None:
+    """Two-panel figure: normalised-fraction ratio and raw-count ratio (d2 / d1).
+    Bins where the d1 count is zero are skipped (no marker).
+    """
+    if d1.size == 0 or d2.size == 0:
+        return
+    h1_raw, _ = np.histogram(d1, bins=bins)
+    h2_raw, _ = np.histogram(d2, bins=bins)
+    h1_norm = h1_raw / d1.size
+    h2_norm = h2_raw / d2.size
+    bc = 0.5 * (bins[:-1] + bins[1:])
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f"Ratio  {l2} / {l1}", fontsize=13)
+    for ax, num, den, ylabel, title in [
+        (axes[0], h2_norm, h1_norm,
+         f"({l2} fraction) / ({l1} fraction)", "Normalised-fraction ratio"),
+        (axes[1], h2_raw.astype(float), h1_raw.astype(float),
+         f"({l2} count) / ({l1} count)", "Raw-count ratio"),
+    ]:
+        valid = den > 0
+        ax.plot(bc[valid], num[valid] / den[valid],
+                "o-", color=COLORS["red"], markersize=4, linewidth=1.2)
+        ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="ratio = 1")
+        if log_x:
+            ax.set_xscale("log")
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.set_title(title, fontsize=12)
+        ax.legend(fontsize=10)
+        ax.tick_params(labelsize=10)
+    plt.tight_layout()
+    _save(fig, out_path)
+
+
 def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
     """Azimuth, zenith, energy — 4 variants each."""
     is_ge77 = agg["mu_is_ge77"]
@@ -562,6 +636,11 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             "Non-Ge77", "Ge77", COLORS["blue"], COLORS["red"],
             f"{title}: Ge77 vs non-Ge77", xl,
             out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx,
+        )
+        _ratio_plot(
+            d[obs["mask_noge77"]], d[obs["mask_ge77"]],
+            "Non-Ge77", "Ge77", bins, xl,
+            out_dir / f"{base}_ge77_vs_noge77_ratio.png", log_x=lx,
         )
         _comparison_hist(
             d[obs["mask_nonc"]], d[obs["mask_nc"]],
@@ -633,6 +712,13 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "nc_count_per_muon_comparison.png")
+    _ratio_plot(
+        counts_noge77, counts_ge77,
+        "Non-Ge77 NC-producing", "Ge77-producing", bins,
+        "NC count per muon",
+        out_dir / "nc_count_per_muon_comparison_ratio.png",
+        log_x=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +850,12 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "nc_phi_1d_comparison.png")
+    _ratio_plot(
+        phi, phi_ge77mu,
+        "All NCs", "NCs of Ge77-producing muons", bins_phi,
+        "NC azimuth φ [°]",
+        out_dir / "nc_phi_1d_comparison_ratio.png",
+    )
 
     # ---- 1-D z: comparison overlay (all NCs vs Ge77-muon NCs) ----
     bins_z = np.linspace(float(z_mm.min()), float(z_mm.max()), 100)
@@ -781,6 +873,12 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "nc_z_1d_comparison.png")
+    _ratio_plot(
+        z_mm, z_ge77mu,
+        "All NCs", "NCs of Ge77-producing muons", bins_z,
+        "NC z position [mm]",
+        out_dir / "nc_z_1d_comparison_ratio.png",
+    )
 
     # ---- 2-D φ vs z ----
     for mask, tag, title in [
@@ -869,7 +967,7 @@ def plot_muon_3d_scatters(agg: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Outlier analysis
 # ---------------------------------------------------------------------------
-def analyze_outliers(agg: dict, run_list: list[RunData], out_dir: Path) -> dict:
+def analyze_outliers(agg: dict, out_dir: Path) -> dict:
     """
     Outlier muons = NC count above 99th percentile on log scale.
     threshold = exp(np.percentile(np.log(nc_counts), 99))
@@ -911,61 +1009,9 @@ def analyze_outliers(agg: dict, run_list: list[RunData], out_dir: Path) -> dict:
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "outlier_nc_count.png")
 
-    # ---- Gather outlier NC data from per-run arrays ----
-    outlier_nc_phi, outlier_nc_z, outlier_nc_time = [], [], []
     max_single_count = int(counts[outlier_mask].max()) if n_outliers > 0 else 0
 
-    for rd in run_list:
-        if rd.nc_counts.size == 0:
-            continue
-        out_mu_mask = rd.nc_counts > threshold
-        out_evtids = rd.muon_nc_evtids[out_mu_mask]
-        if out_evtids.size == 0:
-            continue
-        nc_mask = np.isin(rd.nc_evtid, out_evtids)
-        outlier_nc_phi.append(rd.nc_phi_rad[nc_mask])
-        outlier_nc_z.append(rd.nc_z_m[nc_mask])
-        outlier_nc_time.append(rd.nc_time_ns[nc_mask])
-
-    if not outlier_nc_phi:
-        return {"n_outliers": n_outliers, "threshold": threshold,
-                "frac_nc": frac_nc}
-
-    phi_out = np.degrees(np.concatenate(outlier_nc_phi))
-    z_out_mm = np.concatenate(outlier_nc_z) * 1e3
-    t_out = np.concatenate(outlier_nc_time)
-
-    # ---- Plot 2: Outlier NC positions φ vs z ----
-    fig, ax = plt.subplots(figsize=(10, 7))
-    h = ax.hist2d(phi_out, z_out_mm, bins=[72, 100], cmap="hot")
-    plt.colorbar(h[3], ax=ax, label="Number of NCs from outlier muons")
-    ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
-    ax.set_ylabel("NC z position [mm]", fontsize=13)
-    ax.set_title(
-        f"NC positions from outlier muons  (N_NCs = {len(phi_out):,})", fontsize=14
-    )
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "outlier_nc_positions.png")
-
-    # ---- Plot 3: Outlier NC time ----
-    t_pos = t_out[t_out > 0]
-    if t_pos.size > 0:
-        bins_t = make_log_bins(max(1.0, float(t_pos.min())), float(t_pos.max()))
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(t_pos, bins=bins_t, color=COLORS["orange"],
-                edgecolor="black", linewidth=0.3)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("NC capture time [ns]", fontsize=13)
-        ax.set_ylabel("Number of NCs", fontsize=13)
-        ax.set_title(
-            f"NC capture time — outlier muons  (N_NCs = {len(t_pos):,})", fontsize=14
-        )
-        ax.tick_params(labelsize=11)
-        _save(fig, out_dir / "outlier_nc_time.png")
-
-    # Warn if single outlier muon dominates spatial distribution
-    if max_single_count / total_nc > 0.05:
+    if total_nc > 0 and max_single_count / total_nc > 0.05:
         print(
             f"\n  *** WARNING: single outlier muon has {max_single_count:,} NCs "
             f"= {max_single_count / total_nc * 100:.1f}% of all NCs. "
@@ -1203,6 +1249,56 @@ def analyze_repeated_outlier_muons(
 
 
 # ---------------------------------------------------------------------------
+# Material breakdown of cut NCs (muons with >NC_MUON_CUT NCs)
+# ---------------------------------------------------------------------------
+NC_MUON_CUT = 1_000
+
+
+def plot_cut_nc_material(run_list: list[RunData], out_dir: Path) -> None:
+    """Bar chart: water vs other material for NCs from muons with >NC_MUON_CUT NCs."""
+    n_water = 0
+    n_other = 0
+    for rd in run_list:
+        if rd.nc_counts.size == 0:
+            continue
+        cut_mask = rd.nc_counts > NC_MUON_CUT
+        if not cut_mask.any():
+            continue
+        cut_evtids = rd.muon_nc_evtids[cut_mask]
+        nc_sel = np.isin(rd.nc_evtid, cut_evtids)
+        n_water += int(rd.nc_is_water[nc_sel].sum())
+        n_other += int((~rd.nc_is_water[nc_sel]).sum())
+
+    total = n_water + n_other
+    if total == 0:
+        print(f"  No NCs from muons with >{NC_MUON_CUT:,} NCs; skipping material plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    bars = ax.bar(
+        ["Water", "Other material"],
+        [n_water / total, n_other / total],
+        color=[COLORS["blue"], COLORS["orange"]],
+        edgecolor="black", linewidth=0.8,
+    )
+    for bar, count in zip(bars, [n_water, n_other]):
+        ax.annotate(
+            f"{count:,}\n({count / total:.3%})",
+            xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            xytext=(0, 6), textcoords="offset points",
+            ha="center", va="bottom", fontsize=11,
+        )
+    ax.set_ylabel("Fraction of NCs", fontsize=13)
+    ax.set_title(
+        f"Material of NCs from muons with >{NC_MUON_CUT:,} NCs  (total: {total:,})",
+        fontsize=13,
+    )
+    ax.set_ylim(0, max(n_water, n_other) / total * 1.3)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "cut_nc_material.png")
+
+
+# ---------------------------------------------------------------------------
 # Convergence analysis
 # ---------------------------------------------------------------------------
 def _transform(data: np.ndarray, obs: str) -> np.ndarray:
@@ -1263,19 +1359,18 @@ def _merge_sorted_runs(sorted_runs: list[np.ndarray],
     return buf
 
 
-def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, int]:
+def convergence_analysis(
+    run_list: list[RunData], out_dir: Path, full_convergence: bool = False
+) -> dict[str, int]:
     """
     Compute W1 and KS convergence metrics vs number of runs k.
 
-    Two strategies:
-    - Deterministic: first k runs in order
-    - Random subsets: N_PERMUTATIONS draws of k runs
+    For NC count per muon: produces two figures (log-transformed and raw),
+    each with two rows (full distribution / cut at NC_MUON_CUT) × two
+    columns (W1 / KS).
 
-    Optimisations vs naive approach:
-    - Each run's data is sorted once per observable (reused across all permutations).
-    - W1/KS uses _w1_ks_sorted: avoids scipy per-call overhead, frees the merged
-      array immediately after np.diff.
-    - sorted_runs and sorted_ref are explicitly freed between observables.
+    If full_convergence=True, also produces single W1+KS figures for zenith,
+    azimuth, and energy.
 
     Returns recommended minimum k per observable.
     """
@@ -1286,10 +1381,157 @@ def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, in
 
     rng = random.Random(RANDOM_SEED)
     run_indices = list(range(n_runs))
+    k_vals = list(range(1, n_runs + 1))
 
-    def get_raw(rd: RunData, obs: str) -> np.ndarray:
-        if obs == "nc_count":
-            return rd.nc_counts
+    def _compute_metrics(
+        sorted_runs_local: list[np.ndarray],
+    ) -> tuple[list[float], list[float], np.ndarray, np.ndarray]:
+        """W1 and KS vs k for given pre-sorted per-run arrays."""
+        sorted_ref = _merge_sorted_runs(sorted_runs_local, run_indices)
+        if sorted_ref.size == 0:
+            del sorted_ref
+            return [], [], np.zeros((n_runs, N_PERMUTATIONS)), np.zeros((n_runs, N_PERMUTATIONS))
+        det_w1, det_ks = [], []
+        for k in k_vals:
+            sk = _merge_sorted_runs(sorted_runs_local, list(range(k)))
+            w1, ks = _w1_ks_sorted(sk, sorted_ref)
+            del sk
+            det_w1.append(w1 if not np.isnan(w1) else 0.0)
+            det_ks.append(ks if not np.isnan(ks) else 0.0)
+        rand_w1_m = np.zeros((n_runs, N_PERMUTATIONS))
+        rand_ks_m = np.zeros((n_runs, N_PERMUTATIONS))
+        for perm_i in range(N_PERMUTATIONS):
+            shuffled = run_indices.copy()
+            rng.shuffle(shuffled)
+            for k in k_vals:
+                sk = _merge_sorted_runs(sorted_runs_local, shuffled[:k])
+                w1, ks = _w1_ks_sorted(sk, sorted_ref)
+                del sk
+                rand_w1_m[k - 1, perm_i] = w1 if not np.isnan(w1) else 0.0
+                rand_ks_m[k - 1, perm_i] = ks if not np.isnan(ks) else 0.0
+        del sorted_ref
+        return det_w1, det_ks, rand_w1_m, rand_ks_m
+
+    def _rec_k_from_w1(det_w1: list[float]) -> tuple[int, float]:
+        if not det_w1 or det_w1[0] <= 0:
+            return n_runs, 0.0
+        thr = W1_THRESHOLD_FRAC * det_w1[0]
+        rec = next((k for k, w in enumerate(det_w1, 1) if w <= thr), n_runs)
+        return rec, thr
+
+    def _draw_panel(
+        ax: "plt.Axes",
+        title: str,
+        det_vals: list[float],
+        r_mean: np.ndarray,
+        r_std: np.ndarray,
+        ylabel: str,
+        threshold: float | None,
+        rec_k: int | None,
+    ) -> None:
+        ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
+                linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
+        ax.plot(k_vals, r_mean, "s--", color=COLORS["orange"],
+                linewidth=1.5, markersize=5, label="Random subsets (mean)")
+        ax.fill_between(k_vals, r_mean - r_std, r_mean + r_std,
+                        color=COLORS["orange"], alpha=0.25,
+                        label=f"±1σ  ({N_PERMUTATIONS} permutations)")
+        ax.axhline(0, color="gray", linestyle=":", linewidth=1.0,
+                   label="Reference")
+        if threshold and threshold > 0 and rec_k is not None:
+            ax.axhline(threshold, color="red", linestyle="--", linewidth=1.2,
+                       label=f"5% threshold = {threshold:.4f}")
+            ax.axvline(rec_k, color="red", linestyle=":", linewidth=1.2,
+                       label=f"Rec. k = {rec_k}")
+        ax.set_xlabel("Number of runs k", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11)
+        ax.set_xticks(k_vals)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=9)
+
+    recommendations: dict[str, int] = {}
+    t_conv = _log_resources("convergence start")
+
+    # ------------------------------------------------------------------ #
+    # NC count per muon — 2 figures (log + raw), each 2 rows × 2 cols    #
+    # ------------------------------------------------------------------ #
+    print("\n  Convergence: NC count per muon ...", flush=True)
+
+    nc_full_log: list[np.ndarray] = []
+    nc_cut_log:  list[np.ndarray] = []
+    nc_full_raw: list[np.ndarray] = []
+    nc_cut_raw:  list[np.ndarray] = []
+    for rd in run_list:
+        full = rd.nc_counts.astype(np.float64)
+        cut  = full[full <= NC_MUON_CUT]
+        nc_full_log.append(np.sort(np.log(full + 1.0)))
+        nc_cut_log.append(
+            np.sort(np.log(cut + 1.0)) if cut.size > 0
+            else np.array([], dtype=np.float64)
+        )
+        nc_full_raw.append(np.sort(full))
+        nc_cut_raw.append(np.sort(cut) if cut.size > 0
+                          else np.array([], dtype=np.float64))
+
+    dw1_fl, dks_fl, rw1_fl, rks_fl = _compute_metrics(nc_full_log)
+    dw1_cl, dks_cl, rw1_cl, rks_cl = _compute_metrics(nc_cut_log)
+    dw1_fr, dks_fr, rw1_fr, rks_fr = _compute_metrics(nc_full_raw)
+    dw1_cr, dks_cr, rw1_cr, rks_cr = _compute_metrics(nc_cut_raw)
+    del nc_full_log, nc_cut_log, nc_full_raw, nc_cut_raw
+    gc.collect()
+    _log_resources("nc_count: all metrics computed", t_conv)
+
+    rec_full, thr_fl = _rec_k_from_w1(dw1_fl)
+    rec_cut,  thr_cl = _rec_k_from_w1(dw1_cl)
+    recommendations["nc_count"]     = rec_full
+    recommendations["nc_count_cut"] = rec_cut
+    print(f"    Full dist — W1 thr = {thr_fl:.4f}  →  rec k = {rec_full}")
+    print(f"    Cut dist  — W1 thr = {thr_cl:.4f}  →  rec k = {rec_cut}")
+
+    for fig_tag, fig_label, row_data in [
+        ("log", "log-transformed", [
+            ("Full (all muons)",
+             dw1_fl, dks_fl, rw1_fl, rks_fl, "log(NC+1)", thr_fl, rec_full),
+            (f"Cut (NC ≤ {NC_MUON_CUT:,})",
+             dw1_cl, dks_cl, rw1_cl, rks_cl, "log(NC+1)", thr_cl, rec_cut),
+        ]),
+        ("raw", "raw (no transform)", [
+            ("Full (all muons)",
+             dw1_fr, dks_fr, rw1_fr, rks_fr, "NC count", None, None),
+            (f"Cut (NC ≤ {NC_MUON_CUT:,})",
+             dw1_cr, dks_cr, rw1_cr, rks_cr, "NC count", None, None),
+        ]),
+    ]:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(
+            f"Convergence: NC count per muon  ({fig_label})", fontsize=14,
+        )
+        for row, (row_title, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec) in enumerate(row_data):
+            if not d_w1:
+                continue
+            rw1_mean = r_w1.mean(axis=1)
+            rw1_std  = r_w1.std(axis=1)
+            rks_mean = r_ks.mean(axis=1)
+            rks_std  = r_ks.std(axis=1)
+            _draw_panel(axes[row, 0],
+                        f"W₁  —  {row_title}",
+                        d_w1, rw1_mean, rw1_std,
+                        f"W₁ ({xlabel})", thr, rec)
+            _draw_panel(axes[row, 1],
+                        f"KS  —  {row_title}",
+                        d_ks, rks_mean, rks_std,
+                        "KS statistic D", None, None)
+        plt.tight_layout()
+        _save(fig, out_dir / f"convergence_nc_count_{fig_tag}.png")
+
+    # ------------------------------------------------------------------ #
+    # Other observables (zenith, azimuth, energy) — only if requested     #
+    # ------------------------------------------------------------------ #
+    if not full_convergence:
+        return recommendations
+
+    def get_raw_obs(rd: RunData, obs: str) -> np.ndarray:
         if obs == "zenith":
             return rd.muon_zenith_deg
         if obs == "azimuth":
@@ -1298,117 +1540,53 @@ def convergence_analysis(run_list: list[RunData], out_dir: Path) -> dict[str, in
             return rd.muon_ekin_mev[rd.muon_ekin_mev > 0]
         raise ValueError(obs)
 
-    observables = [
-        ("nc_count", "log(NC count + 1)", "NC count per muon"),
-        ("zenith",   "Zenith [°]",         "Muon zenith"),
-        ("azimuth",  "Azimuth [°]",        "Muon azimuth"),
-        ("energy",   "log(E_kin [MeV]+1)", "Muon energy"),
+    other_observables = [
+        ("zenith",  "Zenith [°]",          "Muon zenith"),
+        ("azimuth", "Azimuth [°]",         "Muon azimuth"),
+        ("energy",  "log(E_kin [MeV]+1)",  "Muon energy"),
     ]
 
-    recommendations: dict[str, int] = {}
-    t_conv = _log_resources("convergence start")
-
-    for obs_key, obs_xlabel, obs_title in observables:
+    for obs_key, obs_xlabel, obs_title in other_observables:
         print(f"\n  Convergence: {obs_title} ...", flush=True)
         t_obs = _log_resources(f"{obs_key}: begin")
 
-        # ---- 1. Sort each run's data once (reused for all permutations) ----
         sorted_runs: list[np.ndarray] = []
         for rd in run_list:
-            raw = _transform(get_raw(rd, obs_key), obs_key)
+            raw = _transform(get_raw_obs(rd, obs_key), obs_key)
             sorted_runs.append(np.sort(raw))
         t_obs = _log_resources(f"{obs_key}: sorted {n_runs} runs", t_obs)
 
-        # ---- 2. Build full reference distribution ----
-        sorted_ref = _merge_sorted_runs(sorted_runs, run_indices)
-        if sorted_ref.size == 0:
-            del sorted_runs, sorted_ref
-            continue
-        t_obs = _log_resources(
-            f"{obs_key}: reference built  N={sorted_ref.size:,}", t_obs
-        )
-
-        k_vals = list(range(1, n_runs + 1))
-
-        # ---- 3. Deterministic: cumulative first k runs ----
-        det_w1, det_ks = [], []
-        for k in k_vals:
-            sorted_k = _merge_sorted_runs(sorted_runs, list(range(k)))
-            w1, ks = _w1_ks_sorted(sorted_k, sorted_ref)
-            del sorted_k
-            det_w1.append(w1)
-            det_ks.append(ks)
-        t_obs = _log_resources(f"{obs_key}: deterministic done", t_obs)
-
-        # ---- 4. Random subsets ----
-        rand_w1 = np.zeros((n_runs, N_PERMUTATIONS))
-        rand_ks = np.zeros((n_runs, N_PERMUTATIONS))
-        for perm_i in range(N_PERMUTATIONS):
-            shuffled = run_indices.copy()
-            rng.shuffle(shuffled)
-            for k in k_vals:
-                sorted_k = _merge_sorted_runs(sorted_runs, shuffled[:k])
-                w1, ks = _w1_ks_sorted(sorted_k, sorted_ref)
-                del sorted_k
-                rand_w1[k - 1, perm_i] = w1
-                rand_ks[k - 1, perm_i] = ks
-        t_obs = _log_resources(f"{obs_key}: random subsets done", t_obs)
-
-        # ---- 5. Free large arrays before next observable ----
-        del sorted_runs, sorted_ref
+        det_w1, det_ks, rand_w1, rand_ks = _compute_metrics(sorted_runs)
+        del sorted_runs
         gc.collect()
-        _log_resources(f"{obs_key}: freed — total conv elapsed", t_conv)
+        _log_resources(f"{obs_key}: metrics done", t_obs)
 
-        rand_w1_mean = rand_w1.mean(axis=1)
-        rand_w1_std = rand_w1.std(axis=1)
-        rand_ks_mean = rand_ks.mean(axis=1)
-        rand_ks_std = rand_ks.std(axis=1)
+        if not det_w1:
+            continue
 
-        # Recommended k: first k where deterministic W1 < 5% of W1 at k=1
-        w1_at_k1 = det_w1[0]
-        threshold = W1_THRESHOLD_FRAC * w1_at_k1 if w1_at_k1 > 0 else 0.0
-        rec_k = next(
-            (k for k, w in enumerate(det_w1, start=1) if w <= threshold),
-            n_runs,
-        )
+        rec_k, threshold = _rec_k_from_w1(det_w1)
         recommendations[obs_key] = rec_k
         print(f"    W1 threshold = {threshold:.4f}  →  recommended k = {rec_k}")
 
-        # ---- Plot ----
+        rand_w1_mean = rand_w1.mean(axis=1)
+        rand_w1_std  = rand_w1.std(axis=1)
+        rand_ks_mean = rand_ks.mean(axis=1)
+        rand_ks_std  = rand_ks.std(axis=1)
+
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle(f"Convergence analysis: {obs_title}", fontsize=14)
-
         for ax, metric, det_vals, r_mean, r_std, ylabel in [
             (axes[0], "W₁ distance", det_w1, rand_w1_mean, rand_w1_std,
              f"W₁ ({obs_xlabel})"),
             (axes[1], "KS statistic", det_ks, rand_ks_mean, rand_ks_std,
              "KS statistic D"),
         ]:
-            ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
-                    linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
-            ax.plot(k_vals, r_mean, "s--", color=COLORS["orange"],
-                    linewidth=1.5, markersize=5, label="Random subsets (mean)")
-            ax.fill_between(
-                k_vals,
-                r_mean - r_std, r_mean + r_std,
-                color=COLORS["orange"], alpha=0.25,
-                label=f"±1σ  ({N_PERMUTATIONS} permutations)",
-            )
-            ax.axhline(0, color="gray", linestyle=":", linewidth=1.0,
-                       label="Reference (k=10 vs k=10)")
-            if metric == "W₁ distance" and threshold > 0:
-                ax.axhline(threshold, color="red", linestyle="--", linewidth=1.2,
-                           label=f"5% threshold = {threshold:.4f}")
-                ax.axvline(rec_k, color="red", linestyle=":", linewidth=1.2,
-                           label=f"Rec. k = {rec_k}")
-            ax.set_xlabel("Number of runs k", fontsize=12)
-            ax.set_ylabel(ylabel, fontsize=12)
-            ax.set_title(metric, fontsize=13)
-            ax.set_xticks(k_vals)
-            ax.legend(fontsize=9)
-            ax.tick_params(labelsize=10)
+            thr_v = threshold if metric == "W₁ distance" else None
+            rec_v = rec_k    if metric == "W₁ distance" else None
+            _draw_panel(ax, metric, det_vals, r_mean, r_std, ylabel, thr_v, rec_v)
 
         _save(fig, out_dir / f"convergence_{obs_key}.png")
+        _log_resources(f"{obs_key}: saved — total conv elapsed", t_conv)
 
     return recommendations
 
@@ -1456,10 +1634,11 @@ def write_statistics(
 
     lines += ["", "--- Convergence: recommended minimum number of runs ---"]
     obs_labels = {
-        "nc_count": "NC count per muon",
-        "zenith":   "Muon zenith",
-        "azimuth":  "Muon azimuth",
-        "energy":   "Muon energy",
+        "nc_count":     "NC count per muon (full)",
+        "nc_count_cut": f"NC count per muon (cut ≤{NC_MUON_CUT:,})",
+        "zenith":       "Muon zenith",
+        "azimuth":      "Muon azimuth",
+        "energy":       "Muon energy",
     }
     for key, label in obs_labels.items():
         k = recommendations.get(key, "n/a")
@@ -1506,6 +1685,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=NUM_RUNS_DEFAULT,
         help=f"Number of runs to load (default: {NUM_RUNS_DEFAULT}).",
+    )
+    p.add_argument(
+        "--full-convergence",
+        action="store_true",
+        default=False,
+        help="Also compute convergence for zenith, azimuth, and energy (slow).",
     )
     return p.parse_args()
 
@@ -1573,15 +1758,20 @@ def main() -> None:
     _log_resources("NC distribution plots done", t_main)
 
     print("\n--- Outlier analysis ---")
-    outlier_info = analyze_outliers(agg, run_list, out_dir)
+    outlier_info = analyze_outliers(agg, out_dir)
     _log_resources("outlier analysis done", t_main)
 
     print("\n--- Outlier muon fingerprint analysis ---")
     analyze_repeated_outlier_muons(run_list, out_dir)
     _log_resources("fingerprint analysis done", t_main)
 
+    print("\n--- Cut NC material ---")
+    plot_cut_nc_material(run_list, out_dir)
+    _log_resources("cut NC material done", t_main)
+
     print("\n--- Convergence analysis ---")
-    recommendations = convergence_analysis(run_list, out_dir)
+    recommendations = convergence_analysis(run_list, out_dir,
+                                           full_convergence=args.full_convergence)
     _log_resources("convergence analysis done", t_main)
 
     print("\n--- Statistics ---")
