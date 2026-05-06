@@ -748,15 +748,16 @@ def main() -> None:
     parser.add_argument("--sim1-path", default=DEFAULT_SIM1_PATH,
                         help="Sim 1 (MUSUN NC) root directory (default: %(default)s)")
     parser.add_argument("--output-path", default=DEFAULT_SIM2_PATH,
-                        help="Output directory (default: <data-path>/light_analysis)")
+                        help="Base output directory.  A 'light_analysis/' sub-directory "
+                             "is created inside it.  Defaults to --data-path.")
     parser.add_argument("--runs", type=int, default=NUM_RUNS_DEFAULT,
                         help="Max number of runs to process (default: %(default)s)")
     args = parser.parse_args()
 
-    sim2_path = Path(args.data_path)
-    sim1_path = Path(args.sim1_path)
-    out_dir = (Path(args.output_path) if args.output_path
-               else sim2_path / "light_analysis")
+    sim2_path   = Path(args.data_path)
+    sim1_path   = Path(args.sim1_path)
+    output_base = Path(args.output_path) if args.output_path else sim2_path
+    out_dir     = output_base / "light_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Sim 2 path : {sim2_path}")
