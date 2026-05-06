@@ -43,6 +43,8 @@ GAMMA_GROUP = "/hit/CaptureGammas"
 VERTICES_GROUP = "/hit/vertices"
 PARTICLES_GROUP = "/hit/particles"
 
+NC_CUT_100 = 100
+
 DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
@@ -95,6 +97,7 @@ class RunData:
     nc_time_ns: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     nc_phi_rad: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     nc_z_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    nc_r_m: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
     # Per NC-producing muon (sorted by evtid)
     muon_nc_evtids: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
@@ -345,6 +348,7 @@ def load_run(run_dir: Path) -> RunData:
         rd.nc_time_ns = time_arr[unique_idx]
         rd.nc_phi_rad = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
         rd.nc_z_m     = z_arr[unique_idx]
+        rd.nc_r_m     = np.sqrt(x_arr[unique_idx]**2 + y_arr[unique_idx]**2)
 
         # Determine water flag and store full material info
         mat_map: dict[int, str] = {}
@@ -407,7 +411,7 @@ def load_run(run_dir: Path) -> RunData:
 # ---------------------------------------------------------------------------
 def aggregate_runs(run_list: list[RunData]) -> dict:
     """Combine all runs into flat arrays; add boolean muon flags."""
-    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l, nc_is_water_l, nc_n_gammas_l = [], [], [], [], [], [], []
+    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_r_m_l, nc_is_ge77mu_l, nc_is_water_l, nc_n_gammas_l = [], [], [], [], [], [], [], []
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
     mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
@@ -430,6 +434,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             nc_time_l.append(rd.nc_time_ns)
             nc_phi_l.append(rd.nc_phi_rad)
             nc_z_l.append(rd.nc_z_m)
+            nc_r_m_l.append(rd.nc_r_m)
             nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
             nc_is_water_l.append(rd.nc_is_water)
             nc_n_gammas_l.append(rd.nc_n_gammas)
@@ -469,6 +474,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_time_ns": cat(nc_time_l, np.float64),
         "nc_phi_rad": cat(nc_phi_l, np.float64),
         "nc_z_m": cat(nc_z_l, np.float64),
+        "nc_r_m": cat(nc_r_m_l, np.float64),
         "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
         "nc_is_water":  cat(nc_is_water_l,  bool),
         "nc_n_gammas":  cat(nc_n_gammas_l,  np.int32),
@@ -605,14 +611,15 @@ def _ratio_plot(
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(f"Ratio  {l2} / {l1}", fontsize=13)
-    for ax, num, den, ylabel, title in [
+    for ax, num, den, ylabel, title, zoom_y in [
         (axes[0], h2_norm, h1_norm,
-         f"({l2} fraction) / ({l1} fraction)", "Normalised-fraction ratio"),
+         f"({l2} fraction) / ({l1} fraction)", "Normalised-fraction ratio", False),
         (axes[1], h2_raw.astype(float), h1_raw.astype(float),
-         f"({l2} count) / ({l1} count)", "Raw-count ratio"),
+         f"({l2} count) / ({l1} count)", "Raw-count ratio", True),
     ]:
         valid = den > 0
-        ax.plot(bc[valid], num[valid] / den[valid],
+        ratio_vals = num[valid] / den[valid]
+        ax.plot(bc[valid], ratio_vals,
                 "o-", color=COLORS["red"], markersize=4, linewidth=1.2)
         ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="ratio = 1")
         if log_x:
@@ -622,6 +629,12 @@ def _ratio_plot(
         ax.set_title(title, fontsize=12)
         ax.legend(fontsize=10)
         ax.tick_params(labelsize=10)
+        if zoom_y and ratio_vals.size > 0:
+            y_lo = float(ratio_vals.min())
+            y_hi = float(ratio_vals.max())
+            spread = y_hi - y_lo
+            margin = max(0.15 * spread, 0.05)
+            ax.set_ylim(y_lo - margin, y_hi + margin)
     plt.tight_layout()
     _save(fig, out_path)
 
@@ -881,11 +894,12 @@ def plot_nc_times(agg: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     """
-    1-D histograms of φ and z (all NCs + Ge77-muon NCs).
-    2-D histogram φ vs z (all NCs + Ge77-muon NCs).
+    1-D histograms of φ, z, and r (all NCs vs Ge77-muon NCs) with ratio plots.
+    2-D heatmaps: φ vs z and r vs z per subset (shared colorbar scale within subset).
     """
     phi = np.degrees(agg["nc_phi_rad"])   # convert to degrees for readability
     z_mm = agg["nc_z_m"] * 1e3           # metres → mm
+    r_mm = agg["nc_r_m"] * 1e3           # metres → mm
     is_ge77mu = agg["nc_is_ge77mu"]
 
     if phi.size == 0:
@@ -937,24 +951,62 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_z_1d_comparison_ratio.png",
     )
 
-    # ---- 2-D φ vs z ----
-    for mask, tag, title in [
-        (np.ones(phi.size, dtype=bool), "all", "NC positions φ vs z — all NCs"),
-        (is_ge77mu, "ge77muons",
-         "NC positions φ vs z — NCs of Ge77-producing muons"),
+    # ---- 1-D r: comparison overlay (all NCs vs Ge77-muon NCs) ----
+    bins_r = np.linspace(0.0, float(r_mm.max()), 73)
+    r_ge77mu = r_mm[is_ge77mu]
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(r_mm, bins=bins_r, color=COLORS["blue"], alpha=0.7,
+            edgecolor="black", linewidth=0.3, label=f"All NCs (N={r_mm.size:,})")
+    if r_ge77mu.size > 0:
+        ax.hist(r_ge77mu, bins=bins_r, color=COLORS["red"], alpha=0.7,
+                edgecolor="black", linewidth=0.3,
+                label=f"NCs of Ge77-producing muons (N={r_ge77mu.size:,})")
+    ax.set_xlabel("NC radial position r [mm]", fontsize=13)
+    ax.set_ylabel("Number of NCs", fontsize=13)
+    ax.set_title("NC radial position: all NCs vs Ge77-muon NCs", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_r_1d_comparison.png")
+    _ratio_plot(
+        r_mm, r_ge77mu,
+        "All NCs", "NCs of Ge77-producing muons", bins_r,
+        "NC radial position r [mm]",
+        out_dir / "nc_r_1d_comparison_ratio.png",
+    )
+
+    # ---- 2-D φ vs z AND r vs z (shared colorbar scale per subset) ----
+    for mask, tag, title_base in [
+        (np.ones(phi.size, dtype=bool), "all", "NC positions — all NCs"),
+        (is_ge77mu, "ge77muons", "NC positions — NCs of Ge77-producing muons"),
     ]:
         ph = phi[mask]
         zm = z_mm[mask]
+        rm = r_mm[mask]
         if ph.size == 0:
             continue
-        fig, ax = plt.subplots(figsize=(10, 7))
-        h = ax.hist2d(ph, zm, bins=[72, 100], cmap="viridis")
-        plt.colorbar(h[3], ax=ax, label="Number of NCs")
-        ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
-        ax.set_ylabel("NC z position [mm]", fontsize=13)
-        ax.set_title(f"{title}  (N = {len(ph):,})", fontsize=14)
-        ax.tick_params(labelsize=11)
-        _save(fig, out_dir / f"nc_phi_z_2d_{tag}.png")
+
+        H_phi, _, _ = np.histogram2d(ph, zm, bins=[72, 100])
+        H_r,   _, _ = np.histogram2d(rm, zm, bins=[72, 100])
+        vmax = max(float(H_phi.max()), float(H_r.max()))
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        fig.suptitle(f"{title_base}  (N = {ph.size:,})", fontsize=14)
+
+        hh1 = axes[0].hist2d(ph, zm, bins=[72, 100], cmap="viridis", vmin=0, vmax=vmax)
+        axes[0].set_xlabel("NC azimuth φ [°]", fontsize=13)
+        axes[0].set_ylabel("NC z position [mm]", fontsize=13)
+        axes[0].set_title("φ vs z", fontsize=12)
+        axes[0].tick_params(labelsize=11)
+
+        axes[1].hist2d(rm, zm, bins=[72, 100], cmap="viridis", vmin=0, vmax=vmax)
+        axes[1].set_xlabel("NC radial position r [mm]", fontsize=13)
+        axes[1].set_ylabel("NC z position [mm]", fontsize=13)
+        axes[1].set_title("r vs z", fontsize=12)
+        axes[1].tick_params(labelsize=11)
+
+        fig.colorbar(hh1[3], ax=axes, label="Number of NCs")
+        plt.tight_layout()
+        _save(fig, out_dir / f"nc_phi_r_z_2d_{tag}.png")
 
 
 # ---------------------------------------------------------------------------
@@ -1618,60 +1670,105 @@ def convergence_analysis(
     t_conv = _log_resources("convergence start")
 
     # ------------------------------------------------------------------ #
-    # NC count per muon — 2 figures (log + raw), each 2 rows × 2 cols    #
+    # NC count per muon — 4 figures:                                      #
+    #   full dist  : 1×2 (W1 | KS), log and raw variants                 #
+    #   cuts ≤100 and ≤1000: 2×2 (rows=cut | cols=W1/KS), log and raw    #
     # ------------------------------------------------------------------ #
     print("\n  Convergence: NC count per muon ...", flush=True)
 
-    nc_full_log: list[np.ndarray] = []
-    nc_cut_log:  list[np.ndarray] = []
-    nc_full_raw: list[np.ndarray] = []
-    nc_cut_raw:  list[np.ndarray] = []
+    nc_full_log:   list[np.ndarray] = []
+    nc_cut100_log: list[np.ndarray] = []
+    nc_cut_log:    list[np.ndarray] = []
+    nc_full_raw:   list[np.ndarray] = []
+    nc_cut100_raw: list[np.ndarray] = []
+    nc_cut_raw:    list[np.ndarray] = []
     for rd in run_list:
-        full = rd.nc_counts.astype(np.float64)
-        cut  = full[full <= NC_MUON_CUT]
+        full   = rd.nc_counts.astype(np.float64)
+        cut100 = full[full <= NC_CUT_100]
+        cut    = full[full <= NC_MUON_CUT]
         nc_full_log.append(np.sort(np.log(full + 1.0)))
+        nc_cut100_log.append(
+            np.sort(np.log(cut100 + 1.0)) if cut100.size > 0
+            else np.array([], dtype=np.float64)
+        )
         nc_cut_log.append(
             np.sort(np.log(cut + 1.0)) if cut.size > 0
             else np.array([], dtype=np.float64)
         )
         nc_full_raw.append(np.sort(full))
+        nc_cut100_raw.append(np.sort(cut100) if cut100.size > 0
+                             else np.array([], dtype=np.float64))
         nc_cut_raw.append(np.sort(cut) if cut.size > 0
                           else np.array([], dtype=np.float64))
 
-    dw1_fl, dks_fl, rw1_fl, rks_fl = _compute_metrics(nc_full_log)
-    dw1_cl, dks_cl, rw1_cl, rks_cl = _compute_metrics(nc_cut_log)
-    dw1_fr, dks_fr, rw1_fr, rks_fr = _compute_metrics(nc_full_raw)
-    dw1_cr, dks_cr, rw1_cr, rks_cr = _compute_metrics(nc_cut_raw)
-    del nc_full_log, nc_cut_log, nc_full_raw, nc_cut_raw
+    dw1_fl,    dks_fl,    rw1_fl,    rks_fl    = _compute_metrics(nc_full_log)
+    dw1_c100l, dks_c100l, rw1_c100l, rks_c100l = _compute_metrics(nc_cut100_log)
+    dw1_cl,    dks_cl,    rw1_cl,    rks_cl    = _compute_metrics(nc_cut_log)
+    dw1_fr,    dks_fr,    rw1_fr,    rks_fr    = _compute_metrics(nc_full_raw)
+    dw1_c100r, dks_c100r, rw1_c100r, rks_c100r = _compute_metrics(nc_cut100_raw)
+    dw1_cr,    dks_cr,    rw1_cr,    rks_cr    = _compute_metrics(nc_cut_raw)
+    del nc_full_log, nc_cut100_log, nc_cut_log, nc_full_raw, nc_cut100_raw, nc_cut_raw
     gc.collect()
     _log_resources("nc_count: all metrics computed", t_conv)
 
-    rec_full, thr_fl = _rec_k_from_w1(dw1_fl)
-    rec_cut,  thr_cl = _rec_k_from_w1(dw1_cl)
-    recommendations["nc_count"]     = rec_full
-    recommendations["nc_count_cut"] = rec_cut
-    print(f"    Full dist — W1 thr = {thr_fl:.4f}  →  rec k = {rec_full}")
-    print(f"    Cut dist  — W1 thr = {thr_cl:.4f}  →  rec k = {rec_cut}")
+    rec_full,   thr_fl    = _rec_k_from_w1(dw1_fl)
+    rec_cut100, thr_c100l = _rec_k_from_w1(dw1_c100l)
+    rec_cut,    thr_cl    = _rec_k_from_w1(dw1_cl)
+    recommendations["nc_count"]         = rec_full
+    recommendations["nc_count_cut_100"] = rec_cut100
+    recommendations["nc_count_cut"]     = rec_cut
+    print(f"    Full dist       — W1 thr = {thr_fl:.4f}    →  rec k = {rec_full}")
+    print(f"    Cut ≤{NC_CUT_100} dist  — W1 thr = {thr_c100l:.4f}  →  rec k = {rec_cut100}")
+    print(f"    Cut ≤{NC_MUON_CUT:,} dist — W1 thr = {thr_cl:.4f}    →  rec k = {rec_cut}")
 
-    for fig_tag, fig_label, row_data in [
+    # -- Full distribution: 1×2 figure per transform variant --
+    for fig_tag, fig_label, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec in [
+        ("log", "log-transformed",
+         dw1_fl, dks_fl, rw1_fl, rks_fl, "log(NC+1)", thr_fl, rec_full),
+        ("raw", "raw (no transform)",
+         dw1_fr, dks_fr, rw1_fr, rks_fr, "NC count", None, None),
+    ]:
+        if not d_w1:
+            continue
+        rw1_mean = r_w1.mean(axis=1)
+        rw1_std  = r_w1.std(axis=1)
+        rks_mean = r_ks.mean(axis=1)
+        rks_std  = r_ks.std(axis=1)
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(
+            f"Convergence: NC count per muon — full distribution  ({fig_label})",
+            fontsize=14,
+        )
+        _draw_panel(axes[0], "W₁  —  Full (all muons)",
+                    d_w1, rw1_mean, rw1_std,
+                    f"W₁ ({xlabel})", thr, rec)
+        _draw_panel(axes[1], "KS  —  Full (all muons)",
+                    d_ks, rks_mean, rks_std,
+                    "KS statistic D", None, None)
+        plt.tight_layout()
+        _save(fig, out_dir / f"convergence_nc_count_full_{fig_tag}.png")
+
+    # -- Cut distributions: 2×2 figure per transform variant --
+    for fig_tag, fig_label, rows_data in [
         ("log", "log-transformed", [
-            ("Full (all muons)",
-             dw1_fl, dks_fl, rw1_fl, rks_fl, "log(NC+1)", thr_fl, rec_full),
-            (f"Cut (NC ≤ {NC_MUON_CUT:,})",
+            (f"Cut ≤ {NC_CUT_100}",
+             dw1_c100l, dks_c100l, rw1_c100l, rks_c100l, "log(NC+1)", thr_c100l, rec_cut100),
+            (f"Cut ≤ {NC_MUON_CUT:,}",
              dw1_cl, dks_cl, rw1_cl, rks_cl, "log(NC+1)", thr_cl, rec_cut),
         ]),
         ("raw", "raw (no transform)", [
-            ("Full (all muons)",
-             dw1_fr, dks_fr, rw1_fr, rks_fr, "NC count", None, None),
-            (f"Cut (NC ≤ {NC_MUON_CUT:,})",
+            (f"Cut ≤ {NC_CUT_100}",
+             dw1_c100r, dks_c100r, rw1_c100r, rks_c100r, "NC count", None, None),
+            (f"Cut ≤ {NC_MUON_CUT:,}",
              dw1_cr, dks_cr, rw1_cr, rks_cr, "NC count", None, None),
         ]),
     ]:
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(
-            f"Convergence: NC count per muon  ({fig_label})", fontsize=14,
+            f"Convergence: NC count per muon — cut distributions  ({fig_label})",
+            fontsize=14,
         )
-        for row, (row_title, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec) in enumerate(row_data):
+        for row, (row_title, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec) in enumerate(rows_data):
             if not d_w1:
                 continue
             rw1_mean = r_w1.mean(axis=1)
@@ -1687,7 +1784,7 @@ def convergence_analysis(
                         d_ks, rks_mean, rks_std,
                         "KS statistic D", None, None)
         plt.tight_layout()
-        _save(fig, out_dir / f"convergence_nc_count_{fig_tag}.png")
+        _save(fig, out_dir / f"convergence_nc_count_cuts_{fig_tag}.png")
 
     # ------------------------------------------------------------------ #
     # Other observables (zenith, azimuth, energy) — only if requested     #
@@ -1798,11 +1895,12 @@ def write_statistics(
 
     lines += ["", "--- Convergence: recommended minimum number of runs ---"]
     obs_labels = {
-        "nc_count":     "NC count per muon (full)",
-        "nc_count_cut": f"NC count per muon (cut ≤{NC_MUON_CUT:,})",
-        "zenith":       "Muon zenith",
-        "azimuth":      "Muon azimuth",
-        "energy":       "Muon energy",
+        "nc_count":         "NC count per muon (full)",
+        "nc_count_cut_100": f"NC count per muon (cut ≤{NC_CUT_100})",
+        "nc_count_cut":     f"NC count per muon (cut ≤{NC_MUON_CUT:,})",
+        "zenith":           "Muon zenith",
+        "azimuth":          "Muon azimuth",
+        "energy":           "Muon energy",
     }
     for key, label in obs_labels.items():
         k = recommendations.get(key, "n/a")
