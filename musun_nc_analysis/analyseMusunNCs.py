@@ -39,6 +39,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 NC_GROUP = "/hit/MyNeutronCaptureOutput"
+GAMMA_GROUP = "/hit/CaptureGammas"
 VERTICES_GROUP = "/hit/vertices"
 PARTICLES_GROUP = "/hit/particles"
 
@@ -117,6 +118,12 @@ class RunData:
     muon_pz_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     # True if the NC occurred inside the water volume
     nc_is_water: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
+    # Raw material ID per NC (index into material_map)
+    nc_material_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    # Material-ID → name mapping for this run
+    material_map: dict = field(default_factory=dict)
+    # Number of capture gammas per NC
+    nc_n_gammas: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +182,24 @@ def read_material_map(fp: Path) -> dict[int, str]:
     except Exception as exc:
         print(f"  WARNING: could not read material map from {fp.name}: {exc}")
         return {}
+
+
+def read_gamma_count_file(fp: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Return (evtid, nc_id) arrays from /hit/CaptureGammas (one row per gamma)."""
+    empty = np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    try:
+        with h5py.File(fp, "r") as f:
+            if GAMMA_GROUP not in f:
+                return empty
+            grp = f[GAMMA_GROUP]
+            if int(grp["entries"][()]) == 0:
+                return empty
+            evtid = _pages(grp, "evt").astype(np.int64)
+            nc_id = _pages(grp, "nc_id").astype(np.int64)
+        return evtid, nc_id
+    except Exception as exc:
+        print(f"  ERROR reading gamma data from {fp.name}: {exc}")
+        return empty
 
 
 def read_muon_data_file(fp: Path) -> dict[str, np.ndarray]:
@@ -275,6 +300,8 @@ def load_run(run_dir: Path) -> RunData:
             "x_m", "y_m", "z_m", "px_mev", "py_mev", "pz_mev",
         )
     }
+    gamma_evtid_l: list[np.ndarray] = []
+    gamma_nc_id_l: list[np.ndarray] = []
 
     for fp in hdf5_files:
         nc = read_nc_data_file(fp)
@@ -286,6 +313,11 @@ def load_run(run_dir: Path) -> RunData:
         if mu["evtid"].size > 0:
             for k in mu_parts:
                 mu_parts[k].append(mu[k])
+
+        ge, gn = read_gamma_count_file(fp)
+        if ge.size > 0:
+            gamma_evtid_l.append(ge)
+            gamma_nc_id_l.append(gn)
 
     # ---- NC deduplication on (evtid, nC_track_id) ----
     if nc_parts["evtid"]:
@@ -306,20 +338,43 @@ def load_run(run_dir: Path) -> RunData:
         unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
         np.maximum.at(unique_ge77, inverse, ge77_arr)
 
+        unique_track_ids = track_arr[unique_idx]  # kept for gamma-count matching
+
         rd.nc_evtid   = evtid_arr[unique_idx]
         rd.nc_ge77    = unique_ge77
         rd.nc_time_ns = time_arr[unique_idx]
         rd.nc_phi_rad = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
         rd.nc_z_m     = z_arr[unique_idx]
 
-        # Determine water flag: read material map from first file that has it
+        # Determine water flag and store full material info
         mat_map: dict[int, str] = {}
         for fp in hdf5_files:
             mat_map = read_material_map(fp)
             if mat_map:
                 break
+        rd.material_map = mat_map
+        rd.nc_material_id = mat_id_arr[unique_idx]
         water_ids = [k for k, v in mat_map.items() if v == "Water"]
         rd.nc_is_water = np.isin(mat_id_arr[unique_idx], water_ids)
+
+        # Gamma counts per NC
+        if gamma_evtid_l:
+            all_ge = np.concatenate(gamma_evtid_l)
+            all_gn = np.concatenate(gamma_nc_id_l)
+            gamma_pairs = np.stack([all_ge, all_gn], axis=1)
+            upairs, gcounts = np.unique(gamma_pairs, axis=0, return_counts=True)
+            gamma_lookup = {
+                (int(p[0]), int(p[1])): int(c)
+                for p, c in zip(upairs, gcounts)
+            }
+            del all_ge, all_gn, gamma_pairs, upairs, gcounts
+        else:
+            gamma_lookup = {}
+        rd.nc_n_gammas = np.array(
+            [gamma_lookup.get((int(e), int(t)), 0)
+             for e, t in zip(rd.nc_evtid, unique_track_ids)],
+            dtype=np.int32,
+        )
 
         # Per-muon NC counts
         mu_nc_ids, counts = np.unique(rd.nc_evtid, return_counts=True)
@@ -352,7 +407,7 @@ def load_run(run_dir: Path) -> RunData:
 # ---------------------------------------------------------------------------
 def aggregate_runs(run_list: list[RunData]) -> dict:
     """Combine all runs into flat arrays; add boolean muon flags."""
-    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l, nc_is_water_l = [], [], [], [], [], []
+    nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_is_ge77mu_l, nc_is_water_l, nc_n_gammas_l = [], [], [], [], [], [], []
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
     mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
@@ -377,6 +432,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             nc_z_l.append(rd.nc_z_m)
             nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
             nc_is_water_l.append(rd.nc_is_water)
+            nc_n_gammas_l.append(rd.nc_n_gammas)
 
         if rd.nc_counts.size > 0:
             ge77_mu_mask = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
@@ -415,6 +471,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_z_m": cat(nc_z_l, np.float64),
         "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
         "nc_is_water":  cat(nc_is_water_l,  bool),
+        "nc_n_gammas":  cat(nc_n_gammas_l,  np.int32),
         # Per-muon NC counts
         "nc_counts": cat(nc_counts_all_l, np.int64),
         "nc_counts_ge77mu": cat(nc_counts_ge77mu_l, np.int64),
@@ -962,6 +1019,113 @@ def plot_muon_3d_scatters(agg: dict, out_dir: Path) -> None:
             px[mask], py[mask], pz[mask],
             title, out_dir / fname,
         )
+
+
+# ---------------------------------------------------------------------------
+# NC material distribution
+# ---------------------------------------------------------------------------
+def plot_nc_material_distribution(run_list: list[RunData], out_dir: Path) -> None:
+    """Grouped bar chart of NC material fractions: Ge77-muon NCs vs non-Ge77-muon NCs,
+    plus a ratio panel. Materials are sorted by total NC count (descending)."""
+    counts_ge77:   dict[str, int] = {}
+    counts_noge77: dict[str, int] = {}
+
+    for rd in run_list:
+        if rd.nc_evtid.size == 0 or rd.nc_material_id.size == 0:
+            continue
+        is_ge77mu = np.isin(rd.nc_evtid, rd.ge77_evtids)
+        for mat_id in np.unique(rd.nc_material_id):
+            name = rd.material_map.get(int(mat_id), f"ID:{mat_id}")
+            mat_mask = rd.nc_material_id == mat_id
+            counts_ge77[name]   = counts_ge77.get(name, 0)   + int((mat_mask & is_ge77mu).sum())
+            counts_noge77[name] = counts_noge77.get(name, 0) + int((mat_mask & ~is_ge77mu).sum())
+
+    all_names = sorted(
+        set(counts_ge77) | set(counts_noge77),
+        key=lambda n: counts_ge77.get(n, 0) + counts_noge77.get(n, 0),
+        reverse=True,
+    )
+    if not all_names:
+        return
+
+    n_ge77   = sum(counts_ge77.values())
+    n_noge77 = sum(counts_noge77.values())
+    ge77_f   = np.array([counts_ge77.get(n, 0)   / max(n_ge77,   1) for n in all_names])
+    noge77_f = np.array([counts_noge77.get(n, 0) / max(n_noge77, 1) for n in all_names])
+
+    x = np.arange(len(all_names))
+    w = 0.35
+    fig_w = max(10, len(all_names) * 1.6 + 4)
+
+    fig, axes = plt.subplots(1, 2, figsize=(fig_w, 6))
+    fig.suptitle("NC material distribution: Ge77-muon NCs vs non-Ge77-muon NCs",
+                 fontsize=13)
+
+    # ---- Left: overlaid grouped bars (normalised fractions) ----
+    ax = axes[0]
+    ax.bar(x - w / 2, noge77_f, w,
+           label=f"Non-Ge77 muon NCs (N={n_noge77:,})",
+           color=COLORS["blue"], edgecolor="black", linewidth=0.5, alpha=0.85)
+    ax.bar(x + w / 2, ge77_f, w,
+           label=f"Ge77-muon NCs (N={n_ge77:,})",
+           color=COLORS["red"],  edgecolor="black", linewidth=0.5, alpha=0.85)
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_names, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("Fraction of NCs", fontsize=12)
+    ax.set_title("Normalised fraction per material", fontsize=12)
+    ax.legend(fontsize=10)
+    ax.tick_params(labelsize=9)
+
+    # ---- Right: ratio (Ge77 fraction / non-Ge77 fraction per material) ----
+    ax2 = axes[1]
+    valid = noge77_f > 0
+    ratios = np.where(valid, ge77_f / np.where(valid, noge77_f, 1.0), np.nan)
+    bars = ax2.bar(x[valid], ratios[valid],
+                   color=COLORS["red"], edgecolor="black", linewidth=0.5, alpha=0.85)
+    ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="ratio = 1")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(all_names, rotation=45, ha="right", fontsize=9)
+    ax2.set_ylabel("(Ge77 fraction) / (non-Ge77 fraction)", fontsize=11)
+    ax2.set_title("Ratio per material", fontsize=12)
+    ax2.legend(fontsize=10)
+    ax2.tick_params(labelsize=9)
+
+    plt.tight_layout()
+    _save(fig, out_dir / "nc_material_ge77_vs_noge77.png")
+
+
+# ---------------------------------------------------------------------------
+# NC gamma count distribution
+# ---------------------------------------------------------------------------
+def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
+    """Normalised histogram of capture-gamma multiplicity: Ge77-muon NCs vs non-Ge77."""
+    n_gammas  = agg["nc_n_gammas"]
+    is_ge77mu = agg["nc_is_ge77mu"]
+
+    if n_gammas.size == 0:
+        return
+
+    ge77_g   = n_gammas[is_ge77mu]
+    noge77_g = n_gammas[~is_ge77mu]
+
+    max_g = int(n_gammas.max())
+    bins  = np.arange(0, max_g + 2) - 0.5   # integer-centred half-open bins
+
+    _comparison_hist(
+        noge77_g, ge77_g,
+        "Non-Ge77 muon NCs", "Ge77-muon NCs",
+        COLORS["blue"], COLORS["red"],
+        "Capture-gamma multiplicity: Ge77 vs non-Ge77 muons",
+        "Number of capture gammas per NC",
+        out_dir / "nc_gamma_count_ge77_vs_noge77.png",
+        bins, log_x=False, log_y=True,
+    )
+    _ratio_plot(
+        noge77_g, ge77_g,
+        "Non-Ge77 muon NCs", "Ge77-muon NCs", bins,
+        "Number of capture gammas per NC",
+        out_dir / "nc_gamma_count_ge77_vs_noge77_ratio.png",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1755,6 +1919,8 @@ def main() -> None:
     plot_ge77_per_ge77muon(agg, out_dir)
     plot_nc_times(agg, out_dir)
     plot_nc_positions(agg, out_dir)
+    plot_nc_material_distribution(run_list, out_dir)
+    plot_nc_gamma_count(agg, out_dir)
     _log_resources("NC distribution plots done", t_main)
 
     print("\n--- Outlier analysis ---")
