@@ -131,9 +131,10 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
       nc_is_water:(evtid, tid) -> True if NC occurred in water
       muon_nc:    muon_evtid  -> list of NC keys belonging to that muon
     """
-    nc_ge77:    dict[tuple[int, int], int] = {}
-    nc_pos:     dict[tuple[int, int], tuple[float, float, float]] = {}
-    nc_is_water: dict[tuple[int, int], bool] = {}
+    nc_ge77:         dict[tuple[int, int], int] = {}
+    nc_pos:          dict[tuple[int, int], tuple[float, float, float]] = {}
+    nc_is_water:     dict[tuple[int, int], bool] = {}
+    nc_in_germanium: dict[tuple[int, int], bool] = {}
     muon_nc: dict[int, list] = defaultdict(list)
 
     for fp in sorted(sim1_run_dir.glob("output_t*.hdf5")):
@@ -143,6 +144,7 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
         # Per-file material map: each Geant4 process may assign different IDs
         fmat_map = read_material_map(fp)
         water_ids = {k for k, v in fmat_map.items() if v == "Water"}
+        ge_ids    = {k for k, v in fmat_map.items() if v == "EnrichedGermanium0.913"}
         for eid, tid, ge77, x, y, z, mid in zip(
             data["evtid"].tolist(), data["track_id"].tolist(),
             data["ge77"].tolist(),
@@ -151,12 +153,25 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
         ):
             key = (eid, tid)
             if key not in nc_ge77:
-                nc_ge77[key]     = ge77
-                nc_pos[key]      = (x, y, z)
-                nc_is_water[key] = (int(mid) in water_ids)
+                nc_ge77[key]         = ge77
+                nc_pos[key]          = (x, y, z)
+                nc_is_water[key]     = (int(mid) in water_ids)
+                nc_in_germanium[key] = (int(mid) in ge_ids)
                 muon_nc[eid].append(key)
             elif ge77 > nc_ge77[key]:
                 nc_ge77[key] = ge77
+
+    # Cross-check: ge77 flag must match EnrichedGermanium0.913 material exactly
+    ge77_keys     = {k for k, v in nc_ge77.items()         if v == 1}
+    germanium_keys = {k for k, v in nc_in_germanium.items() if v}
+    if ge77_keys != germanium_keys:
+        extra_flagged = ge77_keys - germanium_keys
+        extra_ge      = germanium_keys - ge77_keys
+        raise RuntimeError(
+            f"Ge77 flag / EnrichedGermanium0.913 mismatch in {sim1_run_dir}:\n"
+            f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {len(extra_flagged)} NCs\n"
+            f"  in EnrichedGermanium0.913 but ge77_flag!=1:    {len(extra_ge)} NCs"
+        )
 
     return nc_ge77, nc_pos, nc_is_water, dict(muon_nc)
 
