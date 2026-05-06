@@ -96,7 +96,7 @@ def _load_optical_file(fp: Path) -> dict | None:
             if OPTICAL_GROUP not in f:
                 return None
             grp = f[OPTICAL_GROUP]
-            evtid = _pages(grp, "evtid").astype(np.int64)
+            evtid = _pages(grp, "muon_track_id").astype(np.int64)
             if evtid.size == 0:
                 return None
             return {

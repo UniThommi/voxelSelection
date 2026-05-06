@@ -194,7 +194,7 @@ def read_gamma_count_file(fp: Path) -> tuple[np.ndarray, np.ndarray]:
             grp = f[GAMMA_GROUP]
             if int(grp["entries"][()]) == 0:
                 return empty
-            evtid = _pages(grp, "evt").astype(np.int64)
+            evtid = _pages(grp, "evtid").astype(np.int64)
             nc_id = _pages(grp, "nc_id").astype(np.int64)
         return evtid, nc_id
     except Exception as exc:
