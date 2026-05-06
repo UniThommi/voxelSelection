@@ -359,16 +359,16 @@ def load_run(run_dir: Path) -> RunData:
         rd.nc_material_name = mat_name_arr[unique_idx]
         rd.nc_is_water      = rd.nc_material_name == "Water"
 
-        # Cross-check: ge77 flag must match EnrichedGermanium0.913 material exactly
+        # Cross-check: every NC with ge77_flag=1 must be in EnrichedGermanium0.913.
+        # The reverse is not required — captures on Ge-70/72/73/74 are in germanium
+        # but do not produce Ge-77.
         ge77_mask = rd.nc_ge77 == 1
         ge_mask   = rd.nc_material_name == "EnrichedGermanium0.913"
-        if not np.array_equal(ge77_mask, ge_mask):
-            n_flagged_not_ge = int((ge77_mask & ~ge_mask).sum())
-            n_ge_not_flagged = int((ge_mask & ~ge77_mask).sum())
+        n_flagged_not_ge = int((ge77_mask & ~ge_mask).sum())
+        if n_flagged_not_ge > 0:
             raise RuntimeError(
                 f"Ge77 flag / EnrichedGermanium0.913 mismatch in {run_dir}:\n"
-                f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {n_flagged_not_ge} NCs\n"
-                f"  in EnrichedGermanium0.913 but ge77_flag!=1:    {n_ge_not_flagged} NCs"
+                f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {n_flagged_not_ge} NCs"
             )
 
         # Gamma counts per NC
