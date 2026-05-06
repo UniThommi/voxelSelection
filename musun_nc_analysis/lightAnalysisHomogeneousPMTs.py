@@ -33,7 +33,7 @@ from matplotlib.lines import Line2D
 
 sys.path.insert(0, str(Path(__file__).parent))
 from analyseMusunNCs import (
-    read_nc_data_file,
+    read_nc_data_file, read_material_map,
     _w1_ks_sorted, _merge_sorted_runs,
     COLORS, N_PERMUTATIONS, RANDOM_SEED, W1_THRESHOLD_FRAC,
     _log_resources, _save,
@@ -77,6 +77,9 @@ class LightRunData:
         default_factory=lambda: np.array([], dtype=np.float64))
     nc_z_m: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.float64))
+    # True if the NC occurred in the water volume (resolved per-file from sim 1)
+    nc_is_water: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool))
     # One entry per NC-producing muon from sim 1
     muon_photon_counts: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.int64))
@@ -113,38 +116,49 @@ def _load_optical_file(fp: Path) -> dict | None:
 def _load_nc_keys(sim1_run_dir: Path) -> tuple[
     dict[tuple[int, int], int],
     dict[tuple[int, int], tuple[float, float, float]],
+    dict[tuple[int, int], bool],
     dict[int, list[tuple[int, int]]],
 ]:
     """
     Read all unique NC (evtid, track_id) keys from a sim 1 run directory.
 
+    The material map is read per HDF5 file (each file is an independent
+    Geant4 process and may assign different IDs to the same materials).
+
     Returns:
-      nc_ge77:  (evtid, tid) -> ge77 flag (0 or 1)
-      nc_pos:   (evtid, tid) -> (x_m, y_m, z_m)
-      muon_nc:  muon_evtid  -> list of NC keys belonging to that muon
+      nc_ge77:    (evtid, tid) -> ge77 flag (0 or 1)
+      nc_pos:     (evtid, tid) -> (x_m, y_m, z_m)
+      nc_is_water:(evtid, tid) -> True if NC occurred in water
+      muon_nc:    muon_evtid  -> list of NC keys belonging to that muon
     """
-    nc_ge77: dict[tuple[int, int], int] = {}
-    nc_pos: dict[tuple[int, int], tuple[float, float, float]] = {}
+    nc_ge77:    dict[tuple[int, int], int] = {}
+    nc_pos:     dict[tuple[int, int], tuple[float, float, float]] = {}
+    nc_is_water: dict[tuple[int, int], bool] = {}
     muon_nc: dict[int, list] = defaultdict(list)
 
     for fp in sorted(sim1_run_dir.glob("output_t*.hdf5")):
         data = read_nc_data_file(fp)
         if data["evtid"].size == 0:
             continue
-        for eid, tid, ge77, x, y, z in zip(
+        # Per-file material map: each Geant4 process may assign different IDs
+        fmat_map = read_material_map(fp)
+        water_ids = {k for k, v in fmat_map.items() if v == "Water"}
+        for eid, tid, ge77, x, y, z, mid in zip(
             data["evtid"].tolist(), data["track_id"].tolist(),
             data["ge77"].tolist(),
             data["x_m"].tolist(), data["y_m"].tolist(), data["z_m"].tolist(),
+            data["material_id"].tolist(),
         ):
             key = (eid, tid)
             if key not in nc_ge77:
-                nc_ge77[key] = ge77
-                nc_pos[key] = (x, y, z)
+                nc_ge77[key]     = ge77
+                nc_pos[key]      = (x, y, z)
+                nc_is_water[key] = (int(mid) in water_ids)
                 muon_nc[eid].append(key)
             elif ge77 > nc_ge77[key]:
                 nc_ge77[key] = ge77
 
-    return nc_ge77, nc_pos, dict(muon_nc)
+    return nc_ge77, nc_pos, nc_is_water, dict(muon_nc)
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +183,7 @@ def load_light_run(
     """
     rd = LightRunData(run_name=sim2_run_dir.name)
 
-    nc_ge77, nc_pos, muon_nc = _load_nc_keys(sim1_run_dir)
+    nc_ge77, nc_pos, nc_is_water, muon_nc = _load_nc_keys(sim1_run_dir)
     if not nc_ge77:
         print(f"  WARNING: no NC data in sim 1 run {sim1_run_dir.name}")
         return rd
@@ -264,6 +278,8 @@ def load_light_run(
     rd.nc_x_m = np.array([nc_pos[k][0] for k in nc_keys_list], dtype=np.float64)
     rd.nc_y_m = np.array([nc_pos[k][1] for k in nc_keys_list], dtype=np.float64)
     rd.nc_z_m = np.array([nc_pos[k][2] for k in nc_keys_list], dtype=np.float64)
+    rd.nc_is_water = np.array(
+        [nc_is_water.get(k, False) for k in nc_keys_list], dtype=bool)
 
     muon_counts = [
         sum(nc_counter.get(k, 0) for k in keys)

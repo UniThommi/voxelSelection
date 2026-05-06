@@ -121,10 +121,8 @@ class RunData:
     muon_pz_mev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     # True if the NC occurred inside the water volume
     nc_is_water: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
-    # Raw material ID per NC (index into material_map)
-    nc_material_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
-    # Material-ID → name mapping for this run
-    material_map: dict = field(default_factory=dict)
+    # Material name per NC (resolved per-file from //hit/materials/, dtype=object)
+    nc_material_name: np.ndarray = field(default_factory=lambda: np.array([], dtype=object))
     # Number of capture gammas per NC
     nc_n_gammas: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
 
@@ -294,9 +292,9 @@ def load_run(run_dir: Path) -> RunData:
         return rd
 
     nc_parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m",
-                        "material_id")
+        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
     }
+    nc_mat_name_parts: list[np.ndarray] = []
     mu_parts: dict[str, list[np.ndarray]] = {
         k: [] for k in (
             "evtid", "ekin_mev", "zenith_deg", "azimuth_deg",
@@ -311,6 +309,13 @@ def load_run(run_dir: Path) -> RunData:
         if nc["evtid"].size > 0:
             for k in nc_parts:
                 nc_parts[k].append(nc[k])
+            # Read per-file material map and immediately resolve IDs → names
+            fmat_map = read_material_map(fp)
+            mat_names = np.array(
+                [fmat_map.get(int(mid), f"ID:{mid}") for mid in nc["material_id"]],
+                dtype=object,
+            )
+            nc_mat_name_parts.append(mat_names)
 
         mu = read_muon_data_file(fp)
         if mu["evtid"].size > 0:
@@ -324,14 +329,14 @@ def load_run(run_dir: Path) -> RunData:
 
     # ---- NC deduplication on (evtid, nC_track_id) ----
     if nc_parts["evtid"]:
-        evtid_arr   = np.concatenate(nc_parts["evtid"])
-        track_arr   = np.concatenate(nc_parts["track_id"])
-        ge77_arr    = np.concatenate(nc_parts["ge77"])
-        time_arr    = np.concatenate(nc_parts["time_ns"])
-        x_arr       = np.concatenate(nc_parts["x_m"])
-        y_arr       = np.concatenate(nc_parts["y_m"])
-        z_arr       = np.concatenate(nc_parts["z_m"])
-        mat_id_arr  = np.concatenate(nc_parts["material_id"])
+        evtid_arr    = np.concatenate(nc_parts["evtid"])
+        track_arr    = np.concatenate(nc_parts["track_id"])
+        ge77_arr     = np.concatenate(nc_parts["ge77"])
+        time_arr     = np.concatenate(nc_parts["time_ns"])
+        x_arr        = np.concatenate(nc_parts["x_m"])
+        y_arr        = np.concatenate(nc_parts["y_m"])
+        z_arr        = np.concatenate(nc_parts["z_m"])
+        mat_name_arr = np.concatenate(nc_mat_name_parts)
 
         pair_keys = np.stack([evtid_arr, track_arr], axis=1)
         _, unique_idx, inverse = np.unique(
@@ -350,16 +355,9 @@ def load_run(run_dir: Path) -> RunData:
         rd.nc_z_m     = z_arr[unique_idx]
         rd.nc_r_m     = np.sqrt(x_arr[unique_idx]**2 + y_arr[unique_idx]**2)
 
-        # Determine water flag and store full material info
-        mat_map: dict[int, str] = {}
-        for fp in hdf5_files:
-            mat_map = read_material_map(fp)
-            if mat_map:
-                break
-        rd.material_map = mat_map
-        rd.nc_material_id = mat_id_arr[unique_idx]
-        water_ids = [k for k, v in mat_map.items() if v == "Water"]
-        rd.nc_is_water = np.isin(mat_id_arr[unique_idx], water_ids)
+        # Material names were already resolved per-file; apply dedup index
+        rd.nc_material_name = mat_name_arr[unique_idx]
+        rd.nc_is_water      = rd.nc_material_name == "Water"
 
         # Gamma counts per NC
         if gamma_evtid_l:
@@ -1083,12 +1081,11 @@ def plot_nc_material_distribution(run_list: list[RunData], out_dir: Path) -> Non
     counts_noge77: dict[str, int] = {}
 
     for rd in run_list:
-        if rd.nc_evtid.size == 0 or rd.nc_material_id.size == 0:
+        if rd.nc_evtid.size == 0 or rd.nc_material_name.size == 0:
             continue
         is_ge77mu = np.isin(rd.nc_evtid, rd.ge77_evtids)
-        for mat_id in np.unique(rd.nc_material_id):
-            name = rd.material_map.get(int(mat_id), f"ID:{mat_id}")
-            mat_mask = rd.nc_material_id == mat_id
+        for name in np.unique(rd.nc_material_name):
+            mat_mask = rd.nc_material_name == name
             counts_ge77[name]   = counts_ge77.get(name, 0)   + int((mat_mask & is_ge77mu).sum())
             counts_noge77[name] = counts_noge77.get(name, 0) + int((mat_mask & ~is_ge77mu).sum())
 
