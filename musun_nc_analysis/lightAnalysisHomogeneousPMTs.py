@@ -161,16 +161,16 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
             elif ge77 > nc_ge77[key]:
                 nc_ge77[key] = ge77
 
-    # Cross-check: ge77 flag must match EnrichedGermanium0.913 material exactly
-    ge77_keys     = {k for k, v in nc_ge77.items()         if v == 1}
+    # Cross-check: every NC with ge77_flag=1 must be in EnrichedGermanium0.913.
+    # The reverse is not required — captures on Ge-70/72/73/74 are in germanium
+    # but do not produce Ge-77.
+    ge77_keys      = {k for k, v in nc_ge77.items()         if v == 1}
     germanium_keys = {k for k, v in nc_in_germanium.items() if v}
-    if ge77_keys != germanium_keys:
-        extra_flagged = ge77_keys - germanium_keys
-        extra_ge      = germanium_keys - ge77_keys
+    flagged_outside_ge = ge77_keys - germanium_keys
+    if flagged_outside_ge:
         raise RuntimeError(
             f"Ge77 flag / EnrichedGermanium0.913 mismatch in {sim1_run_dir}:\n"
-            f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {len(extra_flagged)} NCs\n"
-            f"  in EnrichedGermanium0.913 but ge77_flag!=1:    {len(extra_ge)} NCs"
+            f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {len(flagged_outside_ge)} NCs"
         )
 
     return nc_ge77, nc_pos, nc_is_water, dict(muon_nc)
