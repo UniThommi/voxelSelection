@@ -27,6 +27,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
+from itertools import combinations as _combinations
 from scipy.stats import ks_2samp, wasserstein_distance
 
 try:
@@ -1694,9 +1695,6 @@ def convergence_analysis(
     # ------------------------------------------------------------------ #
     print("\n  Convergence: NC count per muon ...", flush=True)
 
-    nc_full_log:   list[np.ndarray] = []
-    nc_cut100_log: list[np.ndarray] = []
-    nc_cut_log:    list[np.ndarray] = []
     nc_full_raw:   list[np.ndarray] = []
     nc_cut100_raw: list[np.ndarray] = []
     nc_cut_raw:    list[np.ndarray] = []
@@ -1704,45 +1702,31 @@ def convergence_analysis(
         full   = rd.nc_counts.astype(np.float64)
         cut100 = full[full <= NC_CUT_100]
         cut    = full[full <= NC_MUON_CUT]
-        nc_full_log.append(np.sort(np.log(full + 1.0)))
-        nc_cut100_log.append(
-            np.sort(np.log(cut100 + 1.0)) if cut100.size > 0
-            else np.array([], dtype=np.float64)
-        )
-        nc_cut_log.append(
-            np.sort(np.log(cut + 1.0)) if cut.size > 0
-            else np.array([], dtype=np.float64)
-        )
         nc_full_raw.append(np.sort(full))
         nc_cut100_raw.append(np.sort(cut100) if cut100.size > 0
                              else np.array([], dtype=np.float64))
         nc_cut_raw.append(np.sort(cut) if cut.size > 0
                           else np.array([], dtype=np.float64))
 
-    dw1_fl,    dks_fl,    rw1_fl,    rks_fl    = _compute_metrics(nc_full_log)
-    dw1_c100l, dks_c100l, rw1_c100l, rks_c100l = _compute_metrics(nc_cut100_log)
-    dw1_cl,    dks_cl,    rw1_cl,    rks_cl    = _compute_metrics(nc_cut_log)
     dw1_fr,    dks_fr,    rw1_fr,    rks_fr    = _compute_metrics(nc_full_raw)
     dw1_c100r, dks_c100r, rw1_c100r, rks_c100r = _compute_metrics(nc_cut100_raw)
     dw1_cr,    dks_cr,    rw1_cr,    rks_cr    = _compute_metrics(nc_cut_raw)
-    del nc_full_log, nc_cut100_log, nc_cut_log, nc_full_raw, nc_cut100_raw, nc_cut_raw
+    del nc_full_raw, nc_cut100_raw, nc_cut_raw
     gc.collect()
     _log_resources("nc_count: all metrics computed", t_conv)
 
-    rec_full,   thr_fl    = _rec_k_from_w1(dw1_fl)
-    rec_cut100, thr_c100l = _rec_k_from_w1(dw1_c100l)
-    rec_cut,    thr_cl    = _rec_k_from_w1(dw1_cl)
+    rec_full,   thr_fr    = _rec_k_from_w1(dw1_fr)
+    rec_cut100, thr_c100r = _rec_k_from_w1(dw1_c100r)
+    rec_cut,    thr_cr    = _rec_k_from_w1(dw1_cr)
     recommendations["nc_count"]         = rec_full
     recommendations["nc_count_cut_100"] = rec_cut100
     recommendations["nc_count_cut"]     = rec_cut
-    print(f"    Full dist       — W1 thr = {thr_fl:.4f}    →  rec k = {rec_full}")
-    print(f"    Cut ≤{NC_CUT_100} dist  — W1 thr = {thr_c100l:.4f}  →  rec k = {rec_cut100}")
-    print(f"    Cut ≤{NC_MUON_CUT:,} dist — W1 thr = {thr_cl:.4f}    →  rec k = {rec_cut}")
+    print(f"    Full dist       — W1 thr = {thr_fr:.4f}    →  rec k = {rec_full}")
+    print(f"    Cut ≤{NC_CUT_100} dist  — W1 thr = {thr_c100r:.4f}  →  rec k = {rec_cut100}")
+    print(f"    Cut ≤{NC_MUON_CUT:,} dist — W1 thr = {thr_cr:.4f}    →  rec k = {rec_cut}")
 
-    # -- Full distribution: 1×2 figure per transform variant --
+    # -- Full distribution: 1×2 figure --
     for fig_tag, fig_label, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec in [
-        ("log", "log-transformed",
-         dw1_fl, dks_fl, rw1_fl, rks_fl, "log(NC+1)", thr_fl, rec_full),
         ("raw", "raw (no transform)",
          dw1_fr, dks_fr, rw1_fr, rks_fr, "NC count", None, None),
     ]:
@@ -1767,14 +1751,8 @@ def convergence_analysis(
         plt.tight_layout()
         _save(fig, out_dir / f"convergence_nc_count_full_{fig_tag}.png")
 
-    # -- Cut distributions: 2×2 figure per transform variant --
+    # -- Cut distributions: 2×2 figure --
     for fig_tag, fig_label, rows_data in [
-        ("log", "log-transformed", [
-            (f"Cut ≤ {NC_CUT_100}",
-             dw1_c100l, dks_c100l, rw1_c100l, rks_c100l, "log(NC+1)", thr_c100l, rec_cut100),
-            (f"Cut ≤ {NC_MUON_CUT:,}",
-             dw1_cl, dks_cl, rw1_cl, rks_cl, "log(NC+1)", thr_cl, rec_cut),
-        ]),
         ("raw", "raw (no transform)", [
             (f"Cut ≤ {NC_CUT_100}",
              dw1_c100r, dks_c100r, rw1_c100r, rks_c100r, "NC count", None, None),
@@ -1872,6 +1850,240 @@ def convergence_analysis(
         _log_resources(f"{obs_key}: saved — total conv elapsed", t_conv)
 
     return recommendations
+
+
+# ---------------------------------------------------------------------------
+# Pairwise Wasserstein distance analysis
+# ---------------------------------------------------------------------------
+def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
+    """Empirical null distribution of W1 distances from all C(n,2) run pairs.
+
+    For each observable (zenith, azimuth, energy, NC count per muon) computes
+    all unique pairwise W1 distances, derives summary statistics, z-scores,
+    and range-normalised distances, and saves a report + two plots per
+    observable (histogram/boxplot and heatmap).
+    """
+    n_runs = len(run_list)
+    if n_runs < 2:
+        print("  Pairwise W1: need ≥ 2 runs; skipping.")
+        return
+
+    run_labels = [rd.run_name for rd in run_list]
+    pair_indices = list(_combinations(range(n_runs), 2))
+    n_pairs = len(pair_indices)
+
+    def _get_zenith(rd: RunData) -> np.ndarray:
+        return rd.muon_zenith_deg
+
+    def _get_azimuth(rd: RunData) -> np.ndarray:
+        return rd.muon_azimuth_deg
+
+    def _get_energy(rd: RunData) -> np.ndarray:
+        e = rd.muon_ekin_mev
+        return np.log(e[e > 0] + 1.0)
+
+    def _get_nc_count(rd: RunData) -> np.ndarray:
+        return rd.nc_counts.astype(np.float64)
+
+    observables = [
+        ("zenith",   "Muon zenith",       "Zenith [°]",           _get_zenith),
+        ("azimuth",  "Muon azimuth",      "Azimuth [°]",          _get_azimuth),
+        ("energy",   "Muon energy",       "log(E_kin [MeV] + 1)", _get_energy),
+        ("nc_count", "NC count per muon", "NC count (raw)",       _get_nc_count),
+    ]
+
+    report_lines: list[str] = [
+        "=== Pairwise Wasserstein Distance Analysis ===",
+        f"Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}",
+        "",
+        "Purpose: estimate the null distribution of W1 distances expected from",
+        "finite-sample fluctuations when all runs share the same underlying",
+        "physical process.  The 95th and 99th percentiles define empirical",
+        "acceptance thresholds for future simulation runs.",
+        "",
+    ]
+
+    for obs_key, obs_title, obs_xlabel, getter in observables:
+        print(f"\n  Pairwise W1: {obs_title} ...", flush=True)
+
+        arrays = [getter(rd) for rd in run_list]
+        if any(a.size == 0 for a in arrays):
+            print(f"    WARNING: empty array for at least one run; skipping {obs_title}.")
+            continue
+        sorted_arrays = [np.sort(a) for a in arrays]
+
+        # Compute all C(n_runs, 2) pairwise W1 distances
+        pw_w1 = np.zeros((n_runs, n_runs))
+        pair_vals: list[float] = []
+        for i, j in pair_indices:
+            w1, _ = _w1_ks_sorted(sorted_arrays[i], sorted_arrays[j])
+            pw_w1[i, j] = w1
+            pw_w1[j, i] = w1
+            pair_vals.append(w1)
+        pv = np.array(pair_vals, dtype=np.float64)
+
+        # Summary statistics
+        mean_w = float(pv.mean())
+        med_w  = float(np.median(pv))
+        std_w  = float(pv.std(ddof=0))
+        min_w  = float(pv.min())
+        max_w  = float(pv.max())
+        p95_w  = float(np.percentile(pv, 95))
+        p99_w  = float(np.percentile(pv, 99))
+
+        # Normalizations
+        all_data   = np.concatenate(arrays)
+        data_range = float(all_data.max() - all_data.min())
+        del all_data
+
+        z_scores   = (pv - mean_w) / std_w  if std_w > 0.0  else np.zeros_like(pv)
+        norm_range = pv / data_range         if data_range > 0.0 else np.zeros_like(pv)
+
+        # Build symmetric matrices
+        z_mat   = np.zeros((n_runs, n_runs))
+        rng_mat = np.zeros((n_runs, n_runs))
+        for idx, (i, j) in enumerate(pair_indices):
+            z_mat[i, j]   = z_mat[j, i]   = z_scores[idx]
+            rng_mat[i, j] = rng_mat[j, i] = norm_range[idx]
+
+        n_exceed_p99 = int(np.sum(pv > p99_w))
+        consistent   = n_exceed_p99 == 0
+
+        # ---- Text report ----
+        sep   = "=" * 62
+        hdr   = "           " + "".join(f"  {lb:>8s}" for lb in run_labels)
+
+        def _mat_block(mat: np.ndarray, fmt: str) -> list[str]:
+            rows = [hdr]
+            for i in range(n_runs):
+                row = f"  {run_labels[i]:>8s}" + "".join(
+                    "     --  " if i == j else f"  {mat[i, j]:{fmt}}"
+                    for j in range(n_runs)
+                )
+                rows.append(row)
+            return rows
+
+        report_lines += [
+            sep,
+            f"Observable: {obs_title}",
+            sep,
+            "",
+            "  Summary statistics (absolute W1):",
+            f"    Mean:                  {mean_w:>14.6f}",
+            f"    Median:                {med_w:>14.6f}",
+            f"    Std (ddof=0):          {std_w:>14.6f}",
+            f"    Min:                   {min_w:>14.6f}",
+            f"    Max:                   {max_w:>14.6f}",
+            f"    95th percentile:       {p95_w:>14.6f}  [empirical threshold]",
+            f"    99th percentile:       {p99_w:>14.6f}  [strict threshold]",
+            f"    Data range:            {data_range:>14.6f}",
+            (f"    W1_mean / data range:  {mean_w/data_range:>14.6f}"
+             if data_range > 0 else "    W1_mean / data range:       (range = 0)"),
+            "",
+            "  Pairwise W1 matrix (absolute):",
+        ] + _mat_block(pw_w1, "8.4f") + [
+            "",
+            "  Pairwise W1 matrix (z-score = (W − mean) / std):",
+        ] + _mat_block(z_mat, "8.3f") + [
+            "",
+            "  Pairwise W1 matrix (W / data range):",
+        ] + _mat_block(rng_mat, "8.6f") + [
+            "",
+            "  Interpretation:",
+            f"    Intrinsic fluctuation (1σ):   {std_w:.6f}"
+            + (f"  ({std_w / data_range * 100:.4f}% of data range)"
+               if data_range > 0 else ""),
+            f"    'Normal' W1 range:            [{mean_w - std_w:.4f}, {mean_w + std_w:.4f}]  (mean ± 1σ)",
+            f"    Empirical threshold (95th):   {p95_w:.6f}",
+            f"    Strict threshold (99th):      {p99_w:.6f}",
+            f"    Pairs exceeding 99th pct:     {n_exceed_p99}/{n_pairs}",
+            f"    Runs mutually consistent:     {'YES' if consistent else 'NO — inspect heatmap'}",
+            "",
+            "  Acceptance criterion for future runs:",
+            f"    W1(new run, combined reference) ≤ {p95_w:.6f}  (95th pct, recommended)",
+            f"    W1(new run, combined reference) ≤ {p99_w:.6f}  (99th pct, strict)",
+            "",
+        ]
+
+        # ---- Plot 1: Histogram + Boxplot ----
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle(
+            f"Pairwise W₁ — {obs_title}  ({n_pairs} pairs, {n_runs} runs)",
+            fontsize=13,
+        )
+
+        ax = axes[0]
+        n_bins = max(7, min(20, n_pairs // 3))
+        ax.hist(pv, bins=n_bins, color=COLORS["blue"], edgecolor="black",
+                linewidth=0.6, alpha=0.8)
+        ax.axvline(mean_w, color=COLORS["orange"], linewidth=1.8,
+                   linestyle="--", label=f"Mean = {mean_w:.4f}")
+        ax.axvline(mean_w - std_w, color=COLORS["orange"], linewidth=1.0,
+                   linestyle=":", alpha=0.7, label=f"±1σ = {std_w:.4f}")
+        ax.axvline(mean_w + std_w, color=COLORS["orange"], linewidth=1.0,
+                   linestyle=":", alpha=0.7)
+        ax.axvline(p95_w, color=COLORS["red"], linewidth=1.5,
+                   linestyle="--", label=f"95th pct = {p95_w:.4f}")
+        ax.axvline(p99_w, color=COLORS["purple"], linewidth=1.5,
+                   linestyle=":", label=f"99th pct = {p99_w:.4f}")
+        ax.set_xlabel(f"W₁ ({obs_xlabel})", fontsize=11)
+        ax.set_ylabel("Count", fontsize=11)
+        ax.set_title("Distribution of pairwise W₁", fontsize=11)
+        ax.legend(fontsize=9)
+        ax.tick_params(labelsize=9)
+
+        ax = axes[1]
+        ax.boxplot(
+            pv, vert=True, patch_artist=True,
+            boxprops=dict(facecolor=COLORS["blue"], alpha=0.5),
+            medianprops=dict(color="black", linewidth=2),
+            whiskerprops=dict(linewidth=1.5),
+            capprops=dict(linewidth=1.5),
+            flierprops=dict(marker="o", markersize=5, alpha=0.6,
+                            markerfacecolor=COLORS["blue"]),
+        )
+        ax.axhline(p95_w, color=COLORS["red"], linewidth=1.5,
+                   linestyle="--", label=f"95th pct = {p95_w:.4f}")
+        ax.axhline(p99_w, color=COLORS["purple"], linewidth=1.5,
+                   linestyle=":", label=f"99th pct = {p99_w:.4f}")
+        ax.set_ylabel(f"W₁ ({obs_xlabel})", fontsize=11)
+        ax.set_title("Boxplot of pairwise W₁", fontsize=11)
+        ax.legend(fontsize=9)
+        ax.tick_params(labelsize=9)
+        ax.set_xticks([])
+
+        plt.tight_layout()
+        _save(fig, out_dir / f"pairwise_w1_{obs_key}_dist.png")
+
+        # ---- Plot 2: Heatmap ----
+        off_diag = pw_w1[~np.eye(n_runs, dtype=bool)]
+        vmax = float(off_diag.max()) if off_diag.size > 0 else 1.0
+
+        fig, ax = plt.subplots(figsize=(9, 8))
+        im = ax.imshow(pw_w1, cmap="viridis", aspect="equal",
+                       vmin=0.0, vmax=vmax)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label(f"W₁ ({obs_xlabel})", fontsize=11)
+        ax.set_xticks(range(n_runs))
+        ax.set_yticks(range(n_runs))
+        ax.set_xticklabels(run_labels, rotation=45, ha="right", fontsize=9)
+        ax.set_yticklabels(run_labels, fontsize=9)
+        for i in range(n_runs):
+            for j in range(n_runs):
+                val = pw_w1[i, j]
+                txt = "—" if i == j else f"{val:.3f}"
+                brightness = val / vmax if (vmax > 0 and i != j) else 0.0
+                txt_color  = "white" if brightness < 0.6 else "black"
+                ax.text(j, i, txt, ha="center", va="center",
+                        fontsize=7, color=txt_color)
+        ax.set_title(f"Pairwise W₁ matrix — {obs_title}", fontsize=12)
+        plt.tight_layout()
+        _save(fig, out_dir / f"pairwise_w1_{obs_key}_heatmap.png")
+
+    # Write report
+    out_path = out_dir / "pairwise_w1_statistics.txt"
+    out_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    print(f"\n  Saved: {out_path.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -2059,6 +2271,10 @@ def main() -> None:
     recommendations = convergence_analysis(run_list, out_dir,
                                            full_convergence=args.full_convergence)
     _log_resources("convergence analysis done", t_main)
+
+    print("\n--- Pairwise W1 analysis ---")
+    pairwise_w1_analysis(run_list, out_dir)
+    _log_resources("pairwise W1 analysis done", t_main)
 
     print("\n--- Statistics ---")
     write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
