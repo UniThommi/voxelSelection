@@ -46,6 +46,16 @@ PARTICLES_GROUP = "/hit/particles"
 
 NC_CUT_100 = 100
 
+# NC-level fields used for the 3-level statistical convergence test
+NC_FIELDS_FOR_CONV: dict[str, str] = {
+    "nc_time_ns":  "NC time [ns]",
+    "nc_z_m":      "NC z position [m]",
+    "nc_r_m":      "NC r position [m]",
+    "nc_phi_rad":  "NC φ [rad]",
+    "nc_ge77":     "Ge77 flag",
+    "nc_n_gammas": "N capture gammas",
+}
+
 DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
@@ -2087,6 +2097,390 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Statistical convergence test (3 levels)
+# ---------------------------------------------------------------------------
+
+def _extract_nc_fields_run(rd: RunData) -> dict[str, np.ndarray]:
+    """Extract NC-level fields from a RunData for convergence analysis."""
+    return {
+        "nc_time_ns":  rd.nc_time_ns.astype(np.float64),
+        "nc_z_m":      rd.nc_z_m.astype(np.float64),
+        "nc_r_m":      rd.nc_r_m.astype(np.float64),
+        "nc_phi_rad":  rd.nc_phi_rad.astype(np.float64),
+        "nc_ge77":     rd.nc_ge77.astype(np.float64),
+        "nc_n_gammas": rd.nc_n_gammas.astype(np.float64),
+    }
+
+
+def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
+    """Load and deduplicate NC fields from a flat list of HDF5 files.
+
+    Deduplication is on (evtid, nC_track_id), same logic as load_run.
+    Returns arrays for each key in NC_FIELDS_FOR_CONV.
+    """
+    parts: dict[str, list[np.ndarray]] = {
+        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
+    }
+    gamma_evtid_l: list[np.ndarray] = []
+    gamma_nc_id_l: list[np.ndarray] = []
+
+    for fp in hdf5_files:
+        nc = read_nc_data_file(fp)
+        if nc["evtid"].size > 0:
+            for k in parts:
+                parts[k].append(nc[k])
+        ge, gn = read_gamma_count_file(fp)
+        if ge.size > 0:
+            gamma_evtid_l.append(ge)
+            gamma_nc_id_l.append(gn)
+
+    empty = {k: np.array([], dtype=np.float64) for k in NC_FIELDS_FOR_CONV}
+    if not parts["evtid"]:
+        return empty
+
+    evtid_arr = np.concatenate(parts["evtid"])
+    track_arr = np.concatenate(parts["track_id"])
+    ge77_arr  = np.concatenate(parts["ge77"])
+    time_arr  = np.concatenate(parts["time_ns"])
+    x_arr     = np.concatenate(parts["x_m"])
+    y_arr     = np.concatenate(parts["y_m"])
+    z_arr     = np.concatenate(parts["z_m"])
+
+    pair_keys = np.stack([evtid_arr, track_arr], axis=1)
+    _, unique_idx, inverse = np.unique(
+        pair_keys, axis=0, return_index=True, return_inverse=True
+    )
+    unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
+    np.maximum.at(unique_ge77, inverse, ge77_arr)
+    unique_evtids = evtid_arr[unique_idx]
+    unique_tracks = track_arr[unique_idx]
+
+    if gamma_evtid_l:
+        all_ge = np.concatenate(gamma_evtid_l)
+        all_gn = np.concatenate(gamma_nc_id_l)
+        gamma_pairs = np.stack([all_ge, all_gn], axis=1)
+        upairs, gcounts = np.unique(gamma_pairs, axis=0, return_counts=True)
+        gamma_lookup = {
+            (int(p[0]), int(p[1])): int(c) for p, c in zip(upairs, gcounts)
+        }
+        del all_ge, all_gn, gamma_pairs, upairs, gcounts
+    else:
+        gamma_lookup = {}
+
+    nc_n_gammas = np.array(
+        [gamma_lookup.get((int(e), int(t)), 0)
+         for e, t in zip(unique_evtids, unique_tracks)],
+        dtype=np.float64,
+    )
+
+    return {
+        "nc_time_ns":  time_arr[unique_idx].astype(np.float64),
+        "nc_z_m":      z_arr[unique_idx].astype(np.float64),
+        "nc_r_m":      np.sqrt(x_arr[unique_idx] ** 2 + y_arr[unique_idx] ** 2),
+        "nc_phi_rad":  np.arctan2(y_arr[unique_idx], x_arr[unique_idx]),
+        "nc_ge77":     unique_ge77.astype(np.float64),
+        "nc_n_gammas": nc_n_gammas,
+    }
+
+
+def level1_dkw_bound(
+    n1: int = 10_000_000,
+    n2: int = 100_000_000,
+    delta: float = 0.05,
+    eps_target: float = 1e-3,
+) -> float:
+    """Print and return Δ_max = ε(n1) + ε(n2) under the DKW inequality."""
+    eps1 = np.sqrt(np.log(2.0 / delta) / (2.0 * n1))
+    eps2 = np.sqrt(np.log(2.0 / delta) / (2.0 * n2))
+    delta_max = eps1 + eps2
+    print(f"\n{'='*60}")
+    print("Level 1 — DKW Analytical Bound")
+    print(f"  n(1e7)    = {n1:.2e},  n(1e8) = {n2:.2e}")
+    print(f"  ε(n1, δ={delta}) = {eps1:.6f}")
+    print(f"  ε(n2, δ={delta}) = {eps2:.6f}")
+    print(f"  Δ_max = ε(n1) + ε(n2) = {delta_max:.6f}")
+    print(f"  ε_target  = {eps_target:.2e}")
+    if delta_max < eps_target:
+        print("  PASS: Δ_max < ε_target  ← KS sup-norm bounded at 95% confidence")
+    else:
+        print("  INFO: Δ_max ≥ ε_target  (DKW bound not tight enough for this ε_target)")
+    return delta_max
+
+
+def level2_pairwise_fluctuations(
+    run_list: list[RunData],
+) -> dict[str, tuple[float, float]]:
+    """Compute all C(n,2) pairwise W1 distances between runs per NC field.
+
+    Returns {field_key: (mean_w1, std_w1)}.
+    """
+    n_runs = len(run_list)
+    pair_indices = list(_combinations(range(n_runs), 2))
+    n_pairs = len(pair_indices)
+
+    print(f"\n{'='*60}")
+    print("Level 2 — Leave-One-Out Pairwise W1 Fluctuations")
+    print(f"  Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}")
+
+    fluctuations: dict[str, tuple[float, float]] = {}
+
+    for field_key, field_label in NC_FIELDS_FOR_CONV.items():
+        arrays = [_extract_nc_fields_run(rd)[field_key] for rd in run_list]
+        if any(a.size == 0 for a in arrays):
+            print(f"  SKIP {field_key}: empty array in ≥1 run")
+            continue
+        sorted_arrs = [np.sort(a) for a in arrays]
+
+        w1_vals: list[float] = []
+        for i, j in pair_indices:
+            w1, _ = _w1_ks_sorted(sorted_arrs[i], sorted_arrs[j])
+            if not np.isnan(w1):
+                w1_vals.append(w1)
+
+        if not w1_vals:
+            continue
+        arr = np.array(w1_vals)
+        mean_w1 = float(arr.mean())
+        std_w1  = float(arr.std())
+        fluctuations[field_key] = (mean_w1, std_w1)
+        print(f"  {field_key:20s}: mean W1 = {mean_w1:.6g}  std = {std_w1:.6g}")
+
+    return fluctuations
+
+
+_SUBSAMPLE_DIRS: list[tuple[str, float]] = [
+    ("1e4", 1e4),
+    ("1e5", 1e5),
+    ("1e6", 1e6),
+    ("1e7", 1e7),
+]
+
+
+def _fit_power_law(
+    n_arr: np.ndarray, w1_arr: np.ndarray
+) -> tuple[float, float] | None:
+    """Fit D(n) = a * n^(-b) via log-log polyfit on valid (n, w1) pairs.
+    Returns (a, b) or None if fewer than 2 valid points.
+    """
+    valid = ~np.isnan(w1_arr) & (w1_arr > 0) & (n_arr > 0)
+    if valid.sum() < 2:
+        return None
+    coeffs = np.polyfit(np.log10(n_arr[valid]), np.log10(w1_arr[valid]), 1)
+    return float(10 ** coeffs[1]), float(-coeffs[0])
+
+
+def _plot_learning_curve(
+    n_arr: np.ndarray,
+    w1_data: dict[str, list[float]],
+    fluctuations: dict[str, tuple[float, float]],
+    out_dir: Path,
+) -> None:
+    n_fields = len(NC_FIELDS_FOR_CONV)
+    ncols = 3
+    nrows = (n_fields + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
+    axes_flat = np.array(axes).flatten()
+
+    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
+        ax = axes_flat[idx]
+        w1_arr = np.array(w1_data[field_key])
+        valid = ~np.isnan(w1_arr) & (w1_arr > 0)
+
+        ax.scatter(n_arr[valid], w1_arr[valid],
+                   color=COLORS["blue"], zorder=5, s=60, label="W1 to 1e8 ref")
+
+        fit = _fit_power_law(n_arr, w1_arr)
+        if fit is not None:
+            a_f, b_f = fit
+            n_min = float(n_arr[valid].min()) if valid.any() else 1e4
+            n_plot = np.logspace(np.log10(n_min), 8.5, 300)
+            ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
+                    color=COLORS["red"], linewidth=1.5,
+                    label=f"D(n)={a_f:.3g}·n^(−{b_f:.3f})")
+            w1_1e8 = a_f * 1e8 ** (-b_f)
+            ax.scatter([1e8], [w1_1e8], marker="*", s=120,
+                       color=COLORS["red"], zorder=6,
+                       label=f"D(1e8)≈{w1_1e8:.4g}")
+            ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8)
+
+        if field_key in fluctuations:
+            m_fl, s_fl = fluctuations[field_key]
+            ax.axhline(m_fl, color=COLORS["green"], linestyle="--",
+                       linewidth=1.0, label=f"L2 mean={m_fl:.4g}")
+            lo = max(m_fl - s_fl, 1e-30)
+            ax.axhspan(lo, m_fl + s_fl, alpha=0.15, color=COLORS["green"])
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("N muon samples", fontsize=11)
+        ax.set_ylabel("W1 distance", fontsize=11)
+        ax.set_title(field_label, fontsize=12)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=9)
+
+    for extra in axes_flat[n_fields:]:
+        extra.set_visible(False)
+
+    fig.suptitle("Convergence Learning Curve: W1 vs Sample Size", fontsize=14)
+    plt.tight_layout()
+    _save(fig, out_dir / "convergence_learning_curve.png")
+
+
+def _plot_learning_curve_normalized(
+    n_arr: np.ndarray,
+    w1_data: dict[str, list[float]],
+    fluctuations: dict[str, tuple[float, float]],
+    out_dir: Path,
+) -> None:
+    n_fields = len(NC_FIELDS_FOR_CONV)
+    ncols = 3
+    nrows = (n_fields + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
+    axes_flat = np.array(axes).flatten()
+
+    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
+        ax = axes_flat[idx]
+
+        if field_key not in fluctuations or fluctuations[field_key][0] == 0:
+            ax.text(0.5, 0.5, "No L2 baseline", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=11)
+            ax.set_title(field_label, fontsize=12)
+            continue
+
+        m_fl, s_fl = fluctuations[field_key]
+        w1_arr  = np.array(w1_data[field_key])
+        w1_norm = w1_arr / m_fl
+        valid = ~np.isnan(w1_norm) & (w1_norm > 0)
+
+        ax.scatter(n_arr[valid], w1_norm[valid],
+                   color=COLORS["blue"], zorder=5, s=60, label="W1/mean(L2)")
+
+        fit = _fit_power_law(n_arr, w1_norm)
+        if fit is not None:
+            a_f, b_f = fit
+            n_min = float(n_arr[valid].min()) if valid.any() else 1e4
+            n_plot = np.logspace(np.log10(n_min), 8.5, 300)
+            ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
+                    color=COLORS["red"], linewidth=1.5,
+                    label=f"{a_f:.3g}·n^(−{b_f:.3f})")
+            val_1e8 = a_f * 1e8 ** (-b_f)
+            ax.scatter([1e8], [val_1e8], marker="*", s=120,
+                       color=COLORS["red"], zorder=6,
+                       label=f"at 1e8: {val_1e8:.4g}")
+            ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8)
+
+        ax.axhline(1.0, color=COLORS["green"], linestyle="--",
+                   linewidth=1.0, label="= L2 mean fluctuation")
+        rel_std = s_fl / m_fl if m_fl > 0 else 0.0
+        ax.axhspan(max(1.0 - rel_std, 1e-30), 1.0 + rel_std,
+                   alpha=0.15, color=COLORS["green"])
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("N muon samples", fontsize=11)
+        ax.set_ylabel("W1 / mean(W1_L2)", fontsize=11)
+        ax.set_title(field_label, fontsize=12)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=9)
+
+    for extra in axes_flat[n_fields:]:
+        extra.set_visible(False)
+
+    fig.suptitle("Normalized Convergence: W1 / L2 Mean Fluctuation", fontsize=14)
+    plt.tight_layout()
+    _save(fig, out_dir / "convergence_learning_curve_normalized.png")
+
+
+def level3_learning_curve(
+    data_path: Path,
+    run_list: list[RunData],
+    fluctuations: dict[str, tuple[float, float]],
+    out_dir: Path,
+) -> None:
+    """Load sub-sampled data; compute W1 vs 1e8; fit power law; save two plots."""
+    print(f"\n{'='*60}")
+    print("Level 3 — Learning Curve & Power Law Extrapolation")
+
+    # Build sorted reference arrays from all runs (= full 1e8 dataset)
+    ref_sorted: dict[str, np.ndarray] = {}
+    for field_key in NC_FIELDS_FOR_CONV:
+        parts_list = [_extract_nc_fields_run(rd)[field_key] for rd in run_list]
+        combined = np.concatenate([a for a in parts_list if a.size > 0])
+        ref_sorted[field_key] = np.sort(combined)
+    total_nc = sum(rd.nc_evtid.size for rd in run_list)
+    print(f"  Reference: {total_nc:,} NCs from {len(run_list)} runs")
+
+    w1_data: dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
+    n_vals: list[float] = []
+
+    for size_dir, n_val in _SUBSAMPLE_DIRS:
+        subdir = data_path / size_dir
+        if not subdir.exists():
+            print(f"  WARNING: {subdir} not found; skipping n={n_val:.0e}")
+            continue
+        hdf5_files = sorted(subdir.glob("output_t*.hdf5"))
+        if not hdf5_files:
+            hdf5_files = sorted(subdir.glob("*.hdf5"))
+        if not hdf5_files:
+            print(f"  WARNING: no HDF5 files in {subdir}; skipping")
+            continue
+
+        print(f"  Loading {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
+        sub = load_nc_fields_flat(hdf5_files)
+        n_vals.append(n_val)
+
+        for field_key in NC_FIELDS_FOR_CONV:
+            sub_s = np.sort(sub[field_key])
+            ref_s = ref_sorted[field_key]
+            if sub_s.size == 0 or ref_s.size == 0:
+                w1_data[field_key].append(float("nan"))
+                continue
+            w1, _ = _w1_ks_sorted(sub_s, ref_s)
+            w1_data[field_key].append(float(w1))
+            print(f"    {field_key:20s}: W1 = {w1:.6g}")
+
+    if len(n_vals) < 2:
+        print("  Fewer than 2 sample sizes found; skipping learning-curve plots.")
+        return
+
+    n_arr = np.array(n_vals, dtype=np.float64)
+    _plot_learning_curve(n_arr, w1_data, fluctuations, out_dir)
+    _plot_learning_curve_normalized(n_arr, w1_data, fluctuations, out_dir)
+
+
+def run_statistical_convergence_test(
+    data_path: Path,
+    run_list: list[RunData],
+    out_dir: Path,
+    eps_target: float = 1e-3,
+) -> None:
+    """Orchestrate the 3-level statistical convergence test.
+
+    Level 1: DKW analytical KS bound for 1e7 vs 1e8 samples.
+    Level 2: Pairwise W1 fluctuation scale from the 10×1e7 runs.
+    Level 3: W1 learning curve for 1e4/1e5/1e6/1e7 vs full 1e8 reference.
+    """
+    n_muons_per_run = int(np.mean([rd.n_muons_total for rd in run_list]))
+    total_muons     = sum(rd.n_muons_total for rd in run_list)
+
+    print(f"\n{'='*60}")
+    print("3-Level Statistical Convergence Test")
+    print(f"  {len(run_list)} runs  |  ~{n_muons_per_run:.2e} muons/run  "
+          f"|  total ~{total_muons:.2e} muons")
+    print(f"{'='*60}")
+
+    level1_dkw_bound(n1=n_muons_per_run, n2=total_muons, eps_target=eps_target)
+
+    fluctuations = level2_pairwise_fluctuations(run_list)
+
+    level3_learning_curve(data_path, run_list, fluctuations, out_dir)
+
+    print(f"\n{'='*60}")
+    print("Convergence test complete.")
+    print(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
 # Statistics output
 # ---------------------------------------------------------------------------
 def write_statistics(
@@ -2188,6 +2582,24 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Also compute convergence for zenith, azimuth, and energy (slow).",
     )
+    p.add_argument(
+        "--convergence-test",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the 3-level statistical convergence test: "
+            "(1) DKW analytical bound, "
+            "(2) pairwise W1 fluctuations across the 10 runs, "
+            "(3) learning curve vs sub-sampled data in 1e4/…/1e7/ subdirectories."
+        ),
+    )
+    p.add_argument( # Not really needed
+        "--eps-target",
+        type=float,
+        default=1e-3,
+        metavar="EPS",
+        help="Level-1 DKW target: flag if Δ_max < EPS (default: 1e-3).",
+    )
     return p.parse_args()
 
 
@@ -2275,6 +2687,16 @@ def main() -> None:
     print("\n--- Pairwise W1 analysis ---")
     pairwise_w1_analysis(run_list, out_dir)
     _log_resources("pairwise W1 analysis done", t_main)
+
+    if args.convergence_test:
+        print("\n--- 3-Level Statistical Convergence Test ---")
+        run_statistical_convergence_test(
+            data_path=data_path,
+            run_list=run_list,
+            out_dir=out_dir,
+            eps_target=args.eps_target,
+        )
+        _log_resources("convergence test done", t_main)
 
     print("\n--- Statistics ---")
     write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
