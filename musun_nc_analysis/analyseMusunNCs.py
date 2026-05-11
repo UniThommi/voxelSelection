@@ -2114,11 +2114,29 @@ def _extract_nc_fields_run(rd: RunData) -> dict[str, np.ndarray]:
     }
 
 
-def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
+def _extract_nc_fields_run_ge77(rd: RunData) -> dict[str, np.ndarray]:
+    """Like _extract_nc_fields_run but restricted to Ge77-producing muons."""
+    nc_ge77_mu_mask   = np.isin(rd.nc_evtid, rd.ge77_evtids)
+    counts_ge77_mask  = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
+    return {
+        "nc_time_ns":  rd.nc_time_ns[nc_ge77_mu_mask].astype(np.float64),
+        "nc_z_m":      rd.nc_z_m[nc_ge77_mu_mask].astype(np.float64),
+        "nc_r_m":      rd.nc_r_m[nc_ge77_mu_mask].astype(np.float64),
+        "nc_phi_rad":  rd.nc_phi_rad[nc_ge77_mu_mask].astype(np.float64),
+        "nc_ge77":     rd.nc_ge77[nc_ge77_mu_mask].astype(np.float64),
+        "nc_n_gammas": rd.nc_n_gammas[nc_ge77_mu_mask].astype(np.float64),
+        "nc_counts":   rd.nc_counts[counts_ge77_mask].astype(np.float64),
+    }
+
+
+def load_nc_fields_flat(
+    hdf5_files: list[Path],
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Load and deduplicate NC fields from a flat list of HDF5 files.
 
     Deduplication is on (evtid, nC_track_id), same logic as load_run.
-    Returns arrays for each key in NC_FIELDS_FOR_CONV.
+    Returns (all_fields, ge77_fields) where ge77_fields is restricted to
+    NCs belonging to Ge77-producing muons.
     """
     parts: dict[str, list[np.ndarray]] = {
         k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
@@ -2138,7 +2156,7 @@ def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
 
     empty = {k: np.array([], dtype=np.float64) for k in NC_FIELDS_FOR_CONV}
     if not parts["evtid"]:
-        return empty
+        return empty, empty
 
     evtid_arr = np.concatenate(parts["evtid"])
     track_arr = np.concatenate(parts["track_id"])
@@ -2175,17 +2193,41 @@ def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
         dtype=np.float64,
     )
 
-    _, nc_counts_per_mu = np.unique(unique_evtids, return_counts=True)
+    sorted_mu_evtids, nc_counts_per_mu = np.unique(unique_evtids, return_counts=True)
 
-    return {
-        "nc_time_ns":  time_arr[unique_idx].astype(np.float64),
-        "nc_z_m":      z_arr[unique_idx].astype(np.float64),
-        "nc_r_m":      np.sqrt(x_arr[unique_idx] ** 2 + y_arr[unique_idx] ** 2),
-        "nc_phi_rad":  np.arctan2(y_arr[unique_idx], x_arr[unique_idx]),
-        "nc_ge77":     unique_ge77.astype(np.float64),
+    nc_time   = time_arr[unique_idx].astype(np.float64)
+    nc_z      = z_arr[unique_idx].astype(np.float64)
+    nc_r      = np.sqrt(x_arr[unique_idx] ** 2 + y_arr[unique_idx] ** 2)
+    nc_phi    = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
+    nc_ge77f  = unique_ge77.astype(np.float64)
+    nc_counts = nc_counts_per_mu.astype(np.float64)
+
+    all_fields: dict[str, np.ndarray] = {
+        "nc_time_ns":  nc_time,
+        "nc_z_m":      nc_z,
+        "nc_r_m":      nc_r,
+        "nc_phi_rad":  nc_phi,
+        "nc_ge77":     nc_ge77f,
         "nc_n_gammas": nc_n_gammas,
-        "nc_counts":   nc_counts_per_mu.astype(np.float64),
+        "nc_counts":   nc_counts,
     }
+
+    # Ge77-only: restrict to NCs from muons that produced ≥1 Ge77 NC
+    ge77_muon_evtids = np.unique(unique_evtids[unique_ge77 == 1])
+    nc_ge77_mu_mask  = np.isin(unique_evtids, ge77_muon_evtids)
+    mu_ge77_mask     = np.isin(sorted_mu_evtids, ge77_muon_evtids)
+
+    ge77_fields: dict[str, np.ndarray] = {
+        "nc_time_ns":  nc_time[nc_ge77_mu_mask],
+        "nc_z_m":      nc_z[nc_ge77_mu_mask],
+        "nc_r_m":      nc_r[nc_ge77_mu_mask],
+        "nc_phi_rad":  nc_phi[nc_ge77_mu_mask],
+        "nc_ge77":     nc_ge77f[nc_ge77_mu_mask],
+        "nc_n_gammas": nc_n_gammas[nc_ge77_mu_mask],
+        "nc_counts":   nc_counts[mu_ge77_mask],
+    }
+
+    return all_fields, ge77_fields
 
 
 def level1_dkw_bound(
@@ -2214,23 +2256,29 @@ def level1_dkw_bound(
 
 def level2_pairwise_fluctuations(
     run_list: list[RunData],
+    extractor=None,
+    label: str = "all muons",
 ) -> dict[str, tuple[float, float]]:
     """Compute all C(n,2) pairwise W1 distances between runs per NC field.
 
+    extractor: callable(RunData) -> dict[str, np.ndarray]; defaults to
+               _extract_nc_fields_run (all muons).
     Returns {field_key: (mean_w1, std_w1)}.
     """
+    if extractor is None:
+        extractor = _extract_nc_fields_run
     n_runs = len(run_list)
     pair_indices = list(_combinations(range(n_runs), 2))
     n_pairs = len(pair_indices)
 
     print(f"\n{'='*60}")
-    print("Level 2 — Leave-One-Out Pairwise W1 Fluctuations")
+    print(f"Level 2 — Leave-One-Out Pairwise W1 Fluctuations ({label})")
     print(f"  Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}")
 
     fluctuations: dict[str, tuple[float, float]] = {}
 
     for field_key, field_label in NC_FIELDS_FOR_CONV.items():
-        arrays = [_extract_nc_fields_run(rd)[field_key] for rd in run_list]
+        arrays = [extractor(rd)[field_key] for rd in run_list]
         if any(a.size == 0 for a in arrays):
             print(f"  SKIP {field_key}: empty array in ≥1 run")
             continue
@@ -2279,6 +2327,8 @@ def _plot_learning_curve(
     w1_data: dict[str, list[float]],
     fluctuations: dict[str, tuple[float, float]],
     out_dir: Path,
+    title_suffix: str = "All muons",
+    fname_suffix: str = "",
 ) -> None:
     n_fields = len(NC_FIELDS_FOR_CONV)
     ncols = 3
@@ -2326,9 +2376,11 @@ def _plot_learning_curve(
     for extra in axes_flat[n_fields:]:
         extra.set_visible(False)
 
-    fig.suptitle("Convergence Learning Curve: W1 vs Sample Size", fontsize=14)
+    fig.suptitle(f"Convergence Learning Curve: W1 vs Sample Size — {title_suffix}",
+                 fontsize=14)
     plt.tight_layout()
-    _save(fig, out_dir / "convergence_learning_curve.png")
+    fname = f"convergence_learning_curve{fname_suffix}.png"
+    _save(fig, out_dir / fname)
 
 
 def _plot_learning_curve_normalized(
@@ -2336,6 +2388,8 @@ def _plot_learning_curve_normalized(
     w1_data: dict[str, list[float]],
     fluctuations: dict[str, tuple[float, float]],
     out_dir: Path,
+    title_suffix: str = "All muons",
+    fname_suffix: str = "",
 ) -> None:
     n_fields = len(NC_FIELDS_FOR_CONV)
     ncols = 3
@@ -2391,31 +2445,95 @@ def _plot_learning_curve_normalized(
     for extra in axes_flat[n_fields:]:
         extra.set_visible(False)
 
-    fig.suptitle("Normalized Convergence: W1 / L2 Mean Fluctuation", fontsize=14)
+    fig.suptitle(
+        f"Normalized Convergence: W1 / L2 Mean Fluctuation — {title_suffix}",
+        fontsize=14,
+    )
     plt.tight_layout()
-    _save(fig, out_dir / "convergence_learning_curve_normalized.png")
+    fname = f"convergence_learning_curve_normalized{fname_suffix}.png"
+    _save(fig, out_dir / fname)
+
+
+def _plot_learning_curve_comparison(
+    n_arr: np.ndarray,
+    w1_all: dict[str, list[float]],
+    w1_ge77: dict[str, list[float]],
+    out_dir: Path,
+) -> None:
+    """One subplot per field: both all-muon and Ge77-only W1 curves on the same axes."""
+    n_fields = len(NC_FIELDS_FOR_CONV)
+    ncols = 3
+    nrows = (n_fields + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
+    axes_flat = np.array(axes).flatten()
+
+    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
+        ax = axes_flat[idx]
+        w1_a = np.array(w1_all[field_key])
+        w1_g = np.array(w1_ge77[field_key])
+
+        for w1_arr, color, marker, subset_label in [
+            (w1_a, COLORS["blue"],   "o", "All muons"),
+            (w1_g, COLORS["orange"], "s", "Ge77 muons"),
+        ]:
+            valid = ~np.isnan(w1_arr) & (w1_arr > 0)
+            if not valid.any():
+                continue
+            ax.scatter(n_arr[valid], w1_arr[valid],
+                       color=color, marker=marker, zorder=5, s=60,
+                       label=subset_label)
+            fit = _fit_power_law(n_arr, w1_arr)
+            if fit is not None:
+                a_f, b_f = fit
+                n_min = float(n_arr[valid].min())
+                n_plot = np.logspace(np.log10(n_min), 8.5, 300)
+                ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
+                        color=color, linewidth=1.5, alpha=0.8,
+                        label=f"n^(−{b_f:.2f})")
+
+        ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("N muon samples", fontsize=11)
+        ax.set_ylabel("W1 distance", fontsize=11)
+        ax.set_title(field_label, fontsize=12)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=9)
+
+    for extra in axes_flat[n_fields:]:
+        extra.set_visible(False)
+
+    fig.suptitle("W1 Convergence: All muons vs Ge77 muons", fontsize=14)
+    plt.tight_layout()
+    _save(fig, out_dir / "convergence_learning_curve_comparison.png")
 
 
 def level3_learning_curve(
     data_path: Path,
     run_list: list[RunData],
     fluctuations: dict[str, tuple[float, float]],
+    fluctuations_ge77: dict[str, tuple[float, float]],
     out_dir: Path,
 ) -> None:
     """Load sub-sampled data; compute W1 vs 1e8; fit power law; save two plots."""
     print(f"\n{'='*60}")
     print("Level 3 — Learning Curve & Power Law Extrapolation")
 
-    # Build sorted reference arrays from all runs (= full 1e8 dataset)
-    ref_sorted: dict[str, np.ndarray] = {}
+    # Build sorted reference arrays from all 10 runs (= full 1e8 dataset)
+    ref_all:  dict[str, np.ndarray] = {}
+    ref_ge77: dict[str, np.ndarray] = {}
     for field_key in NC_FIELDS_FOR_CONV:
-        parts_list = [_extract_nc_fields_run(rd)[field_key] for rd in run_list]
-        combined = np.concatenate([a for a in parts_list if a.size > 0])
-        ref_sorted[field_key] = np.sort(combined)
+        all_parts  = [_extract_nc_fields_run(rd)[field_key]      for rd in run_list]
+        ge77_parts = [_extract_nc_fields_run_ge77(rd)[field_key] for rd in run_list]
+        ref_all[field_key]  = np.sort(np.concatenate([a for a in all_parts  if a.size > 0]))
+        ref_ge77[field_key] = np.sort(np.concatenate([a for a in ge77_parts if a.size > 0]))
     total_nc = sum(rd.nc_evtid.size for rd in run_list)
-    print(f"  Reference: {total_nc:,} NCs from {len(run_list)} runs")
+    total_ge77_nc = sum((rd.nc_ge77 == 1).sum() for rd in run_list)
+    print(f"  Reference (all):  {total_nc:,} NCs | "
+          f"Ge77-muon subset: {total_ge77_nc:,} Ge77-flagged NCs")
 
-    w1_data: dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
+    w1_all:  dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
+    w1_ge77: dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
     n_vals: list[float] = []
 
     for size_dir, n_val in _SUBSAMPLE_DIRS:
@@ -2431,26 +2549,38 @@ def level3_learning_curve(
             continue
 
         print(f"  Loading {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
-        sub = load_nc_fields_flat(hdf5_files)
+        sub_all_fields, sub_ge77_fields = load_nc_fields_flat(hdf5_files)
         n_vals.append(n_val)
 
         for field_key in NC_FIELDS_FOR_CONV:
-            sub_s = np.sort(sub[field_key])
-            ref_s = ref_sorted[field_key]
-            if sub_s.size == 0 or ref_s.size == 0:
-                w1_data[field_key].append(float("nan"))
-                continue
-            w1, _ = _w1_ks_sorted(sub_s, ref_s)
-            w1_data[field_key].append(float(w1))
-            print(f"    {field_key:20s}: W1 = {w1:.6g}")
+            for sub_fields, w1_dict, ref_sorted in [
+                (sub_all_fields,  w1_all,  ref_all),
+                (sub_ge77_fields, w1_ge77, ref_ge77),
+            ]:
+                sub_s = np.sort(sub_fields[field_key])
+                ref_s = ref_sorted[field_key]
+                if sub_s.size == 0 or ref_s.size == 0:
+                    w1_dict[field_key].append(float("nan"))
+                    continue
+                w1, _ = _w1_ks_sorted(sub_s, ref_s)
+                w1_dict[field_key].append(float(w1))
+            print(f"    {field_key:20s}: W1(all)={w1_all[field_key][-1]:.6g}"
+                  f"  W1(ge77)={w1_ge77[field_key][-1]:.6g}")
 
     if len(n_vals) < 2:
         print("  Fewer than 2 sample sizes found; skipping learning-curve plots.")
         return
 
     n_arr = np.array(n_vals, dtype=np.float64)
-    _plot_learning_curve(n_arr, w1_data, fluctuations, out_dir)
-    _plot_learning_curve_normalized(n_arr, w1_data, fluctuations, out_dir)
+    _plot_learning_curve(n_arr, w1_all,  fluctuations,      out_dir,
+                         title_suffix="All muons")
+    _plot_learning_curve(n_arr, w1_ge77, fluctuations_ge77, out_dir,
+                         title_suffix="Ge77 muons", fname_suffix="_ge77")
+    _plot_learning_curve_normalized(n_arr, w1_all,  fluctuations,      out_dir,
+                                    title_suffix="All muons")
+    _plot_learning_curve_normalized(n_arr, w1_ge77, fluctuations_ge77, out_dir,
+                                    title_suffix="Ge77 muons", fname_suffix="_ge77")
+    _plot_learning_curve_comparison(n_arr, w1_all, w1_ge77, out_dir)
 
 
 def run_statistical_convergence_test(
@@ -2476,9 +2606,14 @@ def run_statistical_convergence_test(
 
     level1_dkw_bound(n1=n_muons_per_run, n2=total_muons, eps_target=eps_target)
 
-    fluctuations = level2_pairwise_fluctuations(run_list)
+    fluctuations = level2_pairwise_fluctuations(
+        run_list, extractor=_extract_nc_fields_run, label="all muons"
+    )
+    fluctuations_ge77 = level2_pairwise_fluctuations(
+        run_list, extractor=_extract_nc_fields_run_ge77, label="Ge77 muons"
+    )
 
-    level3_learning_curve(data_path, run_list, fluctuations, out_dir)
+    level3_learning_curve(data_path, run_list, fluctuations, fluctuations_ge77, out_dir)
 
     print(f"\n{'='*60}")
     print("Convergence test complete.")
