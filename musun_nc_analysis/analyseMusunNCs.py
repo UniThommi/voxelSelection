@@ -54,6 +54,7 @@ NC_FIELDS_FOR_CONV: dict[str, str] = {
     "nc_phi_rad":  "NC φ [rad]",
     "nc_ge77":     "Ge77 flag",
     "nc_n_gammas": "N capture gammas",
+    "nc_counts":   "NC count per muon",
 }
 
 DEFAULT_DATA_PATH = (
@@ -2109,6 +2110,7 @@ def _extract_nc_fields_run(rd: RunData) -> dict[str, np.ndarray]:
         "nc_phi_rad":  rd.nc_phi_rad.astype(np.float64),
         "nc_ge77":     rd.nc_ge77.astype(np.float64),
         "nc_n_gammas": rd.nc_n_gammas.astype(np.float64),
+        "nc_counts":   rd.nc_counts.astype(np.float64),  # per-muon count
     }
 
 
@@ -2173,6 +2175,8 @@ def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
         dtype=np.float64,
     )
 
+    _, nc_counts_per_mu = np.unique(unique_evtids, return_counts=True)
+
     return {
         "nc_time_ns":  time_arr[unique_idx].astype(np.float64),
         "nc_z_m":      z_arr[unique_idx].astype(np.float64),
@@ -2180,6 +2184,7 @@ def load_nc_fields_flat(hdf5_files: list[Path]) -> dict[str, np.ndarray]:
         "nc_phi_rad":  np.arctan2(y_arr[unique_idx], x_arr[unique_idx]),
         "nc_ge77":     unique_ge77.astype(np.float64),
         "nc_n_gammas": nc_n_gammas,
+        "nc_counts":   nc_counts_per_mu.astype(np.float64),
     }
 
 
