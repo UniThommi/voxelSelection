@@ -61,7 +61,7 @@ DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
 NUM_RUNS_DEFAULT = 10
-N_PERMUTATIONS = 20   # random subsets per k in convergence analysis
+N_PERMUTATIONS = 100  # random subsets per k in convergence analysis
 RANDOM_SEED = 42
 W1_THRESHOLD_FRAC = 0.05   # convergence threshold = 5% of W1 at k=1
 MAX_SCATTER_PTS = 5_000    # max points for 3-D scatter / arrow plots
@@ -1666,9 +1666,11 @@ def convergence_analysis(
         threshold: float | None,
         rec_k: int | None,
         w1_at_k1: float | None = None,
+        show_deterministic: bool = True,
     ) -> None:
-        ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
-                linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
+        if show_deterministic:
+            ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
+                    linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
         ax.plot(k_vals, r_mean, "s--", color=COLORS["orange"],
                 linewidth=1.5, markersize=5, label="Random subsets (mean)")
         ax.fill_between(k_vals, r_mean - r_std, r_mean + r_std,
@@ -1749,16 +1751,18 @@ def convergence_analysis(
         rks_std  = r_ks.std(axis=1)
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle(
-            f"Convergence: NC count per muon — full distribution  ({fig_label})",
+            "Convergence: NC count per muon — full distribution",
             fontsize=14,
         )
         _draw_panel(axes[0], "W₁  —  Full (all muons)",
                     d_w1, rw1_mean, rw1_std,
                     f"W₁ ({xlabel})", thr, rec,
-                    w1_at_k1=d_w1[0] if d_w1[0] > 0 else None)
+                    w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
+                    show_deterministic=False)
         _draw_panel(axes[1], "KS  —  Full (all muons)",
                     d_ks, rks_mean, rks_std,
-                    "KS statistic D", None, None)
+                    "KS statistic D", None, None,
+                    show_deterministic=False)
         plt.tight_layout()
         _save(fig, out_dir / f"convergence_nc_count_full_{fig_tag}.png")
 
@@ -1773,7 +1777,7 @@ def convergence_analysis(
     ]:
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(
-            f"Convergence: NC count per muon — cut distributions  ({fig_label})",
+            "Convergence: NC count per muon — cut distributions",
             fontsize=14,
         )
         for row, (row_title, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec) in enumerate(rows_data):
@@ -1787,11 +1791,13 @@ def convergence_analysis(
                         f"W₁  —  {row_title}",
                         d_w1, rw1_mean, rw1_std,
                         f"W₁ ({xlabel})", thr, rec,
-                        w1_at_k1=d_w1[0] if d_w1[0] > 0 else None)
+                        w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
+                        show_deterministic=False)
             _draw_panel(axes[row, 1],
                         f"KS  —  {row_title}",
                         d_ks, rks_mean, rks_std,
-                        "KS statistic D", None, None)
+                        "KS statistic D", None, None,
+                        show_deterministic=False)
         plt.tight_layout()
         _save(fig, out_dir / f"convergence_nc_count_cuts_{fig_tag}.png")
 
