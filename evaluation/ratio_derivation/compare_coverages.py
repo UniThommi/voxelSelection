@@ -2748,12 +2748,6 @@ def plot_ge_surv_vs_livetime(
     for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
             ax.scatter(xs, ys, color=c, s=18, alpha=0.7, zorder=3)
-            ax.annotate(
-                r.label,
-                xy=(float(np.median(xs)), float(np.median(ys))),
-                xytext=(4, 3), textcoords="offset points",
-                fontsize=7, color=c, fontweight="bold",
-            )
 
     ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
     ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
@@ -2897,6 +2891,99 @@ def plot_ge_surv_vs_livetime_advisor(
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plots 25d / 25e — ge_surv vs livetime: one best-FoM point per setup
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_best_fom(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    m_min: int = 1,
+) -> None:
+    """Scatter: one point per setup at the FoM-optimal (M, W).
+
+    ``m_min`` restricts the M search space to M >= m_min (use 6 for plot 25e).
+    Each point is annotated with its optimal (M, W) pair.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    m_search = [M for M in M_values if M >= m_min]
+    if not m_search:
+        print(f"  [SKIP] plot_ge_surv_best_fom(m_min={m_min}): no M values >= {m_min}.")
+        return
+
+    pts_x: list[float] = []
+    pts_y: list[float] = []
+    pt_labels: list[str] = []
+
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, m_search, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if not valid:
+            pts_x.append(float("nan"))
+            pts_y.append(float("nan"))
+            pt_labels.append("N/A")
+            continue
+        best_M, best_W = max(valid, key=valid.__getitem__)
+        cm = r.muon["confusion"].get((best_M, best_W))
+        TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+        ge_surv  = calc_ge_survival_confusion(
+            cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+            cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+        )
+        deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+        pts_x.append(1.0 - deadtime)
+        pts_y.append(ge_surv)
+        pt_labels.append(f"M{best_M}W{best_W}")
+
+    all_xs = [x for x in pts_x if np.isfinite(x)]
+    all_ys = [y for y in pts_y if np.isfinite(y)]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+
+    for r, c, x, y, lbl in zip(results, colors, pts_x, pts_y, pt_labels):
+        if np.isfinite(x):
+            ax.scatter([x], [y], color=c, s=60, zorder=4)
+            ax.annotate(lbl, xy=(x, y), xytext=(4, 3),
+                        textcoords="offset points", fontsize=7, color=c)
+
+    m_desc = f"M ≥ {m_min}" if m_min > 1 else "all M"
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_title(
+        f"Ge77 Survival vs Signal Livetime — Best FoM Point per Setup  ({m_desc})\n"
+        "(each point = FoM-optimal (M, W); bottom-right = optimal)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.legend(
+        handles=[
+            plt.Line2D([0], [0], marker="o", color="w",
+                       markerfacecolor=color_map.get(r.label, "gray"),
+                       markersize=7, label=r.label)
+            for r in results
+        ],
+        fontsize=8, loc="best",
+    )
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = f"25{'d' if m_min <= 1 else 'e'}_ge_surv_best_fom{'_M_ge6' if m_min > 1 else ''}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -3427,6 +3514,10 @@ def main() -> None:
             M_fixed=args.advisor_M,
             statistical_limit_csv=args.statistical_limit_csv,
         )
+    plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
+                          total_primaries=_total_primaries, color_map=color_map, m_min=1)
+    plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
+                          total_primaries=_total_primaries, color_map=color_map, m_min=6)
     plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
                                        total_primaries=_total_primaries, color_map=color_map)
 
