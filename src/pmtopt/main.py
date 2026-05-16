@@ -64,7 +64,7 @@ from pmtopt.data_loading import (
 )
 from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
-    plot_selected_voxels, plot_muon_nc_histogram,
+    plot_selected_voxels, plot_muon_nc_histogram, plot_hit_heatmap,
 )
 from pmtopt.ratio_scaling import write_ratio_hdf5, fmt_ratio_filename
 from pmtopt.sensitivity import run_sensitivity
@@ -777,7 +777,66 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
         print(f"  -> {png_path}")
 
 
-_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "sample-w2-range")
+def run_plot_hits(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Heatmap of total photon hits per voxel across all NCs, split by area.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("hdf5_file", type=str,
+                        help="Path to the voxelSelection HDF5 file (target_matrix).")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory to save the PNG (default: same as HDF5 file).")
+    args = parser.parse_args(argv)
+
+    import h5py
+    from collections import defaultdict
+
+    hdf5_path = Path(args.hdf5_file)
+    output_dir = Path(args.output_dir) if args.output_dir else hdf5_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Reading {hdf5_path} ...")
+    with h5py.File(hdf5_path, "r") as f:
+        print("  Loading target_matrix ...")
+        target = f["target_matrix"][:]           # (num_NCs, num_voxels)
+        columns = [
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        ]
+        print(f"  {target.shape[0]:,} NCs × {target.shape[1]:,} voxels")
+
+        print("  Loading voxel geometry ...")
+        center_map: dict[str, np.ndarray] = {}
+        layer_map:  dict[str, str]        = {}
+        for voxel_id in f["voxels"].keys():
+            vg = f["voxels"][voxel_id]
+            center_map[voxel_id] = vg["center"][:]
+            raw_layer = vg["layer"][()]
+            layer_map[voxel_id] = (
+                raw_layer.decode() if isinstance(raw_layer, bytes) else str(raw_layer)
+            )
+
+    hits_per_voxel = target.sum(axis=0)   # (num_voxels,)
+
+    area_centers: dict[str, list] = defaultdict(list)
+    area_hits:    dict[str, list] = defaultdict(list)
+    for col_idx, voxel_id in enumerate(columns):
+        if voxel_id not in center_map:
+            continue
+        area = layer_map[voxel_id]
+        area_centers[area].append(center_map[voxel_id])
+        area_hits[area].append(float(hits_per_voxel[col_idx]))
+
+    areas_data = {
+        area: (np.array(area_centers[area]), np.array(area_hits[area]))
+        for area in area_centers
+    }
+
+    output_path = output_dir / f"{hdf5_path.stem}_hit_heatmap.png"
+    plot_hit_heatmap(areas_data, output_path)
+
+
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits", "sample-w2-range")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -793,6 +852,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "  homogeneous      Generate or select homogeneously distributed voxels\n"
             "  rotate           Rotate an existing voxel selection azimuthally\n"
             "  plot             Plot existing JSON voxel selection file(s)\n"
+            "  plot-hits        Heatmap of total photon hits per voxel (light distribution)\n"
             "  sample-w2-range  Generate configurations spanning the W2 range\n\n"
             "Run 'main.py <subcommand> --help' for subcommand-specific help."
         )
@@ -810,6 +870,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         rot_main(rest)
     elif mode == "plot":
         run_plot(rest)
+    elif mode == "plot-hits":
+        run_plot_hits(rest)
     elif mode == "sample-w2-range":
         from pmtopt.sample_w2_range import main as w2_main
         w2_main(rest)

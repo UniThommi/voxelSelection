@@ -10,8 +10,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 
+import matplotlib.cm as mcm
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
+
 from .geometry import (
-    PMT_RADIUS, R_PIT, R_ZYL_BOT, R_ZYLINDER,
+    PMT_RADIUS, R_PIT, R_ZYL_BOT, R_ZYL_TOP, R_ZYLINDER,
     Z_BASE_GLOBAL, H_ZYLINDER, is_valid_pmt_position,
 )
 
@@ -285,3 +289,82 @@ def plot_per_area_jaccard(
     plt.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close()
     print(f"  Per-area Jaccard plot saved to {output_path}")
+
+
+def plot_hit_heatmap(
+    areas_data: dict[str, tuple[np.ndarray, np.ndarray]],
+    output_path: Path,
+    voxel_size_mm: float = 195.0,
+) -> None:
+    """4-panel heatmap: total photon hits per voxel, one subplot per area.
+
+    areas_data: {area_name: (centers (N,3), hit_counts (N,))}
+    All panels share the same color scale (global min/max across all areas).
+    pit / bot / top are shown in the x-y plane as colored rectangles.
+    wall is shown in the (φ, z) plane as a scatter.
+    """
+    AREA_ORDER = ["pit", "bot", "top", "wall"]
+    half = voxel_size_mm / 2.0
+
+    all_hits = np.concatenate([h for _, h in areas_data.values() if len(h) > 0])
+    vmin, vmax = float(all_hits.min()), float(all_hits.max())
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = mcm.viridis
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12), squeeze=False)
+
+    for idx, area in enumerate(AREA_ORDER):
+        ax = axes[idx // 2][idx % 2]
+        if area not in areas_data or len(areas_data[area][0]) == 0:
+            ax.set_visible(False)
+            continue
+        centers, hits = areas_data[area]
+
+        if area == "wall":
+            phi = np.arctan2(centers[:, 1], centers[:, 0])
+            z   = centers[:, 2]
+            ax.scatter(phi, z, c=hits, cmap=cmap, norm=norm,
+                       s=6, linewidths=0, rasterized=True)
+            ax.set_xlim(-np.pi, np.pi)
+            ax.set_ylim(Z_BASE_GLOBAL, Z_BASE_GLOBAL + H_ZYLINDER)
+            ax.set_xlabel("φ [rad]")
+            ax.set_ylabel("z [mm]")
+        else:
+            for (cx, cy, _), h in zip(centers, hits):
+                ax.add_patch(mpatches.Rectangle(
+                    (cx - half, cy - half), voxel_size_mm, voxel_size_mm,
+                    facecolor=cmap(norm(h)), edgecolor="none",
+                ))
+            if area == "pit":
+                ax.add_patch(mpatches.Circle(
+                    (0, 0), R_PIT, fill=False, edgecolor="black", linewidth=1.2))
+                lim = R_PIT * 1.1
+            elif area == "bot":
+                for r in (R_ZYL_BOT, R_ZYLINDER):
+                    ax.add_patch(mpatches.Circle(
+                        (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+                lim = R_ZYLINDER * 1.1
+            elif area == "top":
+                for r in (R_ZYL_TOP, R_ZYLINDER):
+                    ax.add_patch(mpatches.Circle(
+                        (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+                lim = R_ZYLINDER * 1.1
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_aspect("equal")
+            ax.set_xlabel("x [mm]")
+            ax.set_ylabel("y [mm]")
+
+        ax.set_title(f"{area.capitalize()}  (N={len(centers):,})", fontsize=11)
+        ax.grid(True, alpha=0.2)
+
+    sm = mcm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes.ravel().tolist(), shrink=0.7, pad=0.04)
+    cbar.set_label("Total photon hits (summed over all NCs)", fontsize=11)
+
+    fig.suptitle("Light Distribution — Total Photon Hits per Voxel", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
