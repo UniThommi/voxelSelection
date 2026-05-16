@@ -2014,13 +2014,12 @@ def plot_w2_coverage_profile(
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, pad=0.01)
-    cbar.set_label("Global W2 (mm)  [blue=uniform, red=clustered]", fontsize=9)
+    cbar.set_label("Global W2 (mm)  [blue=clustered, red=uniform]", fontsize=9)
 
     ax.set_xlabel("Multiplicity threshold M", fontsize=11)
     ax.set_ylabel("NC detection fraction", fontsize=11)
     ax.set_title(
-        "NC Coverage Profile Colored by W2 Homogeneity\n"
-        "(systematic shift reveals W2–coverage relationship)",
+        "NC Coverage Profile Colored by W2 Homogeneity",
         fontsize=12,
     )
     ax.set_xticks(M_values)
