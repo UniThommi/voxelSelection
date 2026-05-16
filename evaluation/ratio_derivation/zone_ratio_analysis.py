@@ -122,12 +122,17 @@ def _validate_fractions(all_zones: List[Zone], pmts: list) -> None:
 
 
 def _validate_raw_dirs(mode: str, ssd_dir: Path, pmt_dir: Path,
-                       pmt_only: bool = False) -> None:
+                       pmt_only: bool = False,
+                       runs: Optional[List[int]] = None) -> None:
     """Validate raw SSD and PMT run directories before zone scan."""
     errors: List[str] = []
     dirs_to_check = [('PMT', pmt_dir)] if pmt_only else [('SSD', ssd_dir), ('PMT', pmt_dir)]
     for label, d in dirs_to_check:
         run_dirs = sorted(d.glob("run_*"))
+        if runs is not None:
+            runs_set = set(runs)
+            run_dirs = [r for r in run_dirs
+                        if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
         if not run_dirs:
             errors.append(f"No run_* directories in {label} dir: {d}")
             continue
@@ -515,6 +520,7 @@ def _validate_input_data(
     mode: str,
     pmt_dir: Path,
     ssd_postprocessed_file: Path,
+    runs: Optional[List[int]] = None,
 ) -> None:
     """Validate integrity of input data files and run ID consistency.
 
@@ -581,8 +587,13 @@ def _validate_input_data(
 
     pmt_run_ids: set = set()
     run_dirs = sorted(pmt_dir.glob("run_*"))
+    if runs is not None:
+        runs_set = set(runs)
+        run_dirs = [r for r in run_dirs
+                    if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
     if not run_dirs:
-        errors.append(f"No run_* directories found in {pmt_dir}")
+        errors.append(f"No run_* directories found in {pmt_dir}"
+                      + (f" for runs {sorted(runs)}" if runs is not None else ""))
 
     for run_dir in run_dirs:
         suffix = run_dir.name[4:]   # strip "run_"
@@ -679,6 +690,7 @@ def _accumulate_pmt_hits_per_uid(
     mode: str,
     pmt_dir: Path,
     chunk_size: int,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[int, int], int, int]:
     """Scan all PMT run directories and accumulate hit counts per detector UID.
 
@@ -692,6 +704,7 @@ def _accumulate_pmt_hits_per_uid(
         mode:       'homogeneous' or 'musun'
         pmt_dir:    base directory that contains run_* subdirectories
         chunk_size: number of rows per HDF5 read chunk
+        runs:       if not None, restrict to these run IDs (e.g. [1] for run_001)
 
     Returns:
         (uid_counts, total_nc, n_unmatched)
@@ -703,7 +716,11 @@ def _accumulate_pmt_hits_per_uid(
     total_nc: int = 0
     n_unmatched: int = 0
 
+    runs_set = set(runs) if runs is not None else None
     for run_dir in sorted(pmt_dir.glob("run_*")):
+        if runs_set is not None:
+            if not run_dir.name[4:].isdigit() or int(run_dir.name[4:]) not in runs_set:
+                continue
         if mode == 'musun':
             nc_csv = run_dir / "merged_ncs.csv"
             if not nc_csv.exists():
@@ -860,6 +877,7 @@ def analyze_per_pmt_ratio(
     chunk_size: int,
     output_dir: Path,
     _skip_validation: bool = False,
+    runs: Optional[List[int]] = None,
 ) -> None:
     """Per-PMT-position ratio analysis (independent of zone scan).
 
@@ -909,7 +927,7 @@ def analyze_per_pmt_ratio(
 
     # 0 -- Validate inputs
     if not _skip_validation:
-        _validate_input_data(mode, pmt_dir, ssd_postprocessed_file)
+        _validate_input_data(mode, pmt_dir, ssd_postprocessed_file, runs=runs)
 
     # 1 -- PMT positions
     print("\n[1/4] Loading PMT positions...")
@@ -920,7 +938,7 @@ def analyze_per_pmt_ratio(
     # 2 -- PMT hit counts (NC time filter)
     print("\n[2/4] Accumulating PMT hits per position (NC time filter)...")
     pmt_uid_hits, pmt_nc, n_unmatched = _accumulate_pmt_hits_per_uid(
-        mode, pmt_dir, chunk_size)
+        mode, pmt_dir, chunk_size, runs=runs)
     n_with_hits = sum(1 for v in pmt_uid_hits.values() if v > 0)
     print(f"  {len(pmt_uid_hits)} UIDs observed; {n_with_hits} with hits > 0")
     print(f"  PMT simulation: {pmt_nc:,} NC events")
@@ -1069,6 +1087,11 @@ def parse_args() -> argparse.Namespace:
                         "Requires --pmt-dir (raw PMT HDF5 files) and "
                         "--ssd-postprocessed-file (ML-format ncscore_output_*.hdf5). "
                         "Results are saved to <output-dir>/per_pmt/.")
+    p.add_argument('--runs', nargs='+', type=int, default=None, metavar='RUN_ID',
+                   help="Restrict per-PMT analysis to specific run IDs "
+                        "(e.g. --runs 1  or  --runs 1 3 5). "
+                        "Run ID 1 matches run_001, run_1, etc. "
+                        "Default: process all run_* directories.")
     return p.parse_args()
 
 
@@ -1114,7 +1137,8 @@ def main() -> None:
 
     _dir_label = "raw PMT directory" if per_pmt_only else "raw SSD/PMT directories"
     print(f"\n[Pre-flight] Validating {_dir_label}...")
-    _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir, pmt_only=per_pmt_only)
+    _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir, pmt_only=per_pmt_only,
+                       runs=args.runs if per_pmt_only else None)
 
     if per_pmt_only:
         analyze_per_pmt_ratio(
@@ -1126,6 +1150,7 @@ def main() -> None:
             chunk_size=chunk_size,
             output_dir=args.output_dir / "per_pmt",
             _skip_validation=True,
+            runs=args.runs,
         )
         print("\nDone.")
         return
@@ -1450,6 +1475,7 @@ def main() -> None:
             chunk_size=chunk_size,
             output_dir=args.output_dir / "per_pmt",
             _skip_validation=True,
+            runs=args.runs,
         )
 
     print("\nDone.")
