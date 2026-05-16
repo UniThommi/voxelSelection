@@ -2611,12 +2611,14 @@ def _fom_colormap_background(
     xs: list[float],
     ys: list[float],
     n_grid: int = 300,
+    normalize: bool = False,
 ) -> "matplotlib.cm.ScalarMappable":
     """Draw a FoM(signal_surv, ge_surv) colormap + labelled contours on ax.
 
     The grid is clipped to the convex hull of the visible data range (with
     a 5 % margin on each side).  Returns the pcolormesh artist so the
-    caller can attach a colorbar.
+    caller can attach a colorbar.  If ``normalize`` is True the FoM values
+    are rescaled to [0, 1] before plotting so the colorbar ticks read 0–1.
     """
     if not xs or not ys:
         return None
@@ -2630,6 +2632,12 @@ def _fom_colormap_background(
     _fom_vec = np.vectorize(figure_of_merit)
     ZZ = _fom_vec(YY, XX)  # ge_surv=YY, signal_surv=XX
     ZZ = np.where(np.isfinite(ZZ), ZZ, np.nan)
+    if normalize:
+        finite_z = ZZ[np.isfinite(ZZ)]
+        if finite_z.size > 0:
+            z_min, z_max = finite_z.min(), finite_z.max()
+            span = z_max - z_min if z_max > z_min else 1.0
+            ZZ = (ZZ - z_min) / span
     pcm = ax.pcolormesh(XX, YY, ZZ, cmap="viridis", alpha=0.35, shading="auto", zorder=0)
     finite_z = ZZ[np.isfinite(ZZ)]
     if finite_z.size > 0:
@@ -2832,9 +2840,9 @@ def plot_ge_surv_vs_livetime_advisor(
         all_ys.extend(ys)
 
     fig, ax = plt.subplots(figsize=(10, 7))
-    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    pcm = _fom_colormap_background(ax, all_xs, all_ys, normalize=True)
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised)", pad=0.01)
 
     # Statistical limit curve (plotted first so it sits behind advisor points)
     if stat_rows:
