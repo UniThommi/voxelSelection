@@ -2658,6 +2658,33 @@ def _parse_advisor_csv(path: str) -> list[dict]:
     return rows
 
 
+def _parse_statistical_limit_csv(path: str) -> list[dict]:
+    """Parse statistical-limit CSV with format:
+    ``x cut <val>, ge_77_surv: <val>, sig_surv: <val>``
+    Returns list of dicts with keys ``x_cut``, ``ge_77_surv``, ``sig_surv``.
+    Rows with non-finite or negative sig_surv are skipped.
+    """
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 3:
+                continue
+            try:
+                x_cut    = float(parts[0].split()[-1])
+                ge_surv  = float(parts[1].split(":")[-1].strip())
+                sig_surv = float(parts[2].split(":")[-1].strip())
+            except (ValueError, IndexError):
+                continue
+            if not (np.isfinite(sig_surv) and sig_surv >= 0.0):
+                continue
+            rows.append({"x_cut": x_cut, "ge_77_surv": ge_surv, "sig_surv": sig_surv})
+    return rows
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Plot 25 — ge_surv vs (1 − deadtime) trade-off scatter
 # ──────────────────────────────────────────────────────────────────────
@@ -2758,12 +2785,15 @@ def plot_ge_surv_vs_livetime_advisor(
     total_primaries: int = 0,
     color_map: dict[str, str] | None = None,
     M_fixed: int = 6,
+    statistical_limit_csv: str | None = None,
 ) -> None:
     """Ge77 survival vs signal livetime at M=M_fixed, overlaying advisor data.
 
     Advisor's CSV (threshold=W, signal_surv, ge_surv, FOM) is shown as a
     distinct series.  Each user setup is shown at M=M_fixed for all W in
     W_values.  The FoM colormap spans the combined data range.
+    If ``statistical_limit_csv`` is provided, that curve is overlaid as a
+    dashed line labelled "Statistical limit".
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -2774,6 +2804,10 @@ def plot_ge_surv_vs_livetime_advisor(
     adv_xs = [row["signal_surv"] for row in advisor_rows]
     adv_ys = [row["ge_surv"]     for row in advisor_rows]
     adv_ws = [int(row["threshold"]) for row in advisor_rows]
+
+    stat_rows: list[dict] = []
+    if statistical_limit_csv:
+        stat_rows = _parse_statistical_limit_csv(statistical_limit_csv)
 
     per_setup: list[tuple[list[float], list[float], list[int]]] = []
     all_xs = list(adv_xs)
@@ -2803,6 +2837,13 @@ def plot_ge_surv_vs_livetime_advisor(
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
+    # Statistical limit curve (plotted first so it sits behind advisor points)
+    if stat_rows:
+        sl_xs = [row["sig_surv"]   for row in stat_rows]
+        sl_ys = [row["ge_77_surv"] for row in stat_rows]
+        ax.plot(sl_xs, sl_ys, color="darkorange", linewidth=1.5,
+                linestyle="--", zorder=3, label="Statistical limit")
+
     # Advisor data
     ax.scatter(adv_xs, adv_ys, color="black", s=40, marker="D", zorder=4,
                label=f"Advisor (M={M_fixed})")
@@ -2830,7 +2871,13 @@ def plot_ge_surv_vs_livetime_advisor(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    handles = [
+    handles = []
+    if stat_rows:
+        handles.append(
+            plt.Line2D([0], [0], color="darkorange", linewidth=1.5,
+                       linestyle="--", label="Statistical limit")
+        )
+    handles += [
         plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="black",
                    markersize=7, label=f"Advisor (M={M_fixed})"),
     ] + [
@@ -3151,6 +3198,13 @@ def parse_args() -> argparse.Namespace:
         "--advisor-M", type=int, default=6,
         help="Fixed M value used in the advisor comparison plot (default: 6).",
     )
+    parser.add_argument(
+        "--statistical-limit-csv", default=None, metavar="CSV",
+        help=(
+            "Path to statistical-limit CSV for plot 25b overlay "
+            "(format per line: 'x cut <val>, ge_77_surv: <val>, sig_surv: <val>')."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -3364,6 +3418,7 @@ def main() -> None:
             total_primaries=_total_primaries,
             color_map=color_map,
             M_fixed=args.advisor_M,
+            statistical_limit_csv=args.statistical_limit_csv,
         )
     plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
                                        total_primaries=_total_primaries, color_map=color_map)
