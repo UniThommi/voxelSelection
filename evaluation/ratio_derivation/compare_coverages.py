@@ -88,11 +88,29 @@ class SetupResult:
     muon:     dict[str, Any]           # from evaluate_muon()
     pmt_uids: np.ndarray               # det_uid per B column
     w2:       Optional[float] = None   # Wasserstein homogeneity (if config JSON given)
+    per_area_n: dict[str, int] = None  # PMT count per layer (pit/bot/top/wall)
 
 
 # ──────────────────────────────────────────────────────────────────────
 # W2 computation (optional — requires POT and pmtopt package)
 # ──────────────────────────────────────────────────────────────────────
+def _count_areas_from_json(config_json: str) -> dict[str, int]:
+    """Return {layer: count} from a voxel JSON config file. Returns {} on failure."""
+    try:
+        with open(config_json) as f:
+            data = json.load(f)
+        voxel_dicts = data if isinstance(data, list) else data.get("selected_voxels", [])
+        counts: dict[str, int] = {}
+        for v in voxel_dicts:
+            if isinstance(v, dict) and "layer" in v:
+                layer = v["layer"]
+                counts[layer] = counts.get(layer, 0) + 1
+        return counts
+    except Exception as exc:
+        print(f"  [WARN] Area count failed for {config_json!r}: {exc}")
+        return {}
+
+
 def _try_compute_w2(config_json: str) -> Optional[float]:
     """Compute W2 homogeneity from a voxel JSON file. Returns None on failure."""
     try:
@@ -3231,6 +3249,142 @@ def write_survival_table(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 26 — Key metrics vs. per-area PMT count
+# ──────────────────────────────────────────────────────────────────────
+_AREAS = ["pit", "bot", "top", "wall"]
+
+
+def plot_area_importance(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """One PNG per metric, each with 4 subplots (one per detector area).
+
+    Metrics: best FoM (all M), best FoM (M≥6), recall at best FoM (all M),
+    recall at best FoM (M≥6), NC coverage (M=1).
+    Each subplot: one point per setup, OLS trendline, Pearson r.
+    Skipped if no setup has per_area_n populated (requires --configs).
+    Saved as 26a–26e_area_importance_<metric>.png.
+    """
+    if not any(r.per_area_n for r in results):
+        print("  [SKIP] 26_area_importance: no per-area counts (pass --configs).")
+        return
+
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+
+    m_ge6 = [M for M in M_values if M >= 6]
+
+    # ── Collect metric values per setup ──────────────────────────────
+    metric_vals: dict[str, list[float]] = {k: [] for k in [
+        "best_fom_all", "best_fom_m6",
+        "recall_best_fom_all", "recall_best_fom_m6",
+        "nc_cov_m1",
+    ]}
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+
+        grid_all = _cc_fom_grid(r, M_values, W_values, _tp)
+        valid_all = {k: v for k, v in grid_all.items() if np.isfinite(v)}
+        if valid_all:
+            best_all = max(valid_all, key=valid_all.__getitem__)
+            metric_vals["best_fom_all"].append(valid_all[best_all])
+            metric_vals["recall_best_fom_all"].append(_cc_recall(r, *best_all))
+        else:
+            metric_vals["best_fom_all"].append(float("nan"))
+            metric_vals["recall_best_fom_all"].append(float("nan"))
+
+        if m_ge6:
+            grid_m6 = _cc_fom_grid(r, m_ge6, W_values, _tp)
+            valid_m6 = {k: v for k, v in grid_m6.items() if np.isfinite(v)}
+            if valid_m6:
+                best_m6 = max(valid_m6, key=valid_m6.__getitem__)
+                metric_vals["best_fom_m6"].append(valid_m6[best_m6])
+                metric_vals["recall_best_fom_m6"].append(_cc_recall(r, *best_m6))
+            else:
+                metric_vals["best_fom_m6"].append(float("nan"))
+                metric_vals["recall_best_fom_m6"].append(float("nan"))
+        else:
+            metric_vals["best_fom_m6"].append(float("nan"))
+            metric_vals["recall_best_fom_m6"].append(float("nan"))
+
+        metric_vals["nc_cov_m1"].append(_cc_nc_frac(r, 1))
+
+    metric_meta = [
+        ("a", "best_fom_all",        "Best FoM (all M)",           False),
+        ("b", "best_fom_m6",         "Best FoM (M ≥ 6)",           False),
+        ("c", "recall_best_fom_all", "Recall at best FoM (all M)",  True),
+        ("d", "recall_best_fom_m6",  "Recall at best FoM (M ≥ 6)", True),
+        ("e", "nc_cov_m1",           "NC coverage (M=1)",           True),
+    ]
+
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map.get(r.label, "gray"),
+                   markersize=6, label=r.label)
+        for r in results
+    ]
+
+    for suffix, mkey, mlabel, is_pct in metric_meta:
+        yvals = np.array(metric_vals[mkey])
+
+        fig, axes = plt.subplots(1, len(_AREAS),
+                                 figsize=(4.5 * len(_AREAS), 4.5),
+                                 squeeze=False)
+        axes = axes[0]
+
+        for col_idx, area in enumerate(_AREAS):
+            ax = axes[col_idx]
+            xvals = np.array([r.per_area_n.get(area, 0) if r.per_area_n else np.nan
+                               for r in results], dtype=float)
+
+            for r, x, y in zip(results, xvals, yvals):
+                if np.isfinite(x) and np.isfinite(y):
+                    ax.scatter([x], [y],
+                               color=color_map.get(r.label, "gray"),
+                               s=40, zorder=3)
+
+            mask = np.isfinite(xvals) & np.isfinite(yvals)
+            if mask.sum() >= 3:
+                slope, intercept, r_val, *_ = scipy_stats.linregress(
+                    xvals[mask], yvals[mask])
+                x_fit = np.linspace(xvals[mask].min(), xvals[mask].max(), 100)
+                ax.plot(x_fit, slope * x_fit + intercept,
+                        color="black", linewidth=1.0, linestyle="--", zorder=2)
+                ax.text(0.97, 0.05, f"r={r_val:.2f}",
+                        transform=ax.transAxes, ha="right", va="bottom",
+                        fontsize=8, color="black")
+
+            if is_pct:
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+            ax.set_xlabel(f"N_PMT in {area}", fontsize=10)
+            ax.set_ylabel(mlabel, fontsize=10)
+            ax.set_title(area.capitalize(), fontsize=11, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+
+        fig.suptitle(
+            f"{mlabel} vs. PMT Count per Detector Area\n"
+            "(each point = one setup; dashed line = OLS trend; r = Pearson)",
+            fontsize=12,
+        )
+        fig.legend(handles=legend_handles, fontsize=7,
+                   loc="lower center", ncol=min(len(results), 7),
+                   bbox_to_anchor=(0.5, -0.05))
+        fig.tight_layout()
+        fname = f"26{suffix}_area_importance_{mkey}.png"
+        fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 def parse_args() -> argparse.Namespace:
@@ -3372,14 +3526,19 @@ def main() -> None:
         muon_res = evaluate_muon(B, nc_truth, M_values, W_values, detect_info=detect_info)
 
         w2 = None
+        per_area_n: dict[str, int] = {}
         if args.configs is not None:
-            print("  Computing W2 ...")
+            print("  Computing W2 and area counts ...")
             w2 = _try_compute_w2(args.configs[i])
+            per_area_n = _count_areas_from_json(args.configs[i])
             if w2 is not None:
                 print(f"  W2 = {w2:.2f} mm")
+            if per_area_n:
+                print(f"  Areas: {per_area_n}")
 
         results.append(SetupResult(
-            label=label, nc=nc_res, muon=muon_res, pmt_uids=pmt_uids, w2=w2,
+            label=label, nc=nc_res, muon=muon_res, pmt_uids=pmt_uids,
+            w2=w2, per_area_n=per_area_n,
         ))
 
         del B, pmt_uids, detect_info
@@ -3520,6 +3679,8 @@ def main() -> None:
                           total_primaries=_total_primaries, color_map=color_map, m_min=6)
     plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
                                        total_primaries=_total_primaries, color_map=color_map)
+    plot_area_importance(results, M_values, W_values, args.output_dir,
+                         total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
