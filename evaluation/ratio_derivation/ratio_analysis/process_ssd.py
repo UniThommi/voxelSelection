@@ -4,7 +4,7 @@ import gc
 import h5py
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .geometry import GeometryConfig
 from .photon_filters import (
@@ -152,11 +152,19 @@ def process_all_files_ssd(
     bot_boundaries: List[float],
     n_pit: int, n_top: int, n_wall: int, n_bot: int,
     mode: str,
+    multi_ssd_dir: Optional[Path] = None,
 ) -> Tuple[Dict[str, int], int, int]:
-    """Process all SSD run directories.
+    """Process all SSD run directories, optionally summing multiple independent
+    optical simulations of the same neutron captures.
 
     Args:
-        mode: 'homogeneous' or 'musun'
+        base_path:      SSD base directory containing run_* subdirectories.
+        multi_ssd_dir:  If provided, each run_* must also contain sim_*
+                        subdirectories (run_*/sim_*/output_t*.hdf5).  Hits from
+                        all sim_* directories are summed with those from
+                        base_path.  NC events are counted only from base_path
+                        (all sims share the same physical NCs).
+        mode:           'homogeneous' or 'musun'
 
     Returns:
         (total_counts, total_files, total_nc)
@@ -170,11 +178,11 @@ def process_all_files_ssd(
     total_nc = 0
 
     run_dirs = sorted(base_path.glob("run_*"))
-    print(f"Processing SSD setup [{mode}]: found {len(run_dirs)} runs")
+    multi_label = f" + multi_ssd ({multi_ssd_dir.name})" if multi_ssd_dir else ""
+    print(f"Processing SSD setup [{mode}]{multi_label}: found {len(run_dirs)} runs")
 
     for run_idx, run_dir in enumerate(run_dirs, 1):
         print(f"  Run {run_idx}/{len(run_dirs)}: {run_dir.name}")
-        hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
 
         if mode == 'musun':
             nc_csv = run_dir / "merged_ncs.csv"
@@ -185,16 +193,32 @@ def process_all_files_ssd(
             nc_data_dict_run = load_nc_data_dict_musun(nc_csv)
             primary_id_field = 'muon_track_id'
 
-        for file_idx, hdf5_file in enumerate(hdf5_files):
+        # Collect all (file, count_nc_flag) pairs for this run.
+        # count_nc_flag=True only for base_path files; all sims share the same NCs.
+        source_files: List[Tuple[Path, bool]] = [
+            (f, True) for f in sorted(run_dir.glob("output_t*.hdf5"))
+        ]
+        if multi_ssd_dir is not None:
+            multi_run_dir = multi_ssd_dir / run_dir.name
+            if multi_run_dir.exists():
+                for sim_dir in sorted(multi_run_dir.glob("sim_*")):
+                    for f in sorted(sim_dir.glob("output_t*.hdf5")):
+                        source_files.append((f, False))
+            else:
+                print(f"    ⚠️ {run_dir.name} not found in multi_ssd_dir, "
+                      f"skipping multi sims for this run")
+
+        for file_idx, (hdf5_file, count_nc_flag) in enumerate(source_files):
             if (file_idx + 1) % 50 == 0:
-                print(f"    Processing file {file_idx + 1}/{len(hdf5_files)}")
+                print(f"    Processing file {file_idx + 1}/{len(source_files)}")
             total_files += 1
 
             if mode == 'homogeneous':
                 with h5py.File(hdf5_file, 'r') as f:
-                    total_nc += len(
-                        f['hit']['MyNeutronCaptureOutput']['evtid']['pages']
-                    )
+                    if count_nc_flag:
+                        total_nc += len(
+                            f['hit']['MyNeutronCaptureOutput']['evtid']['pages']
+                        )
                     nc_data_dict = load_nc_data_dict_homogeneous(f)
                 primary_id_field = 'evtid'
             else:
