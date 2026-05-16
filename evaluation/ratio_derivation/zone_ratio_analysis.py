@@ -121,10 +121,12 @@ def _validate_fractions(all_zones: List[Zone], pmts: list) -> None:
               f"{FRACTION_TOLERANCE*100:.0f}% of 1.0")
 
 
-def _validate_raw_dirs(mode: str, ssd_dir: Path, pmt_dir: Path) -> None:
+def _validate_raw_dirs(mode: str, ssd_dir: Path, pmt_dir: Path,
+                       pmt_only: bool = False) -> None:
     """Validate raw SSD and PMT run directories before zone scan."""
     errors: List[str] = []
-    for label, d in [('SSD', ssd_dir), ('PMT', pmt_dir)]:
+    dirs_to_check = [('PMT', pmt_dir)] if pmt_only else [('SSD', ssd_dir), ('PMT', pmt_dir)]
+    for label, d in dirs_to_check:
         run_dirs = sorted(d.glob("run_*"))
         if not run_dirs:
             errors.append(f"No run_* directories in {label} dir: {d}")
@@ -1060,7 +1062,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--ssd-postprocessed-file', type=Path, default=None,
                    metavar='HDF5',
                    help="SSD postprocessed ncscore_output_*.hdf5 (target_matrix). "
-                        "Required when --per-pmt-ratio is set.")
+                        "Required when --per-pmt-ratio or --per-pmt-only is set.")
+    p.add_argument('--per-pmt-only', action='store_true',
+                   help="Run only the per-PMT-position ratio analysis; skip the zone scan "
+                        "and all raw SSD file processing. --ssd-dir is ignored. "
+                        "Requires --pmt-dir (raw PMT HDF5 files) and "
+                        "--ssd-postprocessed-file (ML-format ncscore_output_*.hdf5). "
+                        "Results are saved to <output-dir>/per_pmt/.")
     return p.parse_args()
 
 
@@ -1073,10 +1081,11 @@ def main() -> None:
 
     # Decide which analyses to run BEFORE filling path defaults so we can
     # detect whether --ssd-dir was explicitly provided by the user.
-    run_per_pmt = args.per_pmt_ratio
+    per_pmt_only = args.per_pmt_only
+    run_per_pmt  = args.per_pmt_ratio or per_pmt_only
 
-    # Fill mode-specific path defaults
-    if args.ssd_dir is None:
+    # Fill mode-specific path defaults (ssd_dir is irrelevant in per-pmt-only mode)
+    if not per_pmt_only and args.ssd_dir is None:
         args.ssd_dir = (_MUSUN_DEFAULTS['ssd_dir'] if args.mode == 'musun'
                         else _HOMO_DEFAULTS['ssd_dir'])
     if args.pmt_dir is None:
@@ -1096,14 +1105,30 @@ def main() -> None:
     # --- Pre-flight validation (all checks before any heavy computation) ---
     if run_per_pmt:
         if args.ssd_postprocessed_file is None:
+            flag = '--per-pmt-only' if per_pmt_only else '--per-pmt-ratio'
             raise ValueError(
-                "--ssd-postprocessed-file is required when --per-pmt-ratio is set"
+                f"--ssd-postprocessed-file is required when {flag} is set"
             )
         print("\n[Pre-flight] Validating per-PMT inputs...")
         _validate_input_data(args.mode, args.pmt_dir, args.ssd_postprocessed_file)
 
-    print("\n[Pre-flight] Validating raw SSD/PMT directories...")
-    _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir)
+    _dir_label = "raw PMT directory" if per_pmt_only else "raw SSD/PMT directories"
+    print(f"\n[Pre-flight] Validating {_dir_label}...")
+    _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir, pmt_only=per_pmt_only)
+
+    if per_pmt_only:
+        analyze_per_pmt_ratio(
+            mode=args.mode,
+            pmt_dir=args.pmt_dir,
+            ssd_postprocessed_file=args.ssd_postprocessed_file,
+            pmt_json=args.pmt_json,
+            geometry=geometry,
+            chunk_size=chunk_size,
+            output_dir=args.output_dir / "per_pmt",
+            _skip_validation=True,
+        )
+        print("\nDone.")
+        return
 
     output_file = args.output_dir / "zone_ratio_results.txt"
 
