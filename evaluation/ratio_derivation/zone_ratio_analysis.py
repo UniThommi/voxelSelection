@@ -153,6 +153,33 @@ def _validate_raw_dirs(mode: str, ssd_dir: Path, pmt_dir: Path,
     print("  Raw directory checks passed.")
 
 
+def _validate_multi_ssd_dir(multi_ssd_dir: Path) -> None:
+    """Validate --multi-ssd-dir: expects run_*/sim_*/output_t*.hdf5 structure."""
+    errors: List[str] = []
+    run_dirs = sorted(multi_ssd_dir.glob("run_*"))
+    if not run_dirs:
+        raise ValueError(f"No run_* directories in --multi-ssd-dir: {multi_ssd_dir}")
+
+    for run_dir in run_dirs:
+        sim_dirs = sorted(run_dir.glob("sim_*"))
+        if not sim_dirs:
+            errors.append(f"No sim_* directories in {run_dir.name}")
+            continue
+        n_hdf5 = sum(len(list(sd.glob("output_t*.hdf5"))) for sd in sim_dirs)
+        if n_hdf5 == 0:
+            errors.append(
+                f"No output_t*.hdf5 files in any sim_* of {run_dir.name}")
+        else:
+            print(f"  {run_dir.name}: {len(sim_dirs)} sim(s), {n_hdf5} HDF5 file(s)")
+
+    if errors:
+        raise ValueError(
+            "Multi-SSD directory validation failed:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+    print("  Multi-SSD directory checks passed.")
+
+
 # ---------------------------------------------------------------------------
 # Chunk-level filter helpers (zone scan inner loop)
 # ---------------------------------------------------------------------------
@@ -259,8 +286,14 @@ def _scan_ssd_for_area(
     chunk_size: int,
     bot_counted: bool,
     bot_ssd_counts_scan: Dict[str, int],
+    multi_ssd_dir: Optional[Path] = None,
 ) -> Tuple[Dict[int, Dict[str, int]], int]:
-    """Single-pass SSD scan for one area across all zone configs."""
+    """Single-pass SSD scan for one area across all zone configs.
+
+    When multi_ssd_dir is provided, hits from ssd_dir and all sim_* directories
+    inside multi_ssd_dir/run_*/ are summed.  NC events are counted only from
+    ssd_dir (all sims share the same physical NCs).
+    """
     ssd_counts_by_n = {n: {f"{area_name}_{i}": 0 for i in range(n)} for n in zone_configs}
     ssd_scan_nc = 0
 
@@ -274,8 +307,17 @@ def _scan_ssd_for_area(
             nc_data_dict_run = load_nc_data_dict_musun(nc_csv)
             primary_field = 'muon_track_id'
 
-        for hdf5_file in sorted(run_dir.glob("output_t*.hdf5")):
-            if mode == 'homogeneous':
+        # Collect (file, count_nc_flag): True only for ssd_dir files.
+        source_files = [(f, True) for f in sorted(run_dir.glob("output_t*.hdf5"))]
+        if multi_ssd_dir is not None:
+            multi_run_dir = multi_ssd_dir / run_dir.name
+            if multi_run_dir.exists():
+                for sim_dir in sorted(multi_run_dir.glob("sim_*")):
+                    for f in sorted(sim_dir.glob("output_t*.hdf5")):
+                        source_files.append((f, False))
+
+        for hdf5_file, count_nc_flag in source_files:
+            if mode == 'homogeneous' and count_nc_flag:
                 ssd_scan_nc += count_nc_from_hdf5(hdf5_file)
 
             try:
@@ -433,6 +475,7 @@ def _run_zone_scan(
     bot_zone_frac: Dict[str, float],
     snr_threshold: float,
     min_pmts_per_zone: int,
+    multi_ssd_dir: Optional[Path] = None,
 ) -> Tuple[Dict, Dict, Dict[str, int], Dict[str, float]]:
     """Run zone scan for each requested area.
 
@@ -487,7 +530,8 @@ def _run_zone_scan(
         print(f"\n  Scanning {area_name}: processing SSD files...")
         ssd_counts_by_n, ssd_scan_nc = _scan_ssd_for_area(
             mode, ssd_dir, area_name, cfg, zone_configs, bounds_configs,
-            bot_bounds, geometry, chunk_size, bot_counted, bot_ssd_counts_scan)
+            bot_bounds, geometry, chunk_size, bot_counted, bot_ssd_counts_scan,
+            multi_ssd_dir=multi_ssd_dir)
 
         print(f"  Scanning {area_name}: processing PMT files...")
         pmt_counts_by_n, pmt_scan_nc = _scan_pmt_for_area(
@@ -1046,6 +1090,12 @@ def parse_args() -> argparse.Namespace:
                    help="Simulation mode")
     p.add_argument('--ssd-dir', type=Path, default=None,
                    help="SSD run_* base directory (default: mode-specific)")
+    p.add_argument('--multi-ssd-dir', type=Path, default=None, metavar='DIR',
+                   help="Directory with multiple independent optical simulations of the "
+                        "same NCs as --ssd-dir.  Expected layout: "
+                        "run_XXX/sim_YYY/output_t*.hdf5. "
+                        "Photon hits are summed across --ssd-dir and all sim_YYY dirs. "
+                        "NC counts are taken from --ssd-dir only (shared NCs).")
     p.add_argument('--pmt-dir', type=Path, default=None,
                    help="PMT run_* base directory (default: mode-specific)")
     p.add_argument('--pmt-json', type=Path, default=_PMT_JSON_DEFAULT,
@@ -1140,6 +1190,10 @@ def main() -> None:
     _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir, pmt_only=per_pmt_only,
                        runs=args.runs if per_pmt_only else None)
 
+    if args.multi_ssd_dir is not None and not per_pmt_only:
+        print("\n[Pre-flight] Validating --multi-ssd-dir...")
+        _validate_multi_ssd_dir(args.multi_ssd_dir)
+
     if per_pmt_only:
         analyze_per_pmt_ratio(
             mode=args.mode,
@@ -1163,6 +1217,8 @@ def main() -> None:
     print(f"Mode:        {args.mode}")
     print(f"Geometry:    {geometry.geometry_name}")
     print(f"SSD dir:     {args.ssd_dir}")
+    if args.multi_ssd_dir is not None:
+        print(f"Multi-SSD:   {args.multi_ssd_dir}")
     print(f"PMT dir:     {args.pmt_dir}")
     print(f"Output dir:  {args.output_dir}")
     print(f"Chunk size:  {chunk_size}")
@@ -1243,6 +1299,7 @@ def main() -> None:
             args.n_pit, args.n_top, args.n_wall,
             bot_bounds, zone_fractions.get("bot_0", {}),
             args.snr_threshold, args.min_pmts,
+            multi_ssd_dir=args.multi_ssd_dir,
         )
 
         n_pit_opt  = optimal_zones_dict.get('pit',  args.n_pit)
@@ -1300,6 +1357,8 @@ def main() -> None:
         ssd_nc    = optimal_zones_dict["pit_ssd_nc"]
         pmt_nc    = optimal_zones_dict["pit_pmt_nc"]
         ssd_files = len(list(args.ssd_dir.glob("run_*/output_t*.hdf5")))
+        if args.multi_ssd_dir is not None:
+            ssd_files += len(list(args.multi_ssd_dir.glob("run_*/sim_*/output_t*.hdf5")))
         pmt_files = len(list(args.pmt_dir.glob("run_*/output_t*.hdf5")))
     else:
         print("\n[1/2] Processing SSD simulation data...")
@@ -1308,6 +1367,7 @@ def main() -> None:
             pit_bounds, top_bounds, wall_bounds, bot_bounds,
             len(pit_zones), len(top_zones), len(wall_zones), 1,
             args.mode,
+            multi_ssd_dir=args.multi_ssd_dir,
         )
         print("\n[2/2] Processing PMT simulation data...")
         pmt_counts, pmt_files, pmt_nc, observed_uids = process_all_files_pmt(
@@ -1315,7 +1375,7 @@ def main() -> None:
             uid_to_pmt, zone_fractions, all_zone_keys,
             args.mode,
         )
-        if not compare_mode:
+        if not compare_mode and args.multi_ssd_dir is None:
             assert ssd_files == pmt_files, \
                 f"File count mismatch: SSD={ssd_files}, PMT={pmt_files}"
         crosscheck_uids(uid_to_pmt, observed_uids, "PMT")
