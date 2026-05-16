@@ -2309,10 +2309,14 @@ def plot_recall_at_best_fom(
     output_dir: str,
     total_primaries: int = 0,
     color_map: dict[str, str] | None = None,
+    fixed_m: int | None = None,
 ) -> None:
     """Horizontal bar: Recall at each setup's FoM-optimal (M, W).
 
     Each bar is annotated with its optimal (M, W) pair and Recall value.
+    If ``fixed_m`` is given, M is locked to that value and only W is
+    optimised; the output is saved as
+    ``21_recall_at_best_fom_for_M{fixed_m}.png``.
     """
     results = _w2_sorted(results)
     if color_map is None:
@@ -2320,16 +2324,21 @@ def plot_recall_at_best_fom(
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
     colors = [color_map.get(r.label, "gray") for r in results]
 
+    m_search = [fixed_m] if fixed_m is not None else M_values
+
     recalls: list[float] = []
     opt_mw_labels: list[str] = []
     for r in results:
         _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
-        grid = _cc_fom_grid(r, M_values, W_values, _tp)
+        grid = _cc_fom_grid(r, m_search, W_values, _tp)
         valid = {k: v for k, v in grid.items() if np.isfinite(v)}
         if valid:
             best_mw = max(valid, key=valid.__getitem__)
             recalls.append(_cc_recall(r, best_mw[0], best_mw[1]))
-            opt_mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
+            if fixed_m is not None:
+                opt_mw_labels.append(f"W{best_mw[1]}")
+            else:
+                opt_mw_labels.append(f"M{best_mw[0]}W{best_mw[1]}")
         else:
             recalls.append(float("nan"))
             opt_mw_labels.append("N/A")
@@ -2351,16 +2360,27 @@ def plot_recall_at_best_fom(
     ax.set_yticks(y)
     ax.set_yticklabels([r.label for r in results], fontsize=9)
     ax.set_xlim(right=x_max * 1.4)
-    ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=11)
+
+    if fixed_m is not None:
+        ax.set_xlabel(f"Ge-77 Recall at FoM-optimal W  (M={fixed_m} fixed)", fontsize=11)
+        ax.set_title(
+            f"Ge-77 Muon Recall at Each Setup's FoM-Optimal W  (M={fixed_m} fixed)\n"
+            f"(brackets show the W that maximises FoM for that setup at M={fixed_m})",
+            fontsize=12, pad=10,
+        )
+        fname = f"21_recall_at_best_fom_for_M{fixed_m}.png"
+    else:
+        ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=11)
+        ax.set_title(
+            "Ge-77 Muon Recall at Each Setup's FoM-Optimal (M, W)\n"
+            "(brackets show the (M, W) that maximises FoM for that setup)",
+            fontsize=12, pad=10,
+        )
+        fname = "21_recall_at_best_fom.png"
+
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-    ax.set_title(
-        "Ge-77 Muon Recall at Each Setup's FoM-Optimal (M, W)\n"
-        "(brackets show the (M, W) that maximises FoM for that setup)",
-        fontsize=12, pad=10,
-    )
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
-    fname = "21_recall_at_best_fom.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=150)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -3326,6 +3346,9 @@ def main() -> None:
     plot_recall_w1_vs_m(results, M_values, args.output_dir, color_map=color_map)
     plot_recall_at_best_fom(results, M_values, W_values, args.output_dir,
                             total_primaries=_total_primaries, color_map=color_map)
+    plot_recall_at_best_fom(results, M_values, W_values, args.output_dir,
+                            total_primaries=_total_primaries, color_map=color_map,
+                            fixed_m=6)
     plot_nc_recall_at_best_fom(results, M_values, W_values, args.output_dir,
                                total_primaries=_total_primaries, color_map=color_map)
     plot_ge77_survival_at_best_fom(results, M_values, W_values, args.output_dir,
