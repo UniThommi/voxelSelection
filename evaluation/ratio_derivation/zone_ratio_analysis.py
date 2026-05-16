@@ -287,6 +287,7 @@ def _scan_ssd_for_area(
     bot_counted: bool,
     bot_ssd_counts_scan: Dict[str, int],
     multi_ssd_dir: Optional[Path] = None,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[int, Dict[str, int]], int]:
     """Single-pass SSD scan for one area across all zone configs.
 
@@ -297,7 +298,12 @@ def _scan_ssd_for_area(
     ssd_counts_by_n = {n: {f"{area_name}_{i}": 0 for i in range(n)} for n in zone_configs}
     ssd_scan_nc = 0
 
-    for run_dir in sorted(ssd_dir.glob("run_*")):
+    run_dirs_ssd = sorted(ssd_dir.glob("run_*"))
+    if runs is not None:
+        runs_set = set(runs)
+        run_dirs_ssd = [r for r in run_dirs_ssd
+                        if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
+    for run_dir in run_dirs_ssd:
         if mode == 'musun':
             nc_csv = run_dir / "merged_ncs.csv"
             if not nc_csv.exists():
@@ -388,12 +394,18 @@ def _scan_pmt_for_area(
     chunk_size: int,
     bot_counted: bool,
     bot_pmt_counts_scan: Dict[str, float],
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[int, Dict[str, float]], int]:
     """Single-pass PMT scan for one area across all zone configs."""
     pmt_counts_by_n = {n: {f"{area_name}_{i}": 0.0 for i in range(n)} for n in zone_configs}
     pmt_scan_nc = 0
 
-    for run_dir in sorted(pmt_dir.glob("run_*")):
+    run_dirs_pmt = sorted(pmt_dir.glob("run_*"))
+    if runs is not None:
+        runs_set = set(runs)
+        run_dirs_pmt = [r for r in run_dirs_pmt
+                        if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
+    for run_dir in run_dirs_pmt:
         if mode == 'musun':
             nc_csv = run_dir / "merged_ncs.csv"
             if not nc_csv.exists():
@@ -476,6 +488,7 @@ def _run_zone_scan(
     snr_threshold: float,
     min_pmts_per_zone: int,
     multi_ssd_dir: Optional[Path] = None,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict, Dict, Dict[str, int], Dict[str, float]]:
     """Run zone scan for each requested area.
 
@@ -531,12 +544,13 @@ def _run_zone_scan(
         ssd_counts_by_n, ssd_scan_nc = _scan_ssd_for_area(
             mode, ssd_dir, area_name, cfg, zone_configs, bounds_configs,
             bot_bounds, geometry, chunk_size, bot_counted, bot_ssd_counts_scan,
-            multi_ssd_dir=multi_ssd_dir)
+            multi_ssd_dir=multi_ssd_dir, runs=runs)
 
         print(f"  Scanning {area_name}: processing PMT files...")
         pmt_counts_by_n, pmt_scan_nc = _scan_pmt_for_area(
             mode, pmt_dir, area_name, zone_configs, frac_configs,
-            uid_to_pmt, bot_zone_frac, chunk_size, bot_counted, bot_pmt_counts_scan)
+            uid_to_pmt, bot_zone_frac, chunk_size, bot_counted, bot_pmt_counts_scan,
+            runs=runs)
 
         optimal_n, scan_data = scan_optimal_zones(
             ssd_counts_by_n, pmt_counts_by_n,
@@ -617,6 +631,8 @@ def _validate_input_data(
                         f"target_matrix={n_tgt}, phi_matrix={n_phi}")
                 ssd_n_rows = n_ev
                 ssd_run_ids = set(int(x) for x in np.unique(f['event_ids'][:, 0]))
+                if runs is not None:
+                    ssd_run_ids = ssd_run_ids & set(runs)
         print(f"  SSD HDF5: {ssd_n_rows:,} NCs, run IDs = {sorted(ssd_run_ids)}")
     except OSError as e:
         errors.append(f"Cannot open SSD HDF5 {ssd_postprocessed_file.name}: {e}")
@@ -804,6 +820,7 @@ def _accumulate_pmt_hits_per_uid(
 
 def _load_ssd_voxel_hits_from_postprocessed(
     ssd_postprocessed_file: Path,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[str, int], int]:
     """Sum target_matrix over all NC rows to get total photon hits per voxel.
 
@@ -812,12 +829,17 @@ def _load_ssd_voxel_hits_from_postprocessed(
     Reads in batches of 1 000 NC rows to limit peak memory.
     Accumulates in float64 (from int32 on disk) to avoid overflow at large row counts.
 
+    When `runs` is not None, only rows whose run_id (event_ids[:, 0]) is in
+    the given set are included; the returned NC count reflects the filtered subset.
+
     Args:
         ssd_postprocessed_file: path to ncscore_output_*.hdf5
+        runs: if not None, restrict to these run IDs
 
     Returns:
         ({voxel_id: total_hits_over_all_NCs}, n_ncs)
     """
+    _BATCH = 1000
     with h5py.File(ssd_postprocessed_file, 'r') as f:
         voxel_ids: List[str] = [
             c.decode() if isinstance(c, bytes) else str(c)
@@ -826,12 +848,26 @@ def _load_ssd_voxel_hits_from_postprocessed(
         mat = f['target_matrix']
         n_ncs, n_vox = mat.shape
         col_sums = np.zeros(n_vox, dtype=np.float64)
-        _BATCH = 1000
-        for rs in range(0, n_ncs, _BATCH):
-            re = min(rs + _BATCH, n_ncs)
-            col_sums += np.array(mat[rs:re, :], dtype=np.float64).sum(axis=0)
 
-    return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}, n_ncs
+        if runs is not None:
+            runs_set = set(runs)
+            ev_ids = f['event_ids']
+            n_selected = 0
+            for rs in range(0, n_ncs, _BATCH):
+                re = min(rs + _BATCH, n_ncs)
+                batch_run_ids = np.array(ev_ids[rs:re, 0], dtype=np.int64)
+                row_mask = np.isin(batch_run_ids, list(runs_set))
+                if np.any(row_mask):
+                    batch = np.array(mat[rs:re, :], dtype=np.float64)
+                    col_sums += batch[row_mask].sum(axis=0)
+                n_selected += int(np.sum(row_mask))
+        else:
+            for rs in range(0, n_ncs, _BATCH):
+                re = min(rs + _BATCH, n_ncs)
+                col_sums += np.array(mat[rs:re, :], dtype=np.float64).sum(axis=0)
+            n_selected = n_ncs
+
+    return {vid: int(round(s)) for vid, s in zip(voxel_ids, col_sums)}, n_selected
 
 
 def _plot_ratio_histogram(
@@ -993,7 +1029,7 @@ def analyze_per_pmt_ratio(
     # 3 -- SSD postprocessed voxel hits
     print("\n[3/4] Loading SSD postprocessed voxel hits...")
     ssd_voxel_hits, ssd_nc = _load_ssd_voxel_hits_from_postprocessed(
-        ssd_postprocessed_file)
+        ssd_postprocessed_file, runs=runs)
     print(f"  {len(ssd_voxel_hits)} voxels; "
           f"total hits = {sum(ssd_voxel_hits.values()):,}")
     print(f"  SSD postprocessed: {ssd_nc:,} NC events")
@@ -1138,9 +1174,11 @@ def parse_args() -> argparse.Namespace:
                         "--ssd-postprocessed-file (ML-format ncscore_output_*.hdf5). "
                         "Results are saved to <output-dir>/per_pmt/.")
     p.add_argument('--runs', nargs='+', type=int, default=None, metavar='RUN_ID',
-                   help="Restrict per-PMT analysis to specific run IDs "
+                   help="Restrict all analyses to specific run IDs "
                         "(e.g. --runs 1  or  --runs 1 3 5). "
                         "Run ID 1 matches run_001, run_1, etc. "
+                        "Applies to the zone scan, full processing (SSD + PMT raw files), "
+                        "and the ML-format SSD target_matrix (filtered by event_ids[:, 0]). "
                         "Default: process all run_* directories.")
     return p.parse_args()
 
@@ -1183,12 +1221,13 @@ def main() -> None:
                 f"--ssd-postprocessed-file is required when {flag} is set"
             )
         print("\n[Pre-flight] Validating per-PMT inputs...")
-        _validate_input_data(args.mode, args.pmt_dir, args.ssd_postprocessed_file)
+        _validate_input_data(args.mode, args.pmt_dir, args.ssd_postprocessed_file,
+                             runs=args.runs)
 
     _dir_label = "raw PMT directory" if per_pmt_only else "raw SSD/PMT directories"
     print(f"\n[Pre-flight] Validating {_dir_label}...")
     _validate_raw_dirs(args.mode, args.ssd_dir, args.pmt_dir, pmt_only=per_pmt_only,
-                       runs=args.runs if per_pmt_only else None)
+                       runs=args.runs)
 
     if args.multi_ssd_dir is not None and not per_pmt_only:
         print("\n[Pre-flight] Validating --multi-ssd-dir...")
@@ -1300,6 +1339,7 @@ def main() -> None:
             bot_bounds, zone_fractions.get("bot_0", {}),
             args.snr_threshold, args.min_pmts,
             multi_ssd_dir=args.multi_ssd_dir,
+            runs=args.runs,
         )
 
         n_pit_opt  = optimal_zones_dict.get('pit',  args.n_pit)
@@ -1368,12 +1408,14 @@ def main() -> None:
             len(pit_zones), len(top_zones), len(wall_zones), 1,
             args.mode,
             multi_ssd_dir=args.multi_ssd_dir,
+            runs=args.runs,
         )
         print("\n[2/2] Processing PMT simulation data...")
         pmt_counts, pmt_files, pmt_nc, observed_uids = process_all_files_pmt(
             args.pmt_dir, geometry, chunk_size,
             uid_to_pmt, zone_fractions, all_zone_keys,
             args.mode,
+            runs=args.runs,
         )
         if not compare_mode and args.multi_ssd_dir is None:
             assert ssd_files == pmt_files, \

@@ -153,6 +153,7 @@ def process_all_files_ssd(
     n_pit: int, n_top: int, n_wall: int, n_bot: int,
     mode: str,
     multi_ssd_dir: Optional[Path] = None,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[str, int], int, int]:
     """Process all SSD run directories, optionally summing multiple independent
     optical simulations of the same neutron captures.
@@ -165,6 +166,7 @@ def process_all_files_ssd(
                         base_path.  NC events are counted only from base_path
                         (all sims share the same physical NCs).
         mode:           'homogeneous' or 'musun'
+        runs:           if not None, restrict to these run IDs (e.g. [1] for run_001)
 
     Returns:
         (total_counts, total_files, total_nc)
@@ -178,6 +180,10 @@ def process_all_files_ssd(
     total_nc = 0
 
     run_dirs = sorted(base_path.glob("run_*"))
+    if runs is not None:
+        runs_set = set(runs)
+        run_dirs = [r for r in run_dirs
+                    if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
     multi_label = f" + multi_ssd ({multi_ssd_dir.name})" if multi_ssd_dir else ""
     print(f"Processing SSD setup [{mode}]{multi_label}: found {len(run_dirs)} runs")
 

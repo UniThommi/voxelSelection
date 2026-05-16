@@ -4,7 +4,7 @@ import gc
 import h5py
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .geometry import GeometryConfig
 from .pmt_data import PMTInfo
@@ -104,11 +104,13 @@ def process_all_files_pmt(
     zone_fractions: Dict[str, Dict[str, float]],
     all_zone_keys: List[str],
     mode: str,
+    runs: Optional[List[int]] = None,
 ) -> Tuple[Dict[str, float], int, int, set]:
     """Process all PMT run directories.
 
     Args:
         mode: 'homogeneous' or 'musun'
+        runs: if not None, restrict to these run IDs (e.g. [1] for run_001)
 
     Returns:
         (total_counts, total_files, total_nc, all_observed_uids)
@@ -119,6 +121,10 @@ def process_all_files_pmt(
     all_observed_uids: set = set()
 
     run_dirs = sorted(base_path.glob("run_*"))
+    if runs is not None:
+        runs_set = set(runs)
+        run_dirs = [r for r in run_dirs
+                    if r.name[4:].isdigit() and int(r.name[4:]) in runs_set]
     print(f"Processing PMT setup [{mode}]: found {len(run_dirs)} runs")
 
     for run_idx, run_dir in enumerate(run_dirs, 1):
