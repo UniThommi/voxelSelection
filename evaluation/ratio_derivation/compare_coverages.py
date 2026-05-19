@@ -41,6 +41,22 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
+# ── Publication-quality global style ──────────────────────────────────
+plt.rcParams.update({
+    "font.size":              13,
+    "axes.titlesize":         14,
+    "axes.labelsize":         13,
+    "xtick.labelsize":        11,
+    "ytick.labelsize":        11,
+    "legend.fontsize":        11,
+    "legend.title_fontsize":  12,
+    "lines.linewidth":        1.5,
+    "patch.linewidth":        0.8,
+    "axes.grid":              True,
+    "grid.alpha":             0.3,
+    "axes.axisbelow":         True,
+})
+
 # Ensure ratio_analysis package is importable when run from any directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -302,13 +318,13 @@ def plot_nc_coverage_line(
         ax.set_xlabel("M — minimum firing PMTs per NC")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
         ax.set_xticks(M_values)
 
     fig.tight_layout()
     fname = "01_nc_coverage_line.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -353,7 +369,7 @@ def plot_nc_multiplicity_histogram(
             f"PMT Multiplicity Distribution per NC — {scale_label}\n"
             "(# distinct PMTs with ≥m hits within 200 ns of NC; NCs with 0 excluded)"
         )
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=11)
         ax.set_yscale(scale)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
@@ -374,7 +390,7 @@ def plot_nc_multiplicity_histogram(
 
     fig.tight_layout(rect=[0, 0.07, 1, 1])
     fname = "02_nc_multiplicity_histogram.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -469,10 +485,10 @@ def _draw_detectability_panels(
             _annotate_bar(ax_abs, bar, val, total, fontsize=6, rotation=90)
 
     ax_abs.set_xticks(x)
-    ax_abs.set_xticklabels(abs_cat_labels, fontsize=9)
+    ax_abs.set_xticklabels(abs_cat_labels, fontsize=11)
     ax_abs.set_ylabel(ylabel)
     ax_abs.set_title(title)
-    ax_abs.legend(fontsize=8)
+    ax_abs.legend(fontsize=11)
     ax_abs.yaxis.set_major_formatter(
         mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
     )
@@ -541,12 +557,12 @@ def _draw_detectability_panels(
 
     ax_delta.axvline(0, color="black", linewidth=0.9)
     ax_delta.set_yticks(y_base)
-    ax_delta.set_yticklabels(delta_cat_labels, fontsize=9)
-    ax_delta.set_xlabel(f"Δ count vs reference ({ref_result.label})", fontsize=9)
+    ax_delta.set_yticklabels(delta_cat_labels, fontsize=11)
+    ax_delta.set_xlabel(f"Δ count vs reference ({ref_result.label})", fontsize=13)
     ax_delta.set_title(
         f"Δ from reference: {ref_result.label}", fontsize=10
     )
-    ax_delta.legend(fontsize=8, title="vs reference")
+    ax_delta.legend(fontsize=11, title="vs reference")
     ax_delta.xaxis.set_major_formatter(
         mticker.FuncFormatter(lambda v, _: f"{int(v):+,}")
     )
@@ -585,7 +601,7 @@ def _detectability_figure(
         fig.tight_layout(rect=[0, 0.06, 1, 1])
     else:
         fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -691,7 +707,7 @@ def plot_ge77_muon_overview(
         "(muon is Ge77 if any NC has flag_ge77==1; "
         "'Detected' = ≥W NCs with ≥M firing PMTs in [1 µs, 200 µs])"
     )
-    ax_abs.legend(fontsize=8)
+    ax_abs.legend(fontsize=11)
     ax_abs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
     # Indicate what 100% corresponds to
     _all_muons = total_primary_muons if total_primary_muons > 0 else (results[0].muon["muon_stats"]["total"] if results else 0)
@@ -751,17 +767,17 @@ def plot_ge77_muon_overview(
 
         ax_delta.axvline(0, color="black", linewidth=0.9)
         ax_delta.set_yticks(y_base)
-        ax_delta.set_yticklabels(delta_cat_labels, fontsize=9)
-        ax_delta.set_xlabel(f"Δ muon count vs reference ({ref_result.label})", fontsize=9)
+        ax_delta.set_yticklabels(delta_cat_labels, fontsize=11)
+        ax_delta.set_xlabel(f"Δ muon count vs reference ({ref_result.label})", fontsize=13)
         ax_delta.set_title(f"Δ from reference: {ref_result.label}", fontsize=10)
-        ax_delta.legend(fontsize=8, title="vs reference")
+        ax_delta.legend(fontsize=11, title="vs reference")
         ax_delta.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):+,}"))
         ax_delta.grid(True, axis="x", alpha=0.3)
         ax_delta.invert_yaxis()
 
     fig.tight_layout()
     fname = "04_ge77_muon_overview.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -803,7 +819,7 @@ def plot_muon_heatmaps(
 
         fig_w = max(6, 2 + 2 * n_setups)
         fig, axes = plt.subplots(1, 2, figsize=(fig_w, 6))
-        fig.suptitle(f"Ge-77 Classification  M={M}", fontsize=13)
+        fig.suptitle(f"Ge-77 Classification  M={M}", fontsize=14)
 
         for col, metric in enumerate(metrics_to_plot):
             ax = axes[col]
@@ -820,7 +836,7 @@ def plot_muon_heatmaps(
                 ],
             )
             ax.set_xticks(range(n_setups))
-            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=11)
             ax.set_yticks(W_values[::max(1, len(W_values) // 10)])
             ax.set_xlabel("Setup")
             ax.set_ylabel("W (min detected NCs per muon)")
@@ -829,7 +845,7 @@ def plot_muon_heatmaps(
 
         fig.tight_layout()
         fname = f"05_muon_heatmap_M{M:02d}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        fig.savefig(os.path.join(output_dir, fname), dpi=300)
         plt.close(fig)
         print(f"  Saved {fname}")
 
@@ -884,9 +900,9 @@ def plot_confusion_bar(
             ax.set_ylim(0, vmax * 1.2 if vmax > 0 else 1)
 
         ax.set_xticks(range(n))
-        ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=8)
+        ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=11)
         ax.set_ylabel("Number of Muons")
-        ax.set_title(cat_label, fontsize=11)
+        ax.set_title(cat_label, fontsize=13)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
         ax.grid(True, axis="y", alpha=0.3)
 
@@ -912,7 +928,7 @@ def plot_confusion_bar(
 
     fig.tight_layout(rect=[0, 0.04 + 0.025 * n_lines, 1, 0.96])
     fname = "06_confusion_bar.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -989,13 +1005,13 @@ def _draw_w_panel(
     shown = list(range(0, len(bin_edges), step))
     ax.set_xticks([x[i] for i in shown])
     ax.set_xticklabels([str(bin_edges[i]) for i in shown], rotation=45, ha="right", fontsize=8)
-    ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})", fontsize=9)
+    ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})", fontsize=13)
     ax.set_ylabel("Number of Muons")
     ax.set_title(
         f"Detected NC Count per {label} Muon\n"
         f"(time window [1µs, 200µs], M≥{M}; only muons with ≥1 NC)"
     )
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=11)
     ax.set_yscale("log")
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
@@ -1020,7 +1036,7 @@ def plot_w_histogram(
     _draw_w_panel(axes[1], results, M_default, W_default, ge77=False)
     fig.tight_layout(rect=[0, 0.05, 1, 1])
     fname = "07_w_histogram.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1148,7 +1164,7 @@ def plot_mw_sweep(
 
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, rotation=90, fontsize=7)
-        ax.set_ylabel(metric, fontsize=12)
+        ax.set_ylabel(metric, fontsize=13)
         if metric == "FoM":
             ax.yaxis.set_major_locator(mticker.AutoLocator())
         else:
@@ -1161,13 +1177,13 @@ def plot_mw_sweep(
             f"Ge-77 Muon Classification — {metric} across all (M, W) combinations",
             fontsize=13, pad=20,
         )
-        ax.legend(fontsize=9, loc="upper right")
+        ax.legend(fontsize=11, loc="upper right")
         ax.grid(True, axis="y", alpha=0.3)
         ax.set_xlim(-0.5, len(mw_pairs) - 0.5)
 
         fig.tight_layout()
         fname = f"{plot_num}_mw_sweep_{fname_part}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        fig.savefig(os.path.join(output_dir, fname), dpi=300)
         plt.close(fig)
         print(f"  Saved {fname}")
 
@@ -1251,17 +1267,17 @@ def plot_fom_summary(
             )
 
     ax.set_yticks(y)
-    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_yticklabels([r.label for r in results], fontsize=11)
     ax.set_xlim(right=y_max * 1.35)
-    ax.set_xlabel("Figure of Merit  (max over all M, W)", fontsize=11)
+    ax.set_xlabel("Figure of Merit  (max over all M, W)", fontsize=13)
     ax.set_title(
         "Ge-77 Muon Figure of Merit — Best (M, W) per Configuration",
-        fontsize=12, pad=10,
+        fontsize=14, pad=10,
     )
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
     fname = "12_fom_summary.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1319,17 +1335,17 @@ def plot_fom_summary_min_m(
             )
 
     ax.set_yticks(y)
-    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_yticklabels([r.label for r in results], fontsize=11)
     ax.set_xlim(right=y_max * 1.35)
-    ax.set_xlabel(f"Figure of Merit  (max over M≥{min_M}, all W)", fontsize=11)
+    ax.set_xlabel(f"Figure of Merit  (max over M≥{min_M}, all W)", fontsize=13)
     ax.set_title(
         f"Ge-77 Muon Figure of Merit — Best (M≥{min_M}, W) per Configuration",
-        fontsize=12, pad=10,
+        fontsize=14, pad=10,
     )
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
     fname = f"12b_fom_summary_M{min_M}plus.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1383,16 +1399,16 @@ def plot_fom_per_setup(
                 marker="*", s=250, color="red", zorder=5,
                 label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
             )
-            ax_h.legend(fontsize=9, loc="upper right")
+            ax_h.legend(fontsize=11, loc="upper right")
 
-        ax_h.set_xlabel("M  (NC threshold)", fontsize=11)
-        ax_h.set_ylabel("W  (muon threshold)", fontsize=11)
+        ax_h.set_xlabel("M  (NC threshold)", fontsize=13)
+        ax_h.set_ylabel("W  (muon threshold)", fontsize=13)
         ax_h.set_xticks(M_values)
         ax_h.set_yticks(W_values)
-        ax_h.set_title(f"Figure of Merit — {r.label}", fontsize=12, pad=10)
+        ax_h.set_title(f"Figure of Merit — {r.label}", fontsize=14, pad=10)
         fig_h.tight_layout()
         fname_h = f"12_fom_heatmap_{safe_name}.png"
-        fig_h.savefig(os.path.join(output_dir, fname_h), dpi=150)
+        fig_h.savefig(os.path.join(output_dir, fname_h), dpi=300)
         plt.close(fig_h)
         print(f"  Saved {fname_h}")
 
@@ -1455,15 +1471,15 @@ def plot_w2_fom_best(
         ax.plot(x_line, slope * x_line + intercept,
                 color="black", linestyle="--", linewidth=1.3,
                 label=f"OLS   ρ_s = {rho:+.3f}   p = {p_rho:.3f}")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=11)
 
-    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=11)
-    ax.set_ylabel("Best FoM  (max over all M, W)", fontsize=11)
-    ax.set_title("W2 Homogeneity vs Best Achievable FoM", fontsize=12, pad=10)
+    ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=13)
+    ax.set_ylabel("Best FoM  (max over all M, W)", fontsize=13)
+    ax.set_title("W2 Homogeneity vs Best Achievable FoM", fontsize=14, pad=10)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "18_w2_fom_best.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1552,20 +1568,20 @@ def plot_w2_sorted_heatmaps(
                             fontsize=6, color=txt_col)
 
             ax.set_xticks(range(n_res))
-            ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=8)
+            ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=10)
             ax.set_yticks(range(n_w))
-            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=8)
+            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=10)
             metric_title = "Recall" if metric == "Recall" else "Figure of Merit"
             ax.set_title(
                 f"{metric_title} at M={M}  —  setups sorted by W2 ascending",
-                fontsize=11, pad=8,
+                fontsize=13, pad=8,
             )
-            ax.set_xlabel("Setup  (sorted by W2, most uniform → left)", fontsize=10)
-            ax.set_ylabel("W  (muon threshold)", fontsize=10)
+            ax.set_xlabel("Setup  (sorted by W2, most uniform → left)", fontsize=13)
+            ax.set_ylabel("W  (muon threshold)", fontsize=13)
 
             fig.tight_layout()
             fname = f"{fname_pfx}_M{M:02d}.png"
-            fig.savefig(os.path.join(output_dir, fname), dpi=150)
+            fig.savefig(os.path.join(output_dir, fname), dpi=300)
             plt.close(fig)
             print(f"  Saved {fname}")
 
@@ -1599,7 +1615,7 @@ def plot_w2_nc_scatter(
     m_colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(panel_ms)))
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    fig.suptitle("W2 Homogeneity vs NC Coverage", fontsize=13, fontweight="bold")
+    fig.suptitle("W2 Homogeneity vs NC Coverage", fontsize=14, fontweight="bold")
 
     for sM, cm in zip(panel_ms, m_colors):
         fracs = np.array([
@@ -1613,14 +1629,14 @@ def plot_w2_nc_scatter(
 
     ax.set_xlabel("Global W2 (mm) — lower = more uniform", fontsize=10)
     ax.set_ylabel("NC detection fraction", fontsize=10)
-    ax.set_title("W2 vs NC Coverage", fontsize=11)
+    ax.set_title("W2 vs NC Coverage", fontsize=14)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
-    ax.legend(title="M threshold", fontsize=8, title_fontsize=8)
+    ax.legend(title="M threshold", fontsize=11, title_fontsize=12)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fname = f"08_w2_nc_scatter_M{M_fixed:02d}_W{W_fixed:02d}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=200, bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1695,14 +1711,14 @@ def plot_w2_scatter(
 
         ax.set_xlabel("Global W2 (mm)", fontsize=10)
         ax.set_ylabel(ylabel, fontsize=10)
-        ax.set_title(title, fontsize=11)
+        ax.set_title(title, fontsize=13)
         ax.yaxis.set_major_formatter(
             mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
         ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fname = f"09_w2_scatter_M{M_fixed:02d}_W{W_fixed:02d}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=200, bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1795,7 +1811,7 @@ def plot_w2_nc_correlation(
         _regression_overlay(ax_scatter, ax_resid, w2_arr, y_arr,
                             color_pts, labels,
                             y_label=f"NC fraction (M≥{M})")
-        ax_scatter.set_title(f"M ≥ {M}", fontsize=9)
+        ax_scatter.set_title(f"M ≥ {M}", fontsize=12)
         ax_scatter.yaxis.set_major_formatter(
             mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
         ax_resid.yaxis.set_major_formatter(
@@ -1804,7 +1820,7 @@ def plot_w2_nc_correlation(
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fname = "13_w2_nc_correlation.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1872,7 +1888,7 @@ def plot_w2_muon_correlation(
             _regression_overlay(ax_scatter, ax_resid, w2_arr, y_arr,
                                 color_pts, labels,
                                 y_label=f"{metric_name} (M≥{M}, W≥{W_default})")
-            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=8)
+            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=12)
             ax_scatter.set_ylim(-0.05, 1.05)
             ax_scatter.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
@@ -1882,7 +1898,7 @@ def plot_w2_muon_correlation(
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fname = "14_w2_muon_correlation.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1952,7 +1968,7 @@ def plot_w2_correlation_matrix(
     fig.suptitle(
         f"Correlation Matrices  (n = {len(w2_res)} setups)\n"
         f"Muon metrics at M={M_default}, W={W_default}",
-        fontsize=12,
+        fontsize=14,
     )
 
     for ax, mat, pmat, title in [
@@ -1974,15 +1990,15 @@ def plot_w2_correlation_matrix(
                         fontsize=7, color=tc, fontweight="bold")
         ax.set_xticks(range(nv))
         ax.set_yticks(range(nv))
-        ax.set_xticklabels(var_names, rotation=45, ha="right", fontsize=8)
-        ax.set_yticklabels(var_names, fontsize=8)
-        ax.set_title(title, fontsize=11)
+        ax.set_xticklabels(var_names, rotation=45, ha="right", fontsize=10)
+        ax.set_yticklabels(var_names, fontsize=10)
+        ax.set_title(title, fontsize=13)
 
     fig.text(0.5, 0.01, "* p<0.05   ** p<0.01",
              ha="center", fontsize=8, fontstyle="italic")
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     fname = "15_w2_correlation_matrix.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2032,13 +2048,13 @@ def plot_w2_coverage_profile(
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, pad=0.01)
-    cbar.set_label("Global W2 (mm)  [blue=clustered, red=uniform]", fontsize=9)
+    cbar.set_label("Global W2 (mm)  [blue=clustered, red=uniform]", fontsize=11)
 
-    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
-    ax.set_ylabel("NC detection fraction", fontsize=11)
+    ax.set_xlabel("Multiplicity threshold M", fontsize=13)
+    ax.set_ylabel("NC detection fraction", fontsize=13)
     ax.set_title(
         "NC Coverage Profile Colored by W2 Homogeneity",
-        fontsize=12,
+        fontsize=14,
     )
     ax.set_xticks(M_values)
     ax.yaxis.set_major_formatter(
@@ -2047,7 +2063,7 @@ def plot_w2_coverage_profile(
 
     fig.tight_layout()
     fname = "16_w2_coverage_profile.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2145,21 +2161,21 @@ def plot_w2_spearman_vs_m(
                        edgecolors=color, s=60, marker=marker,
                        linewidth=1.2, zorder=4)
 
-    ax.set_xlabel("Multiplicity threshold M", fontsize=11)
-    ax.set_ylabel("Spearman ρ  (W2 vs metric)", fontsize=11)
+    ax.set_xlabel("Multiplicity threshold M", fontsize=13)
+    ax.set_ylabel("Spearman ρ  (W2 vs metric)", fontsize=13)
     ax.set_title(
         f"Spearman Correlation between W2 and Coverage Metrics vs M\n"
         f"(filled = p<0.05 significant | W_default = {W_default})",
-        fontsize=12,
+        fontsize=14,
     )
     ax.set_xticks(M_values)
     ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=8, loc="upper right")
+    ax.legend(fontsize=11, loc="upper right")
     ax.grid(alpha=0.3)
 
     fig.tight_layout()
     fname = "17_w2_spearman_vs_m.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2220,7 +2236,7 @@ def plot_nc_recall_correlation(
             y_label=f"Recall (M≥{M}, W≥{W_fixed})",
             x_label=f"NC fraction (M≥{M})",
         )
-        ax_scatter.set_title(f"M ≥ {M}", fontsize=9)
+        ax_scatter.set_title(f"M ≥ {M}", fontsize=12)
         ax_scatter.set_ylim(-0.05, 1.05)
         ax_scatter.xaxis.set_major_formatter(
             mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
@@ -2234,7 +2250,7 @@ def plot_nc_recall_correlation(
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fname = "19_nc_recall_correlation.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2273,15 +2289,15 @@ def plot_recall_w1_vs_m(
         margin = max((vmax - vmin) * 0.3, 0.005)
         ax_recall.set_ylim(max(0.0, vmin - margin), min(1.0, vmax + margin))
 
-    ax_recall.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
-    ax_recall.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=11)
+    ax_recall.set_xlabel("M — minimum firing PMTs per NC", fontsize=13)
+    ax_recall.set_ylabel("Ge-77 Recall  (W = 1)", fontsize=13)
     ax_recall.set_title(
         "Ge-77 Muon Recall at W=1 across M Thresholds",
-        fontsize=12,
+        fontsize=14,
     )
     ax_recall.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
     ax_recall.set_xticks(M_values)
-    ax_recall.legend(fontsize=8, loc="upper right")
+    ax_recall.legend(fontsize=11, loc="upper right")
     ax_recall.grid(True, alpha=0.3)
 
     # ── Right panel: rank at each M (rank 1 = highest recall) ────────
@@ -2296,22 +2312,22 @@ def plot_recall_w1_vs_m(
         ax_rank.plot(M_values, ranks, marker="o", color=c, label=r.label,
                      linewidth=1.5, markersize=5)
 
-    ax_rank.set_xlabel("M — minimum firing PMTs per NC", fontsize=11)
-    ax_rank.set_ylabel("Recall rank  (1 = highest)", fontsize=11)
+    ax_rank.set_xlabel("M — minimum firing PMTs per NC", fontsize=13)
+    ax_rank.set_ylabel("Recall rank  (1 = highest)", fontsize=13)
     ax_rank.set_title(
         "Setup Rank by Recall at W=1 across M\n"
         "(rank 1 = best; flat line → ordering is preserved)",
-        fontsize=12,
+        fontsize=14,
     )
     ax_rank.set_xticks(M_values)
     ax_rank.set_yticks(range(1, len(results) + 1))
     ax_rank.invert_yaxis()
-    ax_rank.legend(fontsize=8)
+    ax_rank.legend(fontsize=11)
     ax_rank.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fname = "20_recall_w1_vs_m.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2375,30 +2391,30 @@ def plot_recall_at_best_fom(
             )
 
     ax.set_yticks(y)
-    ax.set_yticklabels([r.label for r in results], fontsize=9)
+    ax.set_yticklabels([r.label for r in results], fontsize=11)
     ax.set_xlim(right=x_max * 1.4)
 
     if fixed_m is not None:
-        ax.set_xlabel(f"Ge-77 Recall at FoM-optimal W  (M={fixed_m} fixed)", fontsize=11)
+        ax.set_xlabel(f"Ge-77 Recall at FoM-optimal W  (M={fixed_m} fixed)", fontsize=13)
         ax.set_title(
             f"Ge-77 Muon Recall at Each Setup's FoM-Optimal W  (M={fixed_m} fixed)\n"
             f"(brackets show the W that maximises FoM for that setup at M={fixed_m})",
-            fontsize=12, pad=10,
+            fontsize=14, pad=10,
         )
         fname = f"21_recall_at_best_fom_for_M{fixed_m}.png"
     else:
-        ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=11)
+        ax.set_xlabel("Ge-77 Recall at FoM-optimal (M, W)", fontsize=13)
         ax.set_title(
             "Ge-77 Muon Recall at Each Setup's FoM-Optimal (M, W)\n"
             "(brackets show the (M, W) that maximises FoM for that setup)",
-            fontsize=12, pad=10,
+            fontsize=14, pad=10,
         )
         fname = "21_recall_at_best_fom.png"
 
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2455,7 +2471,7 @@ def plot_nc_recall_at_best_fom(
     fig.suptitle(
         "NC Detection Fraction (M=1) vs Ge-77 Recall at FoM-Optimal (M, W)\n"
         "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
-        fontsize=12,
+        fontsize=14,
     )
 
     _regression_overlay(
@@ -2476,7 +2492,7 @@ def plot_nc_recall_at_best_fom(
 
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     fname = "22_nc_recall_at_best_fom.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2529,9 +2545,9 @@ def plot_ge77_survival_at_best_fom(
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=9)
-    ax.set_xlabel("Setup", fontsize=11)
-    ax.set_ylabel("Ge-77 Survival  (Recall = TP / (TP+FN))", fontsize=11)
+    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=11)
+    ax.set_xlabel("Setup", fontsize=13)
+    ax.set_ylabel("Ge-77 Survival  (Recall = TP / (TP+FN))", fontsize=13)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     finite_vals_23 = [v for v in values if np.isfinite(v)]
     if finite_vals_23:
@@ -2541,12 +2557,12 @@ def plot_ge77_survival_at_best_fom(
     ax.set_title(
         "Ge-77 Muon Survival at Each Setup's FoM-Optimal (M, W)\n"
         "(labels show the (M, W) that maximises FoM for that setup)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     fname = "23_ge77_survival_at_best_fom.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2599,9 +2615,9 @@ def plot_signal_survival_at_best_fom(
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=9)
-    ax.set_xlabel("Setup", fontsize=11)
-    ax.set_ylabel("Signal Survival = (TN+FN) / (TP+FP+TN+FN)", fontsize=11)
+    ax.set_xticklabels([r.label for r in results], rotation=45, ha="right", fontsize=11)
+    ax.set_xlabel("Setup", fontsize=13)
+    ax.set_ylabel("Signal Survival = (TN+FN) / (TP+FP+TN+FN)", fontsize=13)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.3f}%"))
     finite_vals_24 = [v for v in values if np.isfinite(v)]
     if finite_vals_24:
@@ -2611,12 +2627,12 @@ def plot_signal_survival_at_best_fom(
     ax.set_title(
         "Signal Survival at Each Setup's FoM-Optimal (M, W)\n"
         "(1 − veto fraction; labels show optimal (M, W))",
-        fontsize=12,
+        fontsize=14,
     )
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     fname = "24_signal_survival_at_best_fom.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2767,12 +2783,12 @@ def plot_ge_surv_vs_livetime(
         if xs:
             ax.scatter(xs, ys, color=c, s=18, alpha=0.7, zorder=3)
 
-    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
-    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
     ax.set_title(
         "Ge77 Survival vs Signal Livetime Trade-off\n"
         "(each point = one (M, W) combination; bottom-right = optimal)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -2780,15 +2796,21 @@ def plot_ge_surv_vs_livetime(
         handles=[
             plt.Line2D([0], [0], marker="o", color="w",
                        markerfacecolor=color_map.get(r.label, "gray"),
-                       markersize=7, label=r.label)
+                       markersize=8, label=r.label)
             for r in results
         ],
-        fontsize=8, loc="best",
+        fontsize=11, loc="best",
     )
     ax.grid(True, alpha=0.3)
+    # Lock axis limits to heatmap extent so no blank background areas appear.
+    if all_xs and all_ys:
+        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
+        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
+        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
+        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
     fig.tight_layout()
     fname = "25_ge_surv_vs_livetime.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2851,6 +2873,17 @@ def plot_ge_surv_vs_livetime_advisor(
         all_xs.extend(xs)
         all_ys.extend(ys)
 
+    # Include statistical-limit curve in the heatmap range so no blank areas appear.
+    if stat_rows:
+        all_xs.extend(
+            row["sig_surv"] for row in stat_rows
+            if np.isfinite(row.get("sig_surv", float("nan")))
+        )
+        all_ys.extend(
+            row["ge_77_surv"] for row in stat_rows
+            if np.isfinite(row.get("ge_77_surv", float("nan")))
+        )
+
     fig, ax = plt.subplots(figsize=(10, 7))
     pcm = _fom_colormap_background(ax, all_xs, all_ys, normalize=True)
     if pcm is not None:
@@ -2881,12 +2914,12 @@ def plot_ge_surv_vs_livetime_advisor(
                 fontsize=7, color=c, fontweight="bold",
             )
 
-    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
-    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
     ax.set_title(
         f"Ge77 Survival vs Signal Livetime — M={M_fixed}, W sweep\n"
         "(each point = one W value; bottom-right = optimal)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -2898,18 +2931,24 @@ def plot_ge_surv_vs_livetime_advisor(
         )
     handles += [
         plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="black",
-                   markersize=7, label=f"Advisor (M={M_fixed})"),
+                   markersize=8, label=f"Advisor (M={M_fixed})"),
     ] + [
         plt.Line2D([0], [0], marker="o", color="w",
                    markerfacecolor=color_map.get(r.label, "gray"),
-                   markersize=7, label=f"{r.label} (M={M_fixed})")
+                   markersize=8, label=f"{r.label} (M={M_fixed})")
         for r in results
     ]
-    ax.legend(handles=handles, fontsize=8, loc="best")
+    ax.legend(handles=handles, fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
+    # Lock axis limits to the heatmap extent so no blank background areas appear.
+    if all_xs and all_ys:
+        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
+        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
+        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
+        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -2981,12 +3020,12 @@ def plot_ge_surv_best_fom(
                         textcoords="offset points", fontsize=7, color=c)
 
     m_desc = f"M ≥ {m_min}" if m_min > 1 else "all M"
-    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
-    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
     ax.set_title(
         f"Ge77 Survival vs Signal Livetime — Best FoM Point per Setup  ({m_desc})\n"
         "(each point = FoM-optimal (M, W); bottom-right = optimal)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -2994,15 +3033,21 @@ def plot_ge_surv_best_fom(
         handles=[
             plt.Line2D([0], [0], marker="o", color="w",
                        markerfacecolor=color_map.get(r.label, "gray"),
-                       markersize=7, label=r.label)
+                       markersize=8, label=r.label)
             for r in results
         ],
-        fontsize=8, loc="best",
+        fontsize=11, loc="best",
     )
     ax.grid(True, alpha=0.3)
+    # Lock axis limits to heatmap extent so no blank background areas appear.
+    if all_xs and all_ys:
+        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
+        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
+        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
+        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
     fig.tight_layout()
     fname = f"25{'d' if m_min <= 1 else 'e'}_ge_surv_best_fom{'_M_ge6' if m_min > 1 else ''}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=150)
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -3065,12 +3110,12 @@ def plot_ge_surv_vs_livetime_per_setup(
                         textcoords="offset points", fontsize=6,
                         color=m_colors[M], alpha=0.9)
 
-        ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=11)
-        ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=11)
+        ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
+        ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
         ax.set_title(
             f"Ge77 Survival vs Signal Livetime — {r.label}\n"
             "(each point = one (M, W) combination; colour = M; label = W)",
-            fontsize=12,
+            fontsize=14,
         )
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -3087,7 +3132,7 @@ def plot_ge_surv_vs_livetime_per_setup(
         fig.tight_layout()
         safe = r.label.translate(safe_label)
         fname = f"25c_ge_surv_vs_livetime_{safe}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        fig.savefig(os.path.join(output_dir, fname), dpi=300)
         plt.close(fig)
         print(f"  Saved {fname}")
 
@@ -3365,21 +3410,21 @@ def plot_area_importance(
                     mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
             ax.set_xlabel(f"N_PMT in {area}", fontsize=10)
             ax.set_ylabel(mlabel, fontsize=10)
-            ax.set_title(area.capitalize(), fontsize=11, fontweight="bold")
+            ax.set_title(area.capitalize(), fontsize=13, fontweight="bold")
             ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
+            ax.tick_params(labelsize=10)
 
         fig.suptitle(
             f"{mlabel} vs. PMT Count per Detector Area\n"
             "(each point = one setup; dashed line = OLS trend; r = Pearson)",
-            fontsize=12,
+            fontsize=14,
         )
-        fig.legend(handles=legend_handles, fontsize=7,
+        fig.legend(handles=legend_handles, fontsize=9,
                    loc="lower center", ncol=min(len(results), 7),
                    bbox_to_anchor=(0.5, -0.05))
         fig.tight_layout()
         fname = f"26{suffix}_area_importance_{mkey}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=150, bbox_inches="tight")
+        fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved {fname}")
 
@@ -3677,8 +3722,9 @@ def main() -> None:
                           total_primaries=_total_primaries, color_map=color_map, m_min=1)
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=6)
-    plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
-                                       total_primaries=_total_primaries, color_map=color_map)
+    # plot_ge_surv_vs_livetime_per_setup: per-setup M/W scatter (all combinations) deactivated.
+    # plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
+    #                                    total_primaries=_total_primaries, color_map=color_map)
     plot_area_importance(results, M_values, W_values, args.output_dir,
                          total_primaries=_total_primaries, color_map=color_map)
 
