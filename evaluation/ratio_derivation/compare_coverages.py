@@ -2873,16 +2873,8 @@ def plot_ge_surv_vs_livetime_advisor(
         all_xs.extend(xs)
         all_ys.extend(ys)
 
-    # Include statistical-limit curve in the heatmap range so no blank areas appear.
-    if stat_rows:
-        all_xs.extend(
-            row["sig_surv"] for row in stat_rows
-            if np.isfinite(row.get("sig_surv", float("nan")))
-        )
-        all_ys.extend(
-            row["ge_77_surv"] for row in stat_rows
-            if np.isfinite(row.get("ge_77_surv", float("nan")))
-        )
+    # Heatmap and axis limits are intentionally based only on advisor + setup points.
+    # The statistical-limit curve is drawn as context but clipped at these limits.
 
     fig, ax = plt.subplots(figsize=(10, 7))
     pcm = _fom_colormap_background(ax, all_xs, all_ys, normalize=True)
