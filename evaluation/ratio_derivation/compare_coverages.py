@@ -91,6 +91,7 @@ from pmtopt.geometry import (
     figure_of_merit,
     MUSUN_RATE,
     MUONS_PER_RUN_DIR,
+    VETO_DURATION_H,
 )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2683,27 +2684,15 @@ def _fom_colormap_background(
     return pcm
 
 
-def _parse_advisor_csv(path: str) -> list[dict]:
-    """Parse advisor fom_data.csv (key=value, comma-separated per line)."""
-    rows = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            d = {}
-            for item in line.split(","):
-                k, v = item.strip().split("=")
-                d[k.strip()] = float(v.strip())
-            rows.append(d)
-    return rows
+def _parse_w_cut_csv(path: str) -> list[dict]:
+    """Parse CSV with format per line:
+    ``x cut <W>, ge_77_surv: <val> +-<unc>, sig_surv: <val> +-<unc>``
 
+    Returns list of dicts with keys:
+        ``x_cut``, ``ge_77_surv``, ``ge_77_surv_unc``, ``sig_surv``, ``sig_surv_unc``.
 
-def _parse_statistical_limit_csv(path: str) -> list[dict]:
-    """Parse statistical-limit CSV with format:
-    ``x cut <val>, ge_77_surv: <val>, sig_surv: <val>``
-    Returns list of dicts with keys ``x_cut``, ``ge_77_surv``, ``sig_surv``.
-    Rows with non-finite or negative sig_surv are skipped.
+    Rows with sig_surv < 0 are skipped: they are unphysical because the dead-time
+    exceeds the measurement time (veto_fraction × VETO_DURATION_H × MUSUN_RATE > 1).
     """
     rows = []
     with open(path) as f:
@@ -2715,14 +2704,36 @@ def _parse_statistical_limit_csv(path: str) -> list[dict]:
             if len(parts) != 3:
                 continue
             try:
-                x_cut    = float(parts[0].split()[-1])
-                ge_surv  = float(parts[1].split(":")[-1].strip())
-                sig_surv = float(parts[2].split(":")[-1].strip())
+                x_cut = float(parts[0].split()[-1])
+
+                ge_part = parts[1].split(":")[-1].strip()
+                if "+-" in ge_part:
+                    ge_val, ge_unc = ge_part.split("+-", 1)
+                else:
+                    ge_val, ge_unc = ge_part, "0"
+                ge_77_surv     = float(ge_val.strip())
+                ge_77_surv_unc = abs(float(ge_unc.strip()))
+
+                sig_part = parts[2].split(":")[-1].strip()
+                if "+-" in sig_part:
+                    sig_val, sig_unc = sig_part.split("+-", 1)
+                else:
+                    sig_val, sig_unc = sig_part, "0"
+                sig_surv     = float(sig_val.strip())
+                sig_surv_unc = abs(float(sig_unc.strip()))
             except (ValueError, IndexError):
                 continue
-            if not (np.isfinite(sig_surv) and sig_surv >= 0.0):
-                continue
-            rows.append({"x_cut": x_cut, "ge_77_surv": ge_surv, "sig_surv": sig_surv})
+
+            if not np.isfinite(sig_surv) or sig_surv < 0.0:
+                continue  # unphysical: dead-time > measurement time
+
+            rows.append({
+                "x_cut":        x_cut,
+                "ge_77_surv":   ge_77_surv,
+                "ge_77_surv_unc": ge_77_surv_unc,
+                "sig_surv":     sig_surv,
+                "sig_surv_unc": sig_surv_unc,
+            })
     return rows
 
 
@@ -2817,7 +2828,290 @@ def plot_ge_surv_vs_livetime(
 
 # ──────────────────────────────────────────────────────────────────────
 # Plot 25b — ge_surv vs livetime: advisor's data + user setups at M=6
+# (with two-level uncertainty bands: statistical and stat ⊕ systematic)
 # ──────────────────────────────────────────────────────────────────────
+
+# 35% relative systematic uncertainty (Virtual Depth paper, arXiv:1802.05040)
+_SYS_REL_25B: float = 0.35
+# Dead-time scale: VETO_DURATION_H × MUSUN_RATE
+_DT_SCALE: float = VETO_DURATION_H * MUSUN_RATE
+
+
+def _combined_unc_25b(stat: float, value: float) -> float:
+    """Combined statistical + systematic uncertainty (35% relative systematic)."""
+    return float(np.sqrt(stat**2 + (_SYS_REL_25B * abs(value))**2))
+
+
+def _plot_curve_with_bands(
+    ax: plt.Axes,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    stat_dy: np.ndarray,
+    comb_dy: np.ndarray,
+    color: str,
+    label: str,
+    linestyle: str = "-",
+    linewidth: float = 1.5,
+    zorder: int = 3,
+    alpha_inner: float = 0.25,
+    alpha_outer: float = 0.12,
+) -> None:
+    """Plot a 2D parametric curve with nested uncertainty bands.
+
+    Points are sorted by x (sig_surv) so fill_between renders cleanly.
+    Only the main line gets a legend entry; band fills are unlabelled.
+    Inner band = statistical; outer band = stat ⊕ systematic.
+    """
+    if len(xs) == 0:
+        return
+    order = np.argsort(xs)
+    xs_s  = xs[order];       ys_s  = ys[order]
+    si_dy = stat_dy[order];  co_dy = comb_dy[order]
+
+    ax.fill_between(xs_s, ys_s - co_dy, ys_s + co_dy,
+                    color=color, alpha=alpha_outer, linewidth=0, zorder=zorder - 1)
+    ax.fill_between(xs_s, ys_s - si_dy, ys_s + si_dy,
+                    color=color, alpha=alpha_inner, linewidth=0, zorder=zorder - 1)
+    ax.plot(xs_s, ys_s, color=color, linestyle=linestyle,
+            linewidth=linewidth, zorder=zorder, label=label)
+
+
+def _rows_to_band_arrays(rows: list[dict]) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
+    """Extract (xs, ys, stat_dy, comb_dy) arrays from a list of curve dicts."""
+    xs     = np.array([r["sig_surv"]       for r in rows])
+    ys     = np.array([r["ge_77_surv"]     for r in rows])
+    si_dy  = np.array([r["ge_77_surv_unc"] for r in rows])
+    co_dy  = np.array([_combined_unc_25b(s, v) for s, v in zip(si_dy, ys)])
+    return xs, ys, si_dy, co_dy
+
+
+def _compute_setup_curve_25b(
+    r: SetupResult,
+    W_values: list[int],
+    M_fixed: int,
+    total_primaries: int,
+) -> list[dict]:
+    """Compute ge_77_surv and sig_surv with Poisson uncertainties for one setup."""
+    _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+    rows: list[dict] = []
+    for W in W_values:
+        cm = r.muon["confusion"].get((M_fixed, W))
+        if cm is None:
+            continue
+        TN    = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+        tp_gc = cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32))
+        fn_gc = cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32))
+
+        ge_surv  = calc_ge_survival_confusion(tp_gc, fn_gc)
+        deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+        sig_surv = 1.0 - deadtime
+
+        if not np.isfinite(sig_surv) or sig_surv < 0.0:
+            continue
+
+        fn_sum         = float(np.sum(fn_gc))
+        total_ge77_nc  = float(np.sum(tp_gc)) + fn_sum
+        n_vetoed       = cm["TP"] + cm["FP"]
+
+        ge_unc  = np.sqrt(max(fn_sum,    0.0)) / max(total_ge77_nc, 1.0)
+        sig_unc = _DT_SCALE * np.sqrt(max(n_vetoed, 0)) / max(_tp, 1)
+
+        rows.append({
+            "x_cut":          float(W),
+            "ge_77_surv":     ge_surv,
+            "ge_77_surv_unc": ge_unc,
+            "sig_surv":       sig_surv,
+            "sig_surv_unc":   sig_unc,
+        })
+    return rows
+
+
+def _compute_stat_limit_curve_25b(
+    r: SetupResult,
+    W_values: list[int],
+    M_fixed: int,
+    total_primaries: int,
+) -> list[dict]:
+    """Statistical limit for one setup: Ge77 muons have all their NCs detected.
+
+    Uses the minimum available M as a proxy for "all NCs detected" (M=0 not
+    in the simulation grid; M=1 captures essentially all NCs that produced
+    any photons). Non-Ge77 muons still use the real simulation at M_fixed.
+    """
+    _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+
+    ge77_nc_arr = np.array(r.muon.get("ge77_nc_counts", []), dtype=float)
+    if len(ge77_nc_arr) == 0:
+        print(f"  [WARN] {r.label}: ge77_nc_counts not found; "
+              "stat limit requires updated evaluate_muon(). Skipping.")
+        return []
+
+    min_M = min(r.muon["w_hist"].keys())
+    w_ge77_perf = np.array(r.muon["w_hist"][min_M]["ge77"],    dtype=np.int32)
+
+    if M_fixed in r.muon["w_hist"]:
+        w_non_ge77 = np.array(r.muon["w_hist"][M_fixed]["non_ge77"], dtype=np.int32)
+    else:
+        print(f"  [WARN] {r.label}: M={M_fixed} not in w_hist; "
+              f"using M={min_M} for non-Ge77 in stat limit.")
+        w_non_ge77 = np.array(r.muon["w_hist"][min_M]["non_ge77"], dtype=np.int32)
+
+    total_ge77_nc = float(np.sum(ge77_nc_arr))
+    n_non_ge77    = r.muon["muon_stats"]["n_non_ge77"]
+    rows: list[dict] = []
+
+    for W in W_values:
+        tp_mask  = w_ge77_perf >= W
+        fn_mask  = ~tp_mask
+        tp_stat  = int(tp_mask.sum())
+        fn_stat  = int(fn_mask.sum())
+        fp_stat  = int((w_non_ge77 >= W).sum())
+        tn_stat  = n_non_ge77 - fp_stat
+
+        deadtime = calc_deadtime_confusion(tp_stat, fp_stat, tn_stat, fn_stat)
+        sig_surv = 1.0 - deadtime
+
+        if not np.isfinite(sig_surv) or sig_surv < 0.0:
+            continue
+
+        fn_gc_sum = float(np.sum(ge77_nc_arr[fn_mask]))
+        ge_surv   = fn_gc_sum / max(total_ge77_nc, 1.0)
+
+        ge_unc  = np.sqrt(max(fn_gc_sum, 0.0)) / max(total_ge77_nc, 1.0)
+        n_vetoed = tp_stat + fp_stat
+        sig_unc  = _DT_SCALE * np.sqrt(max(n_vetoed, 0)) / max(_tp, 1)
+
+        rows.append({
+            "x_cut":          float(W),
+            "ge_77_surv":     ge_surv,
+            "ge_77_surv_unc": ge_unc,
+            "sig_surv":       sig_surv,
+            "sig_surv_unc":   sig_unc,
+        })
+    return rows
+
+
+def _find_w_optimum_25b(
+    results: list[SetupResult],
+    W_values: list[int],
+    M_fixed: int,
+    total_primaries: int,
+) -> int:
+    """Find W_optimum as the W with the highest FoM across all setups at M_fixed."""
+    best_w   = W_values[len(W_values) // 2] if W_values else 6
+    best_fom = -np.inf
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        for W in W_values:
+            cm = r.muon["confusion"].get((M_fixed, W))
+            if cm is None:
+                continue
+            fom = calc_fom_confusion(
+                cm["TP"], cm["FP"], cm["FN"], _tp,
+                tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
+            )
+            if np.isfinite(fom) and fom > best_fom:
+                best_fom = fom
+                best_w   = W
+    return best_w
+
+
+def _find_baseline_result(results: list[SetupResult]) -> SetupResult:
+    """Find the baseline setup by label (case-insensitive 'baseline' check).
+
+    Search order:
+      1. First setup has 'baseline' in label → use it (expected case).
+      2. Any other setup has 'baseline' in label → use it with an info message.
+      3. No 'baseline' label found → use first setup with a clear warning.
+    """
+    if "baseline" in results[0].label.lower():
+        return results[0]
+    for r in results[1:]:
+        if "baseline" in r.label.lower():
+            print(
+                f"  [INFO] 25b_baseline: baseline setup found as '{r.label}' "
+                f"(not the first setup)."
+            )
+            return r
+    print(
+        f"  [WARN] 25b_baseline: no setup with 'baseline' in its label was found. "
+        f"Using first setup '{results[0].label}' as baseline. "
+        f"Consider naming the baseline setup with 'Baseline' for unambiguous detection."
+    )
+    return results[0]
+
+
+def _draw_advisor_plot(
+    ax: plt.Axes,
+    results_to_show: list[SetupResult],
+    W_range: list[int],
+    M_fixed: int,
+    total_primaries: int,
+    advisor_rows: list[dict],
+    stat_limit_rows: list[dict],
+    color_map: dict[str, str],
+) -> None:
+    """Draw all advisor-comparison curves onto *ax*.
+
+    Four curve types, each with inner (stat) and outer (stat⊕sys) bands:
+      1. Advisor result
+      2. Statistical optimum — advisor (from stat-limit CSV)
+      3. Each setup in results_to_show at M_fixed
+      4. Statistical limit for each setup (computed from simulation memory)
+    """
+    W_lo = float(W_range[0])  if W_range else -np.inf
+    W_hi = float(W_range[-1]) if W_range else  np.inf
+
+    # ── 1. Advisor result ─────────────────────────────────────────────
+    adv_filt = [r for r in advisor_rows if W_lo <= r["x_cut"] <= W_hi]
+    if adv_filt:
+        xs, ys, si, co = _rows_to_band_arrays(adv_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color="black", label="Advisor result",
+                               linestyle="-", linewidth=2.0, zorder=5)
+
+    # ── 2. Statistical optimum — advisor ──────────────────────────────
+    sl_filt = [r for r in stat_limit_rows if W_lo <= r["x_cut"] <= W_hi]
+    if sl_filt:
+        xs, ys, si, co = _rows_to_band_arrays(sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color="dimgray", label="Stat. optimum (advisor)",
+                               linestyle="--", linewidth=1.8, zorder=4)
+
+    # ── 3 + 4. User setups and their statistical limits ───────────────
+    for r in results_to_show:
+        c = color_map.get(r.label, "gray")
+
+        setup_rows = _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries)
+        if setup_rows:
+            xs, ys, si, co = _rows_to_band_arrays(setup_rows)
+            _plot_curve_with_bands(ax, xs, ys, si, co,
+                                   color=c, label=f"{r.label}",
+                                   linestyle="-", linewidth=1.5, zorder=3)
+
+        sl_rows = _compute_stat_limit_curve_25b(r, W_range, M_fixed, total_primaries)
+        if sl_rows:
+            xs, ys, si, co = _rows_to_band_arrays(sl_rows)
+            _plot_curve_with_bands(ax, xs, ys, si, co,
+                                   color=c, label=f"{r.label} — stat. limit",
+                                   linestyle=":", linewidth=1.2, zorder=3,
+                                   alpha_inner=0.15, alpha_outer=0.07)
+
+    # ── Legend: add reference patches for band explanation ────────────
+    from matplotlib.patches import Patch as _Patch
+    handles, _ = ax.get_legend_handles_labels()
+    handles += [
+        _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
+               label="Statistical uncertainty"),
+        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
+               label="Stat. ⊕ 35 % systematic"),
+    ]
+    ax.legend(handles=handles, fontsize=10, loc="best")
+
+
 def plot_ge_surv_vs_livetime_advisor(
     results: list[SetupResult],
     W_values: list[int],
@@ -2828,118 +3122,98 @@ def plot_ge_surv_vs_livetime_advisor(
     M_fixed: int = 6,
     statistical_limit_csv: str | None = None,
 ) -> None:
-    """Ge77 survival vs signal livetime at M=M_fixed, overlaying advisor data.
+    """Plot 25b: Ge-77 survival vs signal livetime at M_fixed, all setups.
 
-    Advisor's CSV (threshold=W, signal_surv, ge_surv, FOM) is shown as a
-    distinct series.  Each user setup is shown at M=M_fixed for all W in
-    W_values.  The FoM colormap spans the combined data range.
-    If ``statistical_limit_csv`` is provided, that curve is overlaid as a
-    dashed line labelled "Statistical limit".
+    Overlays advisor result, advisor statistical optimum (from stat-limit CSV),
+    all user setups, and the statistical limit for each user setup.
+    Every curve carries an inner (statistical) and outer (stat ⊕ 35 % systematic)
+    uncertainty band. W axis is restricted to W_optimum ± 10.
     """
     if color_map is None:
         _pal = _colors(len(results))
         color_map = {r.label: _pal[i] for i, r in enumerate(results)}
-    colors = [color_map.get(r.label, "gray") for r in results]
 
-    advisor_rows = _parse_advisor_csv(advisor_csv)
-    adv_xs = [row["signal_surv"] for row in advisor_rows]
-    adv_ys = [row["ge_surv"]     for row in advisor_rows]
-    adv_ws = [int(row["threshold"]) for row in advisor_rows]
+    advisor_rows    = _parse_w_cut_csv(advisor_csv)
+    stat_limit_rows = _parse_w_cut_csv(statistical_limit_csv) if statistical_limit_csv else []
 
-    stat_rows: list[dict] = []
-    if statistical_limit_csv:
-        stat_rows = _parse_statistical_limit_csv(statistical_limit_csv)
+    W_opt   = _find_w_optimum_25b(results, W_values, M_fixed, total_primaries)
+    W_range = [W for W in W_values if (W_opt - 10) <= W <= (W_opt + 10)]
+    if not W_range:
+        W_range = W_values
+    print(f"  [INFO] 25b: W_optimum={W_opt}, "
+          f"W range=[{W_range[0]}, {W_range[-1]}]")
 
-    per_setup: list[tuple[list[float], list[float], list[int]]] = []
-    all_xs = list(adv_xs)
-    all_ys = list(adv_ys)
-    for r in results:
-        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
-        xs, ys, ws = [], [], []
-        for W in W_values:
-            cm = r.muon["confusion"].get((M_fixed, W))
-            if cm is None:
-                continue
-            TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
-            ge_surv  = calc_ge_survival_confusion(
-                cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
-                cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
-            )
-            deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
-            xs.append(1.0 - deadtime)
-            ys.append(ge_surv)
-            ws.append(W)
-        per_setup.append((xs, ys, ws))
-        all_xs.extend(xs)
-        all_ys.extend(ys)
+    fig, ax = plt.subplots(figsize=(11, 8))
+    _draw_advisor_plot(ax, results, W_range, M_fixed, total_primaries,
+                       advisor_rows, stat_limit_rows, color_map)
 
-    # Heatmap and axis limits are intentionally based only on advisor + setup points.
-    # The statistical-limit curve is drawn as context but clipped at these limits.
-
-    fig, ax = plt.subplots(figsize=(10, 7))
-    pcm = _fom_colormap_background(ax, all_xs, all_ys, normalize=True)
-    if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised)", pad=0.01)
-
-    # Statistical limit curve (plotted first so it sits behind advisor points)
-    if stat_rows:
-        sl_xs = [row["sig_surv"]   for row in stat_rows]
-        sl_ys = [row["ge_77_surv"] for row in stat_rows]
-        ax.plot(sl_xs, sl_ys, color="darkorange", linewidth=1.5,
-                linestyle="--", zorder=3, label="Statistical limit")
-
-    # Advisor data
-    ax.scatter(adv_xs, adv_ys, color="black", s=40, marker="D", zorder=4,
-               label=f"Advisor (M={M_fixed})")
-    for x, y, w in zip(adv_xs, adv_ys, adv_ws):
-        ax.annotate(f"W={w}", xy=(x, y), xytext=(3, 3),
-                    textcoords="offset points", fontsize=6, color="black")
-
-    # User setups at M=M_fixed
-    for r, c, (xs, ys, ws) in zip(results, colors, per_setup):
-        if xs:
-            ax.scatter(xs, ys, color=c, s=22, alpha=0.8, zorder=3)
-            ax.annotate(
-                r.label,
-                xy=(float(np.median(xs)), float(np.median(ys))),
-                xytext=(4, 3), textcoords="offset points",
-                fontsize=7, color=c, fontweight="bold",
-            )
-
-    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
-    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
     ax.set_title(
-        f"Ge77 Survival vs Signal Livetime — M={M_fixed}, W sweep\n"
-        "(each point = one W value; bottom-right = optimal)",
-        fontsize=14,
+        f"Ge-77 Survival vs Signal Livetime  [M={M_fixed}]\n"
+        f"(W ∈ [{W_range[0]}, {W_range[-1]}];  "
+        f"inner band: stat.  outer band: stat. ⊕ 35 % syst.)",
+        fontsize=13,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    handles = []
-    if stat_rows:
-        handles.append(
-            plt.Line2D([0], [0], color="darkorange", linewidth=1.5,
-                       linestyle="--", label="Statistical limit")
-        )
-    handles += [
-        plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="black",
-                   markersize=8, label=f"Advisor (M={M_fixed})"),
-    ] + [
-        plt.Line2D([0], [0], marker="o", color="w",
-                   markerfacecolor=color_map.get(r.label, "gray"),
-                   markersize=8, label=f"{r.label} (M={M_fixed})")
-        for r in results
-    ]
-    ax.legend(handles=handles, fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
-    # Lock axis limits to the heatmap extent so no blank background areas appear.
-    if all_xs and all_ys:
-        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
-        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
-        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
-        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_ge_surv_vs_livetime_advisor_baseline(
+    results: list[SetupResult],
+    W_values: list[int],
+    output_dir: str,
+    advisor_csv: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    M_fixed: int = 6,
+    statistical_limit_csv: str | None = None,
+) -> None:
+    """Plot 25b_baseline: same as plot 25b but shows only the baseline setup.
+
+    The baseline setup is identified by a case-insensitive 'baseline' match
+    in the setup label.  Falls back to the first setup with a warning if none
+    is found.  W_optimum is still derived from ALL setups for consistency.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+
+    advisor_rows    = _parse_w_cut_csv(advisor_csv)
+    stat_limit_rows = _parse_w_cut_csv(statistical_limit_csv) if statistical_limit_csv else []
+
+    W_opt   = _find_w_optimum_25b(results, W_values, M_fixed, total_primaries)
+    W_range = [W for W in W_values if (W_opt - 10) <= W <= (W_opt + 10)]
+    if not W_range:
+        W_range = W_values
+    print(f"  [INFO] 25b_baseline: W_optimum={W_opt}, "
+          f"W range=[{W_range[0]}, {W_range[-1]}]")
+
+    baseline = _find_baseline_result(results)
+
+    fig, ax = plt.subplots(figsize=(11, 8))
+    _draw_advisor_plot(ax, [baseline], W_range, M_fixed, total_primaries,
+                       advisor_rows, stat_limit_rows, color_map)
+
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_title(
+        f"Ge-77 Survival vs Signal Livetime  [M={M_fixed}]  — Baseline only\n"
+        f"(W ∈ [{W_range[0]}, {W_range[-1]}];  "
+        f"inner band: stat.  outer band: stat. ⊕ 35 % syst.)",
+        fontsize=13,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -3703,6 +3977,14 @@ def main() -> None:
                              total_primaries=_total_primaries, color_map=color_map)
     if args.advisor_csv:
         plot_ge_surv_vs_livetime_advisor(
+            results, W_values, args.output_dir,
+            advisor_csv=args.advisor_csv,
+            total_primaries=_total_primaries,
+            color_map=color_map,
+            M_fixed=args.advisor_M,
+            statistical_limit_csv=args.statistical_limit_csv,
+        )
+        plot_ge_surv_vs_livetime_advisor_baseline(
             results, W_values, args.output_dir,
             advisor_csv=args.advisor_csv,
             total_primaries=_total_primaries,

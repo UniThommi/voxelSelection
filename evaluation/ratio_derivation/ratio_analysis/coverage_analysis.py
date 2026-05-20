@@ -267,4 +267,7 @@ def evaluate_muon(
         "confusion":               confusion,
         "w_hist":                  w_hist,
         "ge77_muon_detectability": ge77_muon_detectability,
+        # Per-Ge77-muon Ge77-flag NC count (same order as w_hist[M]["ge77"]).
+        # Used by statistical-limit computation in compare_coverages.py.
+        "ge77_nc_counts":          ge77_nc_counts_per_muon[ge77_truth].tolist(),
     }
