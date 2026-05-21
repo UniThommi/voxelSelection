@@ -8,6 +8,7 @@ Subcommands:
   homogeneous      Generate all voxels or select N homogeneously distributed voxels
   rotate           Rotate an existing voxel selection by an azimuthal angle
   plot             Generate 3D plots for existing JSON voxel selection files
+  plot-w2          W2 explanation visualizations (plots A–F) from JSON config files
   sample-w2-range  Generate configurations spanning the W2 homogeneity range
 
 Usage examples:
@@ -836,7 +837,39 @@ def run_plot_hits(argv: Optional[list[str]] = None) -> None:
     plot_hit_heatmap(areas_data, output_path)
 
 
-_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits", "sample-w2-range")
+def run_plot_w2(argv: Optional[list[str]] = None) -> None:
+    """Generate W2 explanation visualizations (plots A–F) from JSON config files."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate W2 homogeneity explanation plots (A–F) from PMT JSON config files.\n"
+            "Plots: A=3D scatter, B=CDF marginals, C=transport arrows, "
+            "D=cost heatmap, E=density diff, F=N-scaling."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "json_files", nargs="+", metavar="JSON",
+        help="One or more PMT JSON config files (voxel selections).",
+    )
+    parser.add_argument(
+        "--output-dir", default=".", metavar="DIR",
+        help="Directory for output PNG files.",
+    )
+    parser.add_argument(
+        "--labels", nargs="*", metavar="LABEL",
+        help="Optional display labels for each JSON file (same order).",
+    )
+    args = parser.parse_args(argv)
+
+    from pmtopt.w2_plot_helpers import plot_all_w2_explanation
+    plot_all_w2_explanation(
+        json_paths=args.json_files,
+        output_dir=args.output_dir,
+        labels=args.labels,
+    )
+
+
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits", "plot-w2", "sample-w2-range")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -853,6 +886,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "  rotate           Rotate an existing voxel selection azimuthally\n"
             "  plot             Plot existing JSON voxel selection file(s)\n"
             "  plot-hits        Heatmap of total photon hits per voxel (light distribution)\n"
+            "  plot-w2          W2 explanation visualizations (A–F) from JSON config files\n"
             "  sample-w2-range  Generate configurations spanning the W2 range\n\n"
             "Run 'main.py <subcommand> --help' for subcommand-specific help."
         )
@@ -872,6 +906,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         run_plot(rest)
     elif mode == "plot-hits":
         run_plot_hits(rest)
+    elif mode == "plot-w2":
+        run_plot_w2(rest)
     elif mode == "sample-w2-range":
         from pmtopt.sample_w2_range import main as w2_main
         w2_main(rest)
