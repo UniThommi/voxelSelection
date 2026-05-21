@@ -1050,21 +1050,7 @@ def plot_confusion_bar(
         fontsize=13,
     )
 
-    lines = []
-    for r in results:
-        conf = r.muon["confusion"][(M_default, W_default)]
-        m = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
-        lines.append(
-            f"{r.label}: Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}"
-        )
-    n_lines = len(lines)
-    fig.text(
-        0.5, 0.01, "\n".join(lines),
-        ha="center", fontsize=8,
-        fontstyle="italic", family="monospace",
-    )
-
-    fig.tight_layout(rect=[0, 0.04 + 0.025 * n_lines, 1, 0.96])
+    fig.tight_layout()
     fname = "06_confusion_bar.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
