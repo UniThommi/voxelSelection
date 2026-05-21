@@ -5,9 +5,10 @@ Used by both:
   src/pmtopt/evaluate_coverages.py  (SSD / pmtopt pipeline)
   evaluation/ratio_derivation/compare_coverages.py  (LGDO pipeline)
 
-W2 explanation visualizations (plots A–F) require POT and pmtopt to be
-installed and are generated via plot_all_w2_explanation() or the
-``main.py plot-w2`` subcommand.
+Usage:
+python src/pmtopt/main.py plot-w2 setup1.json setup2.json \
+      --output-dir ./output \      
+      --labels "Greedy" "Homogeneous".
 """
 from __future__ import annotations
 
