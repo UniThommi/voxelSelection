@@ -112,7 +112,7 @@ def _draw_pearson_rcrit(
     coefficient.  Do NOT call it on scatter plots or Spearman-only plots.
     """
     r_crit = _pearson_rcrit(n, sigma)
-    lbl = f"3σ threshold  |r| = {r_crit:.2f}" if draw_label else "_nolegend_"
+    lbl = f"{sigma:.0f}σ threshold  |r| = {r_crit:.2f}" if draw_label else "_nolegend_"
     ax.axhline( r_crit, color=color, linestyle=linestyle, linewidth=linewidth,
                 label=lbl, alpha=0.75)
     ax.axhline(-r_crit, color=color, linestyle=linestyle, linewidth=linewidth,
@@ -2348,11 +2348,12 @@ def _scatter_corr_panel(
         ax.plot(x_fit, slope * x_fit + intercept, "k--", linewidth=1.0, zorder=2)
         r_val,   p_r   = scipy_stats.pearsonr(xs[mask], ys[mask])
         rho_val, p_rho = scipy_stats.spearmanr(xs[mask], ys[mask])
-        r_crit = _pearson_rcrit(int(mask.sum()))
-        sig_marker = "*" if abs(r_val) >= r_crit else ""
+        r_crit_3 = _pearson_rcrit(int(mask.sum()), sigma=3.0)
+        r_crit_5 = _pearson_rcrit(int(mask.sum()), sigma=5.0)
+        sig_marker = "**" if abs(r_val) >= r_crit_5 else ("*" if abs(r_val) >= r_crit_3 else "")
         ax.text(
             0.96, 0.96,
-            f"r = {r_val:+.2f}{sig_marker}  (3σ: {r_crit:.2f})\nρ = {rho_val:+.2f}  p={p_rho:.2g}",
+            f"r = {r_val:+.2f}{sig_marker}  (3σ: {r_crit_3:.2f}  5σ: {r_crit_5:.2f})\nρ = {rho_val:+.2f}  p={p_rho:.2g}",
             transform=ax.transAxes, fontsize=8, va="top", ha="right",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.85),
         )
@@ -2496,7 +2497,8 @@ def plot_w2_fom_corr_mge(
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.axhline(0, color="black", linewidth=0.8)
-    _draw_pearson_rcrit(ax, _n_w2)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=3.0)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
 
     for vals, ps, label, color, marker in [
         (pearson_r,   p_pearson,  "Pearson r",   "#1f77b4", "o"),
@@ -2515,7 +2517,7 @@ def plot_w2_fom_corr_mge(
     ax.set_ylabel("Correlation coefficient (W2 vs best FoM)", fontsize=13)
     ax.set_title(
         f"W2 Homogeneity vs FoM  (M ≥ {min_m})  — Pearson r and Spearman ρ vs M\n"
-        "(best FoM over all W at each M; filled = 3σ significant)",
+        "(best FoM over all W at each M; filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
         fontsize=14,
     )
     ax.set_xticks(eligible_M)
@@ -2726,7 +2728,8 @@ def _plot_17b_w2_variant(
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.axhline(0, color="black", linewidth=0.8)
-    _draw_pearson_rcrit(ax, _n_w2)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=3.0)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
 
     for vals, ps, lbl, color, marker in [
         (pearson_r,    p_pearson,  "Pearson r",   "#1f77b4", "o"),
@@ -2745,7 +2748,7 @@ def _plot_17b_w2_variant(
     ax.set_ylabel(f"Correlation ({metric_label} vs best FoM)", fontsize=13)
     ax.set_title(
         f"{metric_label} vs FoM  (M ≥ {min_m})  — Pearson r and Spearman ρ vs M\n"
-        "(best FoM over all W at each M; filled = 3σ significant)",
+        "(best FoM over all W at each M; filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
         fontsize=14,
     )
     ax.set_xticks(eligible_M)
@@ -3076,10 +3079,12 @@ def plot_nc_recall_correlation_summary(
 
     W_vals = [W for W in W_fixed_values]
     n = len(results)
-    r_crit = _pearson_rcrit(n)
+    r_crit_3 = _pearson_rcrit(n, sigma=3.0)
+    r_crit_5 = _pearson_rcrit(n, sigma=5.0)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    _draw_pearson_rcrit(ax, n, draw_label=True)
+    _draw_pearson_rcrit(ax, n, sigma=3.0, draw_label=True)
+    _draw_pearson_rcrit(ax, n, sigma=5.0, linestyle="-.", draw_label=True)
     ax.axhline(0, color="gray", linewidth=0.6, linestyle=":")
 
     for M in M_values:
@@ -3101,7 +3106,7 @@ def plot_nc_recall_correlation_summary(
     ax.set_ylabel("Pearson r  (NC fraction vs Ge-77 Recall)", fontsize=13)
     ax.set_title(
         "NC Detection Fraction vs Ge-77 Recall — Pearson r\n"
-        f"(n={n} setups; dashed = 3σ significance threshold |r|={r_crit:.2f})",
+        f"(n={n} setups; dashed = 3σ |r|={r_crit_3:.2f};  dash-dot = 5σ |r|={r_crit_5:.2f})",
         fontsize=14,
     )
     ax.set_xticks(W_vals)
@@ -3281,6 +3286,8 @@ def _fom_colormap_background(
     ys: list[float],
     n_grid: int = 300,
     normalize: bool = False,
+    cmap: str = "viridis",
+    alpha: float = 0.35,
 ) -> "matplotlib.cm.ScalarMappable":
     """Draw a FoM(signal_surv, ge_surv) colormap + labelled contours on ax.
 
@@ -3307,7 +3314,7 @@ def _fom_colormap_background(
             z_min, z_max = finite_z.min(), finite_z.max()
             span = z_max - z_min if z_max > z_min else 1.0
             ZZ = (ZZ - z_min) / span
-    pcm = ax.pcolormesh(XX, YY, ZZ, cmap="viridis", alpha=0.35, shading="auto", zorder=0)
+    pcm = ax.pcolormesh(XX, YY, ZZ, cmap=cmap, alpha=alpha, shading="auto", zorder=0)
     finite_z = ZZ[np.isfinite(ZZ)]
     if finite_z.size > 0:
         n_levels = 8
@@ -3489,12 +3496,17 @@ def _plot_curve_with_bands(
     zorder: int = 3,
     alpha_inner: float = 0.25,
     alpha_outer: float = 0.12,
+    point_labels: "np.ndarray | None" = None,
 ) -> None:
     """Plot a 2D parametric curve with nested uncertainty bands.
 
     Points are sorted by x (sig_surv) so fill_between renders cleanly.
     Only the main line gets a legend entry; band fills are unlabelled.
     Inner band = statistical; outer band = stat ⊕ systematic.
+
+    ``point_labels`` — optional array of W-value labels (same order as xs
+    before sorting).  When provided, discrete markers are drawn at every
+    point and the W-value is annotated at the first and last points.
     """
     if len(xs) == 0:
         return
@@ -3508,6 +3520,29 @@ def _plot_curve_with_bands(
                     color=color, alpha=alpha_inner, linewidth=0, zorder=zorder - 1)
     ax.plot(xs_s, ys_s, color=color, linestyle=linestyle,
             linewidth=linewidth, zorder=zorder, label=label)
+
+    if point_labels is not None and len(point_labels) > 0:
+        pl_s = np.asarray(point_labels)[order]
+        # Distinct marker at every data point
+        ax.scatter(xs_s, ys_s, color=color, s=22, zorder=zorder + 1,
+                   marker="o", linewidths=0)
+        # Annotate first point (smallest x = highest W)
+        ax.annotate(
+            f"W = {int(pl_s[0])}",
+            xy=(xs_s[0], ys_s[0]),
+            xytext=(-5, 0), textcoords="offset points",
+            color=color, fontsize=8, ha="right", va="center",
+            fontweight="bold",
+        )
+        # Annotate last point (largest x = lowest W)
+        if len(xs_s) > 1:
+            ax.annotate(
+                f"W = {int(pl_s[-1])}",
+                xy=(xs_s[-1], ys_s[-1]),
+                xytext=(5, 0), textcoords="offset points",
+                color=color, fontsize=8, ha="left", va="center",
+                fontweight="bold",
+            )
 
 
 def _rows_to_band_arrays(rows: list[dict]) -> tuple[
@@ -3661,7 +3696,10 @@ def _draw_advisor_plot(
     advisor_rows: list[dict],
     stat_limit_rows: list[dict],
     color_map: dict[str, str],
-) -> None:
+    sig_surv_min: float = 0.0,
+    heatmap_cmap: str = "YlOrBr",
+    heatmap_alpha: float = 0.30,
+) -> "matplotlib.cm.ScalarMappable | None":
     """Draw all advisor-comparison curves onto *ax*.
 
     Four curve types, each with inner (stat) and outer (stat⊕sys) bands:
@@ -3669,44 +3707,89 @@ def _draw_advisor_plot(
       2. Statistical optimum — advisor (from stat-limit CSV)
       3. Each setup in results_to_show at M_fixed
       4. Statistical limit for each setup (computed from simulation memory)
+
+    ``sig_surv_min`` restricts all curves to signal survival >= sig_surv_min.
+    Returns the pcolormesh artist for the FoM background colorbar.
     """
     W_lo = float(W_range[0])  if W_range else -np.inf
     W_hi = float(W_range[-1]) if W_range else  np.inf
 
+    def _collect_filtered(rows: list[dict]) -> list[dict]:
+        return [r for r in rows
+                if W_lo <= r["x_cut"] <= W_hi and r["sig_surv"] >= sig_surv_min]
+
+    def _w_labels_sorted(rows: list[dict]) -> np.ndarray:
+        """Return x_cut (W) values sorted in the same order as _plot_curve_with_bands."""
+        xs_tmp = np.array([r["sig_surv"] for r in rows])
+        order  = np.argsort(xs_tmp)
+        return np.array([rows[i]["x_cut"] for i in order])
+
+    # Pre-compute all filtered rows so we can build the FoM heatmap extent first
+    adv_filt = _collect_filtered(advisor_rows)
+    sl_filt  = _collect_filtered(stat_limit_rows)
+
+    all_setup_rows: list[list[dict]] = []
+    all_sl_rows:    list[list[dict]] = []
+    for r in results_to_show:
+        sr  = _collect_filtered(
+            _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries))
+        slr = _collect_filtered(
+            _compute_stat_limit_curve_25b(r, W_range, M_fixed, total_primaries))
+        all_setup_rows.append(sr)
+        all_sl_rows.append(slr)
+
+    # ── FoM background heatmap (normalised 0–1) ───────────────────────
+    all_xs_hm: list[float] = []
+    all_ys_hm: list[float] = []
+    for rr in adv_filt + sl_filt:
+        all_xs_hm.append(rr["sig_surv"])
+        all_ys_hm.append(rr["ge_77_surv"])
+    for rows_list in (all_setup_rows + all_sl_rows):
+        for rr in rows_list:
+            all_xs_hm.append(rr["sig_surv"])
+            all_ys_hm.append(rr["ge_77_surv"])
+
+    pcm = None
+    if all_xs_hm:
+        pcm = _fom_colormap_background(
+            ax, all_xs_hm, all_ys_hm,
+            normalize=True, cmap=heatmap_cmap, alpha=heatmap_alpha,
+        )
+
     # ── 1. Advisor result ─────────────────────────────────────────────
-    adv_filt = [r for r in advisor_rows if W_lo <= r["x_cut"] <= W_hi]
     if adv_filt:
         xs, ys, si, co = _rows_to_band_arrays(adv_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
                                color="black", label="Advisor result",
-                               linestyle="-", linewidth=2.0, zorder=5)
+                               linestyle="-", linewidth=2.0, zorder=5,
+                               point_labels=_w_labels_sorted(adv_filt))
 
     # ── 2. Statistical optimum — advisor ──────────────────────────────
-    sl_filt = [r for r in stat_limit_rows if W_lo <= r["x_cut"] <= W_hi]
     if sl_filt:
         xs, ys, si, co = _rows_to_band_arrays(sl_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
                                color="dimgray", label="Stat. optimum (advisor)",
-                               linestyle="--", linewidth=1.8, zorder=4)
+                               linestyle="--", linewidth=1.8, zorder=4,
+                               point_labels=_w_labels_sorted(sl_filt))
 
     # ── 3 + 4. User setups and their statistical limits ───────────────
-    for r in results_to_show:
+    for r, sr, slr in zip(results_to_show, all_setup_rows, all_sl_rows):
         c = color_map.get(r.label, "gray")
 
-        setup_rows = _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries)
-        if setup_rows:
-            xs, ys, si, co = _rows_to_band_arrays(setup_rows)
+        if sr:
+            xs, ys, si, co = _rows_to_band_arrays(sr)
             _plot_curve_with_bands(ax, xs, ys, si, co,
                                    color=c, label=f"{r.label}",
-                                   linestyle="-", linewidth=1.5, zorder=3)
+                                   linestyle="-", linewidth=1.5, zorder=3,
+                                   point_labels=_w_labels_sorted(sr))
 
-        sl_rows = _compute_stat_limit_curve_25b(r, W_range, M_fixed, total_primaries)
-        if sl_rows:
-            xs, ys, si, co = _rows_to_band_arrays(sl_rows)
+        if slr:
+            xs, ys, si, co = _rows_to_band_arrays(slr)
             _plot_curve_with_bands(ax, xs, ys, si, co,
                                    color=c, label=f"{r.label} — stat. limit",
                                    linestyle=":", linewidth=1.2, zorder=3,
-                                   alpha_inner=0.15, alpha_outer=0.07)
+                                   alpha_inner=0.15, alpha_outer=0.07,
+                                   point_labels=_w_labels_sorted(slr))
 
     # ── Legend: add reference patches for band explanation ────────────
     from matplotlib.patches import Patch as _Patch
@@ -3718,6 +3801,7 @@ def _draw_advisor_plot(
                label="Stat. ⊕ 35 % systematic"),
     ]
     ax.legend(handles=handles, fontsize=10, loc="upper left")
+    return pcm
 
 
 def plot_ge_surv_vs_livetime_advisor(
@@ -3746,19 +3830,26 @@ def plot_ge_surv_vs_livetime_advisor(
 
     W_range = W_values
 
-    fig, ax = plt.subplots(figsize=(11, 8))
-    _draw_advisor_plot(ax, results, W_range, M_fixed, total_primaries,
-                       advisor_rows, stat_limit_rows, color_map)
+    fig, ax = plt.subplots(figsize=(12, 9))
+    pcm = _draw_advisor_plot(
+        ax, results, W_range, M_fixed, total_primaries,
+        advisor_rows, stat_limit_rows, color_map,
+        sig_surv_min=0.80,
+    )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
 
     ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
     ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
     ax.set_title(
-        f"Ge-77 Survival vs Signal Livetime  [M={M_fixed}]\n"
-        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.)",
-        fontsize=13,
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]\n"
+        f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
+        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        fontsize=12,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.set_xlim(0.80, 1.005)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
@@ -3794,19 +3885,26 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
 
     baseline = _find_baseline_result(results)
 
-    fig, ax = plt.subplots(figsize=(11, 8))
-    _draw_advisor_plot(ax, [baseline], W_range, M_fixed, total_primaries,
-                       advisor_rows, stat_limit_rows, color_map)
+    fig, ax = plt.subplots(figsize=(12, 9))
+    pcm = _draw_advisor_plot(
+        ax, [baseline], W_range, M_fixed, total_primaries,
+        advisor_rows, stat_limit_rows, color_map,
+        sig_surv_min=0.80,
+    )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
 
     ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
     ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
     ax.set_title(
-        f"Ge-77 Survival vs Signal Livetime  [M={M_fixed}]  — Baseline only\n"
-        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.)",
-        fontsize=13,
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — Baseline only\n"
+        f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
+        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        fontsize=12,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.set_xlim(0.80, 1.005)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
