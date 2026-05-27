@@ -170,19 +170,20 @@ def evaluate_muon(
     mults = compute_nc_multiplicities(B)
 
     # ── derive muon ground truth ──────────────────────────────────────
+    # muon_id (evtid) repeats across runs → use (run_id, muon_id) as composite key.
     # A muon is Ge77 if ANY of its NCs has flag_ge77 == 1.
     muon_is_ge77: pd.Series = (
-        nc_truth.groupby("muon_id")["flag_ge77"]
+        nc_truth.groupby(["run_id", "muon_id"])["flag_ge77"]
         .apply(lambda flags: bool((flags == 1).any()))
     )
-    unique_muons = muon_is_ge77.index.values  # sorted by groupby
-    ge77_truth   = muon_is_ge77.values.astype(bool)
+    unique_muon_idx = muon_is_ge77.index   # MultiIndex of (run_id, muon_id)
+    ge77_truth      = muon_is_ge77.values.astype(bool)
 
     n_ge77     = int(ge77_truth.sum())
-    n_non_ge77 = len(unique_muons) - n_ge77
+    n_non_ge77 = len(unique_muon_idx) - n_ge77
 
     muon_stats = {
-        "total":      len(unique_muons),
+        "total":      len(unique_muon_idx),
         "n_ge77":     n_ge77,
         "n_non_ge77": n_non_ge77,
     }
@@ -194,6 +195,7 @@ def evaluate_muon(
     )
 
     nc_work = pd.DataFrame({
+        "run_id":    nc_truth["run_id"].values,
         "muon_id":   nc_truth["muon_id"].values,
         "in_window": in_window,
     })
@@ -203,9 +205,9 @@ def evaluate_muon(
 
     # Number of Ge77 NCs per muon (all flag_ge77==1 NCs, no time-window cut).
     ge77_nc_counts_per_muon: np.ndarray = (
-        nc_truth.groupby("muon_id")["flag_ge77"]
+        nc_truth.groupby(["run_id", "muon_id"])["flag_ge77"]
         .sum()
-        .reindex(unique_muons, fill_value=0)
+        .reindex(unique_muon_idx, fill_value=0)
         .values.astype(np.int32)
     )
 
@@ -215,10 +217,10 @@ def evaluate_muon(
 
         w_per_muon: pd.Series = (
             nc_work
-            .groupby("muon_id")["det_in_window"]
+            .groupby(["run_id", "muon_id"])["det_in_window"]
             .sum()
         )
-        w_counts = w_per_muon.reindex(unique_muons, fill_value=0).values.astype(np.int32)
+        w_counts = w_per_muon.reindex(unique_muon_idx, fill_value=0).values.astype(np.int32)
 
         w_hist[M] = {
             "ge77":     w_counts[ ge77_truth].tolist(),
@@ -241,19 +243,20 @@ def evaluate_muon(
 
     # ── muon-level detectability upper bounds (requires detect_info) ─────
     # For each Ge77 muon: does it have at least one NC with a photon?
-    # Uses the same muon ordering as the confusion matrix (unique_muons).
+    # Uses the same muon ordering as the confusion matrix (unique_muon_idx).
     ge77_muon_detectability: dict[str, int] = {"any_photon": -1, "within_200ns": -1}
     if detect_info is not None:
         ph_df = pd.DataFrame({
+            "run_id":  nc_truth["run_id"].values,
             "muon_id": nc_truth["muon_id"].values,
             "any_ph":  detect_info["nc_any_photon"].astype(np.int8),
             "within":  detect_info["nc_within_200ns"].astype(np.int8),
         })
         # max over NCs per muon: 1 if ANY NC in that muon has the flag
         muon_ph = (
-            ph_df.groupby("muon_id")[["any_ph", "within"]]
+            ph_df.groupby(["run_id", "muon_id"])[["any_ph", "within"]]
             .max()
-            .reindex(unique_muons, fill_value=0)
+            .reindex(unique_muon_idx, fill_value=0)
         )
         any_ph_muon = muon_ph["any_ph"].values.astype(bool)
         within_muon = muon_ph["within"].values.astype(bool)
