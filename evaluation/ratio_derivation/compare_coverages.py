@@ -40,6 +40,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
+import pandas as pd
 
 # ── Publication-quality global style ──────────────────────────────────
 plt.rcParams.update({
@@ -151,6 +152,7 @@ class SetupResult:
     w2_phi:    Optional[float] = None  # circular azimuthal W2 (rad)
     w2_r:      Optional[float] = None  # 1-D radial W2  r=sqrt(x²+y²) (mm)
     per_area_n: dict[str, int] = None  # PMT count per layer (pit/bot/top/wall)
+    stat_limit_rows: list = None       # NC-truth stat-limit curve rows for Plot 25/25b
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -3597,60 +3599,82 @@ def _compute_setup_curve_25b(
     return rows
 
 
-def _compute_stat_limit_curve_25b(
-    r: SetupResult,
+def _compute_nc_truth_stat_limit(
+    nc_truth: pd.DataFrame,
     W_values: list[int],
-    M_fixed: int,
     total_primaries: int,
 ) -> list[dict]:
-    """Statistical limit for one setup: Ge77 muons have all their NCs detected.
+    """Statistical limit from NC truth: perfect detection, no optical threshold.
 
-    Uses the minimum available M as a proxy for "all NCs detected" (M=0 not
-    in the simulation grid; M=1 captures essentially all NCs that produced
-    any photons). Non-Ge77 muons still use the real simulation at M_fixed.
+    For each muon, counts NCs in [1µs, 200µs] directly from NC truth (no M
+    threshold, no optical-simulation timing cut).  This is the theoretical
+    upper bound achievable by any detector configuration sharing the same NC
+    truth.  Both Ge77 and non-Ge77 muons use NC truth counts.
+
+    Parameters
+    ----------
+    nc_truth : DataFrame with columns run_id, muon_id, flag_ge77, nc_time_ns.
+    W_values : W thresholds to sweep.
+    total_primaries : total simulated primary muons (for correct TN denominator).
+
+    Returns
+    -------
+    List of row dicts: x_cut, ge_77_surv, ge_77_surv_unc, sig_surv, sig_surv_unc.
     """
-    _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+    # Muon ground truth using composite (run_id, muon_id) key
+    muon_is_ge77 = (
+        nc_truth.groupby(["run_id", "muon_id"])["flag_ge77"]
+        .apply(lambda flags: bool((flags == 1).any()))
+    )
+    unique_muon_idx = muon_is_ge77.index   # MultiIndex (run_id, muon_id)
+    ge77_truth      = muon_is_ge77.values.astype(bool)
 
-    ge77_nc_arr = np.array(r.muon.get("ge77_nc_counts", []), dtype=float)
-    if len(ge77_nc_arr) == 0:
-        print(f"  [WARN] {r.label}: ge77_nc_counts not found; "
-              "stat limit requires updated evaluate_muon(). Skipping.")
-        return []
+    # In-window NC counts per muon — truth level, no M cut
+    in_window = (
+        (nc_truth["nc_time_ns"].values >= MUON_WINDOW_LO_NS)
+        & (nc_truth["nc_time_ns"].values <= MUON_WINDOW_HI_NS)
+    )
+    nc_w = pd.DataFrame({
+        "run_id":    nc_truth["run_id"].values,
+        "muon_id":   nc_truth["muon_id"].values,
+        "in_window": in_window.astype(np.int8),
+    })
+    w_per_muon = nc_w.groupby(["run_id", "muon_id"])["in_window"].sum()
+    w_counts   = w_per_muon.reindex(unique_muon_idx, fill_value=0).values.astype(np.int32)
 
-    min_M = min(r.muon["w_hist"].keys())
-    w_ge77_perf = np.array(r.muon["w_hist"][min_M]["ge77"],    dtype=np.int32)
+    # Per-muon Ge77 NC counts for ge_surv weighting (no time-window cut)
+    ge77_nc_per_muon: np.ndarray = (
+        nc_truth.groupby(["run_id", "muon_id"])["flag_ge77"]
+        .sum()
+        .reindex(unique_muon_idx, fill_value=0)
+        .values.astype(np.int32)
+    )
+    total_ge77_nc = float(ge77_nc_per_muon[ge77_truth].sum())
 
-    if M_fixed in r.muon["w_hist"]:
-        w_non_ge77 = np.array(r.muon["w_hist"][M_fixed]["non_ge77"], dtype=np.int32)
-    else:
-        print(f"  [WARN] {r.label}: M={M_fixed} not in w_hist; "
-              f"using M={min_M} for non-Ge77 in stat limit.")
-        w_non_ge77 = np.array(r.muon["w_hist"][min_M]["non_ge77"], dtype=np.int32)
-
-    total_ge77_nc = float(np.sum(ge77_nc_arr))
-    n_non_ge77    = r.muon["muon_stats"]["n_non_ge77"]
+    _tp_denom = max(total_primaries, 1)
     rows: list[dict] = []
 
     for W in W_values:
-        tp_mask  = w_ge77_perf >= W
-        fn_mask  = ~tp_mask
-        tp_stat  = int(tp_mask.sum())
-        fn_stat  = int(fn_mask.sum())
-        fp_stat  = int((w_non_ge77 >= W).sum())
-        tn_stat  = n_non_ge77 - fp_stat
+        classified_ge77 = w_counts >= W
+        tp_mask = ge77_truth  &  classified_ge77
+        fn_mask = ge77_truth  & ~classified_ge77
+        tp = int(tp_mask.sum())
+        fp = int((~ge77_truth &  classified_ge77).sum())
+        fn = int(fn_mask.sum())
+        tn = total_primaries - tp - fp - fn   # correct: all simulated muons
 
-        deadtime = calc_deadtime_confusion(tp_stat, fp_stat, tn_stat, fn_stat)
+        deadtime = calc_deadtime_confusion(tp, fp, tn, fn)
         sig_surv = 1.0 - deadtime
 
         if not np.isfinite(sig_surv) or sig_surv < 0.0:
             continue
 
-        fn_gc_sum = float(np.sum(ge77_nc_arr[fn_mask]))
+        fn_gc_sum = float(ge77_nc_per_muon[fn_mask].sum())
         ge_surv   = fn_gc_sum / max(total_ge77_nc, 1.0)
 
-        ge_unc  = np.sqrt(max(fn_gc_sum, 0.0)) / max(total_ge77_nc, 1.0)
-        n_vetoed = tp_stat + fp_stat
-        sig_unc  = _DT_SCALE * np.sqrt(max(n_vetoed, 0)) / max(_tp, 1)
+        ge_unc   = np.sqrt(max(fn_gc_sum, 0.0)) / max(total_ge77_nc, 1.0)
+        n_vetoed = tp + fp
+        sig_unc  = _DT_SCALE * np.sqrt(max(n_vetoed, 0)) / max(_tp_denom, 1)
 
         rows.append({
             "x_cut":          float(W),
@@ -3733,8 +3757,8 @@ def _draw_advisor_plot(
     for r in results_to_show:
         sr  = _collect_filtered(
             _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries))
-        slr = _collect_filtered(
-            _compute_stat_limit_curve_25b(r, W_range, M_fixed, total_primaries))
+        # Use pre-computed NC-truth stat limit if available; skip otherwise.
+        slr = _collect_filtered(r.stat_limit_rows) if r.stat_limit_rows else []
         all_setup_rows.append(sr)
         all_sl_rows.append(slr)
 
@@ -3908,6 +3932,108 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 25 — NC-truth baseline: setup curve + NC-truth stat limit only
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_vs_livetime_nc_truth_baseline(
+    results: list[SetupResult],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    M_fixed: int = 6,
+) -> None:
+    """Plot 25: baseline setup curve + its NC-truth statistical limit.
+
+    Exactly two curves (no advisor data):
+      1. Baseline setup at M_fixed (optical-simulation result)
+      2. NC-truth stat limit for the baseline setup (pre-computed,
+         stored in SetupResult.stat_limit_rows)
+
+    The baseline is identified by a case-insensitive 'baseline' match in the
+    setup label; falls back to the first setup with a warning.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+
+    baseline = _find_baseline_result(results)
+    c = color_map.get(baseline.label, "tab:blue")
+
+    _tp = total_primaries if total_primaries > 0 else baseline.muon["muon_stats"]["total"]
+
+    setup_rows = _compute_setup_curve_25b(baseline, W_values, M_fixed, _tp)
+    sl_rows    = baseline.stat_limit_rows or []
+
+    def _collect(rows: list[dict]) -> list[dict]:
+        return [r for r in rows if r["sig_surv"] >= 0.80]
+
+    setup_filt = _collect(setup_rows)
+    sl_filt    = _collect(sl_rows)
+
+    # FoM background heatmap
+    all_xs: list[float] = [r["sig_surv"]   for r in setup_filt + sl_filt]
+    all_ys: list[float] = [r["ge_77_surv"] for r in setup_filt + sl_filt]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    pcm = None
+    if all_xs:
+        pcm = _fom_colormap_background(
+            ax, all_xs, all_ys, normalize=True, cmap="YlOrBr", alpha=0.30,
+        )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+
+    def _w_labels(rows: list[dict]) -> np.ndarray:
+        xs_tmp = np.array([r["sig_surv"] for r in rows])
+        order  = np.argsort(xs_tmp)
+        return np.array([rows[i]["x_cut"] for i in order])
+
+    if setup_filt:
+        xs, ys, si, co = _rows_to_band_arrays(setup_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color=c, label=baseline.label,
+                               linestyle="-", linewidth=2.0, zorder=4,
+                               point_labels=_w_labels(setup_filt))
+
+    if sl_filt:
+        xs, ys, si, co = _rows_to_band_arrays(sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color=c, label=f"{baseline.label} — NC truth stat. limit",
+                               linestyle=":", linewidth=1.5, zorder=3,
+                               alpha_inner=0.15, alpha_outer=0.07,
+                               point_labels=_w_labels(sl_filt))
+
+    from matplotlib.patches import Patch as _Patch
+    handles, _ = ax.get_legend_handles_labels()
+    handles += [
+        _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
+               label="Statistical uncertainty"),
+        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
+               label="Stat. ⊕ 35 % systematic"),
+    ]
+    ax.legend(handles=handles, fontsize=10, loc="upper left")
+
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_title(
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — Baseline + NC-truth limit\n"
+        f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
+        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.set_xlim(0.80, 1.005)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25_ge_surv_vs_livetime_nc_truth.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -4376,6 +4502,23 @@ def main() -> None:
     nc_truth = build_nc_truth(args.muon_dir, verbose=True, omit_runs=omit_runs)
     print()
 
+    # ── 1b. Total primaries (needed for stat limit and FoM) ───────────
+    _n_runs_pre      = len(count_vertices_by_run(args.muon_dir, omit_runs=omit_runs))
+    _total_primaries = _n_runs_pre * MUONS_PER_RUN_DIR
+    _runtime_h       = _total_primaries / MUSUN_RATE
+    _runtime_yr      = _runtime_h / (24 * 365.25)
+    print(f"  Total primary muons: {_total_primaries:,}  "
+          f"({_n_runs_pre} runs × {MUONS_PER_RUN_DIR:,})")
+    print(f"  Simulated livetime : {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  "
+          f"(at {MUSUN_RATE} µ/h)")
+    print()
+
+    # ── 1c. NC-truth statistical limit (shared across all setups) ────
+    print("Computing NC-truth statistical limit ...")
+    _stat_limit_rows = _compute_nc_truth_stat_limit(nc_truth, W_values, _total_primaries)
+    print(f"  Stat-limit rows computed: {len(_stat_limit_rows)}")
+    print()
+
     # ── 2. Vertex count validation ────────────────────────────────────
     validate_vertex_counts(args.sim_dirs, args.labels, omit_runs=omit_runs)
     print()
@@ -4419,6 +4562,7 @@ def main() -> None:
             w2_phi=_w2_dict.get("w2_phi"),
             w2_r=_w2_dict.get("w2_r"),
             per_area_n=per_area_n,
+            stat_limit_rows=_stat_limit_rows,
         ))
 
         del B, pmt_uids, detect_info
@@ -4475,13 +4619,11 @@ def main() -> None:
     _pal_global = _colors(len(results))
     color_map   = {r.label: _pal_global[i] for i, r in enumerate(results)}
 
-    # Figure of Merit — use total primary muons (all muons, not just NC-producing)
-    _n_runs          = len(count_vertices_by_run(args.sim_dirs[0], omit_runs=omit_runs))
-    _total_primaries = _n_runs * MUONS_PER_RUN_DIR
-    _runtime_h    = _total_primaries / MUSUN_RATE
-    _runtime_yr   = _runtime_h / (24 * 365.25)
-    print(f"\n  FoM: total primary muons = {_total_primaries:,}  ({_n_runs} runs × {MUONS_PER_RUN_DIR:,})")
-    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  (at {MUSUN_RATE} µ/h)")
+    # _total_primaries and _runtime_h/_runtime_yr already computed in step 1b.
+    print(f"\n  FoM: total primary muons = {_total_primaries:,}  "
+          f"({_n_runs_pre} runs × {MUONS_PER_RUN_DIR:,})")
+    print(f"  FoM: simulated livetime  = {_runtime_h:,.0f} h  =  {_runtime_yr:.2f} yr  "
+          f"(at {MUSUN_RATE} µ/h)")
 
     plot_nc_coverage_line(results, M_values, args.output_dir,
                           color_map=color_map)
@@ -4592,6 +4734,13 @@ def main() -> None:
                             min_m=6)
     plot_ge_surv_vs_livetime(results, M_values, W_values, args.output_dir,
                              total_primaries=_total_primaries, color_map=color_map)
+    # Plot 25: baseline + NC-truth stat limit (always generated, no advisor CSV needed)
+    plot_ge_surv_vs_livetime_nc_truth_baseline(
+        results, W_values, args.output_dir,
+        total_primaries=_total_primaries,
+        color_map=color_map,
+        M_fixed=args.advisor_M,
+    )
     if args.advisor_csv:
         plot_ge_surv_vs_livetime_advisor(
             results, W_values, args.output_dir,
