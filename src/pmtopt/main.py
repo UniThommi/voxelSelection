@@ -66,6 +66,7 @@ from pmtopt.data_loading import (
 from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
     plot_selected_voxels, plot_muon_nc_histogram, plot_hit_heatmap,
+    plot_marginal_gain_heatmap, plot_ssd_voxels_3d,
 )
 from pmtopt.ratio_scaling import write_ratio_hdf5, fmt_ratio_filename
 from pmtopt.sensitivity import run_sensitivity
@@ -338,6 +339,32 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         skip_validity=args.no_spacing,
     )
 
+    # ---- Hit distribution heatmap (raw hits, all areas) ----
+    if verbose:
+        print("\nGenerating hit distribution heatmap ...")
+    _hits_per_voxel = np.bincount(
+        raw_cols, weights=raw_vals.astype(float), minlength=len(voxel_ids),
+    )
+    _areas_hit_data = {}
+    for _area in ["pit", "bot", "top", "wall"]:
+        _mask = layers == _area
+        if _mask.any():
+            _areas_hit_data[_area] = (centers[_mask], _hits_per_voxel[_mask])
+    plot_hit_heatmap(
+        _areas_hit_data,
+        output_dir / f"{base_name}_hit_heatmap.png",
+        num_primaries=num_primaries,
+        num_ncs=num_ncs,
+    )
+
+    # ---- 3D SSD voxel geometry plot ----
+    if verbose:
+        print("Generating 3D voxel geometry plot ...")
+    plot_ssd_voxels_3d(
+        centers, layers,
+        output_dir / f"{base_name}_ssd_voxels.png",
+    )
+
     B = binarize_from_raw(
         raw_rows, raw_cols, raw_vals,
         num_ncs=num_ncs,
@@ -497,17 +524,44 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                     "nc_to_muon_local": nc_muon_weight_data["nc_to_muon_local"],
                     "num_muons": nc_muon_weight_data["num_muons"],
                 }
+
+            # Marginal gain snapshot at step 10 (after 10 voxels selected)
+            _marginal_snapshot: dict = {}
+
+            def _snapshot_cb(gains_raw, avail, sel):
+                _marginal_snapshot["gains"] = gains_raw
+                _marginal_snapshot["available"] = avail
+                _marginal_snapshot["selected"] = sel
+
+            _snap_step = 10 if args.N > 10 else None
+
             selected_cols, efficiencies, coverage_counts, muon_det_nc = (
                 greedy_select_nc(
                     B, N=args.N, M=args.M,
                     centers=centers, layers=layers,
                     min_spacing=min_spacing, dynamic=args.dynamic,
-                    worst=args.worst, verbose=verbose, **mw_kwargs,
+                    worst=args.worst, verbose=verbose,
+                    on_step_snapshot=_snapshot_cb,
+                    snapshot_step=_snap_step,
+                    **mw_kwargs,
                 )
             )
             final_eff = efficiencies[-1]
             muon_detected_counts = muon_det_nc
             nc_detected = None
+
+            if _marginal_snapshot:
+                _mg_path = output_dir / f"{base_name}_marginal_gain_step10.png"
+                if verbose:
+                    print("\nGenerating marginal gain heatmap (step 10) ...")
+                plot_marginal_gain_heatmap(
+                    _marginal_snapshot["gains"],
+                    _marginal_snapshot["available"],
+                    _marginal_snapshot["selected"],
+                    centers, layers,
+                    output_path=_mg_path,
+                    step=10,
+                )
 
         elif args.optimize == "muon-ge77":
             selected_cols, efficiencies, nc_detected, muon_detected_counts, _ = (
@@ -804,7 +858,10 @@ def run_plot_hits(argv: Optional[list[str]] = None) -> None:
             c.decode() if isinstance(c, bytes) else str(c)
             for c in f["target_columns"][:]
         ]
-        print(f"  {target.shape[0]:,} NCs × {target.shape[1]:,} voxels")
+        num_ncs_phits = int(target.shape[0])
+        num_primaries_phits = int(f["primaries"][()])
+        print(f"  {num_ncs_phits:,} NCs × {target.shape[1]:,} voxels")
+        print(f"  {num_primaries_phits:,} primaries")
 
         print("  Loading voxel geometry ...")
         center_map: dict[str, np.ndarray] = {}
@@ -834,7 +891,10 @@ def run_plot_hits(argv: Optional[list[str]] = None) -> None:
     }
 
     output_path = output_dir / f"{hdf5_path.stem}_hit_heatmap.png"
-    plot_hit_heatmap(areas_data, output_path)
+    plot_hit_heatmap(
+        areas_data, output_path,
+        num_primaries=num_primaries_phits, num_ncs=num_ncs_phits,
+    )
 
 
 def run_plot_w2(argv: Optional[list[str]] = None) -> None:

@@ -81,6 +81,8 @@ def greedy_select_nc(
     dynamic: bool = False,
     worst: bool = False,
     verbose: bool = True,
+    on_step_snapshot=None,
+    snapshot_step: int | None = None,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray | None]:
     """
     Greedy voxel selection maximizing NC-level threshold coverage.
@@ -279,6 +281,14 @@ def greedy_select_nc(
                 all_gains = B.T.dot(weights)
             else:
                 all_gains = B.T.dot(at_threshold.astype(np.int32))
+
+            # Snapshot callback: fires before masking, so the plot receives
+            # true per-voxel gains alongside available/selected state.
+            if (on_step_snapshot is not None
+                    and snapshot_step is not None
+                    and step == snapshot_step):
+                on_step_snapshot(all_gains.copy(), available.copy(), list(selected))
+
             all_gains[~available] = -1
             best_voxel = int(np.argmax(all_gains))
             best_gain = float(all_gains[best_voxel]) if use_muon_weight else int(all_gains[best_voxel])
