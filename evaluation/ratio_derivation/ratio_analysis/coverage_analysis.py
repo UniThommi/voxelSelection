@@ -33,7 +33,7 @@ def compute_nc_multiplicities(B: sp.spmatrix) -> np.ndarray:
 
 
 def compute_metrics(
-    tp: int, fp: int, tn: int, fn: int
+    tp: int, fp: int, fn: int
 ) -> dict[str, float]:
     """Compute Recall and Precision for Ge-77 muon classification."""
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -233,10 +233,9 @@ def evaluate_muon(
             fn_mask = ge77_truth & ~classified_ge77
             tp = int(tp_mask.sum())
             fp = int((~ge77_truth &  classified_ge77).sum())
-            tn = int((~ge77_truth & ~classified_ge77).sum())
             fn = int(fn_mask.sum())
             confusion[(M, W)] = {
-                "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+                "TP": tp, "FP": fp, "FN": fn,
                 "tp_ge77_nc_counts": ge77_nc_counts_per_muon[tp_mask],
                 "fn_ge77_nc_counts": ge77_nc_counts_per_muon[fn_mask],
             }
