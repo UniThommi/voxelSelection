@@ -474,75 +474,6 @@ def plot_nc_rank_spearman(
     print(f"  Saved {fname}")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Plot 02 — NC multiplicity histogram
-# ──────────────────────────────────────────────────────────────────────
-def plot_nc_multiplicity_histogram(
-    results: list[SetupResult],
-    M_default: int,
-    output_dir: str,
-) -> None:
-    """Overlaid histogram of per-NC PMT multiplicity: linear (left) + log (right)."""
-    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(20, 6))
-    colors = _colors(len(results))
-
-    all_mults = [r.nc["multiplicity_counts"] for r in results]
-    max_mult = max(
-        (int(m.max()) for m in all_mults if len(m) > 0 and m.max() > 0),
-        default=1,
-    )
-    bins = np.arange(1, max_mult + 2) - 0.5
-
-    for r, c, mult in zip(results, colors, all_mults):
-        nonzero = mult[mult > 0]
-        for ax in (ax_lin, ax_log):
-            ax.hist(
-                nonzero, bins=bins, alpha=0.5, label=r.label,
-                color=c, edgecolor="black", linewidth=0.4,
-            )
-
-    for ax, scale, scale_label in zip(
-        (ax_lin, ax_log), ("linear", "log"), ("Linear scale", "Log scale")
-    ):
-        ax.axvline(
-            M_default - 0.5, color="red", linestyle="--", linewidth=1.5,
-            label=f"M default = {M_default}",
-        )
-        ax.set_xlabel("PMT multiplicity (# firing PMTs per NC)")
-        ax.set_ylabel("Number of NCs")
-        ax.set_title(
-            f"PMT Multiplicity Distribution per NC — {scale_label}\n"
-            "(# distinct PMTs with ≥m hits within 200 ns of NC; NCs with 0 excluded)"
-        )
-        ax.legend(fontsize=11)
-        ax.set_yscale(scale)
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
-
-    # Mean and zero-multiplicity stats beneath the figure
-    means = ", ".join(
-        f"{r.label}: mean={np.mean(m[m > 0]):.2f}" if (m > 0).any() else f"{r.label}: mean=N/A"
-        for r, m in zip(results, all_mults)
-    )
-    zeros = ", ".join(
-        f"{r.label}: {int((m == 0).sum()):,}" for r, m in zip(results, all_mults)
-    )
-    fig.text(
-        0.5, 0.01,
-        f"Mean multiplicity (non-zero NCs only): {means}\n"
-        f"NCs with 0 firing PMTs: {zeros}",
-        ha="center", fontsize=8, fontstyle="italic",
-    )
-
-    fig.tight_layout(rect=[0, 0.07, 1, 1])
-    fname = "02_nc_multiplicity_histogram.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300)
-    plt.close(fig)
-    print(f"  Saved {fname}")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Plots 03 & 04 — Detectability overview: absolute + Δ from reference
-# ──────────────────────────────────────────────────────────────────────
 def _draw_detectability_panels(
     ax_abs: plt.Axes,
     ax_delta: plt.Axes,
@@ -931,73 +862,6 @@ def plot_ge77_muon_overview(
 # Plot 05 — NC coverage line (M sweep) — already plot 01; keeping numbering
 # Plot 05 — Multiplicity histogram  — plot 02
 # Now: Plot 05 — Muon heatmaps
-# ──────────────────────────────────────────────────────────────────────
-def plot_muon_heatmaps(
-    results: list[SetupResult],
-    M_values: list[int],
-    W_values: list[int],
-    output_dir: str,
-) -> None:
-    """One figure per M: 2-panel heatmap (Recall, Precision) with x=setup, y=W.
-
-    Both metric panels share the same logarithmic colour scale.
-    """
-    metrics_to_plot = ["Recall", "Precision"]
-    sorted_results = _w2_sorted(results)
-    n_setups = len(sorted_results)
-    labels = [r.label for r in sorted_results]
-
-    # Shared LogNorm across all M values and all metrics (0–1 range)
-    shared_norm = mcolors.LogNorm(vmin=1e-4, vmax=1.0)
-
-    for M in M_values:
-        # Build grids: shape (len(W_values), n_setups) for each metric
-        grids: dict[str, np.ndarray] = {}
-        for metric in metrics_to_plot:
-            grid = np.zeros((len(W_values), n_setups))
-            for wi, W in enumerate(W_values):
-                for si, r in enumerate(sorted_results):
-                    conf = r.muon["confusion"][(M, W)]
-                    m = compute_metrics(conf["TP"], conf["FP"], conf["FN"])
-                    grid[wi, si] = max(m[metric], 1e-4)
-            grids[metric] = grid
-
-        fig_w = max(6, 2 + 2 * n_setups)
-        fig, axes = plt.subplots(1, 2, figsize=(fig_w, 6))
-        fig.suptitle(f"Ge-77 Classification  M={M}", fontsize=14)
-
-        for col, metric in enumerate(metrics_to_plot):
-            ax = axes[col]
-            grid = grids[metric]
-            im = ax.imshow(
-                grid,
-                origin="lower",
-                aspect="auto",
-                cmap="viridis",
-                norm=shared_norm,
-                extent=[
-                    -0.5, n_setups - 0.5,
-                    W_values[0] - 0.5, W_values[-1] + 0.5,
-                ],
-            )
-            ax.set_xticks(range(n_setups))
-            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=11)
-            ax.set_yticks(W_values[::max(1, len(W_values) // 10)])
-            ax.set_xlabel("Setup")
-            ax.set_ylabel("W (min detected NCs per muon)")
-            ax.set_title(metric)
-            plt.colorbar(im, ax=ax, label=metric)
-
-        fig.tight_layout()
-        fname = f"05_muon_heatmap_M{M:02d}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=300)
-        plt.close(fig)
-        print(f"  Saved {fname}")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Plot 06 — Confusion bar at fixed (M, W)
-# ──────────────────────────────────────────────────────────────────────
 def plot_confusion_bar(
     results: list[SetupResult],
     M_default: int,
@@ -1074,117 +938,6 @@ def plot_confusion_bar(
     print(f"  Saved {fname}")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Plot 07 — W histogram at fixed M
-# ──────────────────────────────────────────────────────────────────────
-def _build_log_bins(max_val: int) -> list[int]:
-    """Log-spaced bin edges: 0,1,...,9, 10,20,...,90, 100,... up to max_val."""
-    edges: list[int] = list(range(min(max_val + 1, 10)))
-    if max_val < 10:
-        return edges
-    decade = 10
-    while decade <= max_val:
-        for mult in range(1, 10):
-            val = mult * decade
-            if val > max_val:
-                break
-            edges.append(val)
-        decade *= 10
-    return sorted(set(edges))
-
-
-def _bin_data(data: list[int], bin_edges: list[int]) -> list[int]:
-    edges_arr = np.array(bin_edges)
-    data_arr  = np.array(data)
-    counts    = [0] * len(bin_edges)
-    if len(data_arr) == 0:
-        return counts
-    indices = np.clip(
-        np.searchsorted(edges_arr, data_arr, side="right") - 1,
-        0, len(bin_edges) - 1,
-    )
-    for idx in indices:
-        counts[idx] += 1
-    return counts
-
-
-def _draw_w_panel(
-    ax: plt.Axes,
-    results: list[SetupResult],
-    M: int,
-    W: int,
-    ge77: bool,
-) -> None:
-    """Draw one W-histogram panel (Ge77 or non-Ge77 muons)."""
-    key = "ge77" if ge77 else "non_ge77"
-    label = "Ge-77" if ge77 else "Non-Ge-77"
-    colors = _colors(len(results))
-
-    all_data = [r.muon["w_hist"][M][key] for r in results]
-    max_w = max((max(d) for d in all_data if d), default=0)
-    if max_w == 0:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center")
-        ax.set_title(f"Detected NC Count per {label} Muon")
-        return
-
-    bin_edges = _build_log_bins(max_w)
-    x = np.arange(len(bin_edges))
-    width = 0.8 / len(results)
-
-    for i, (r, c, d) in enumerate(zip(results, colors, all_data)):
-        counts = _bin_data(d, bin_edges)
-        offset = (i - (len(results) - 1) / 2) * width
-        ax.bar(x + offset, counts, width, label=r.label, color=c,
-               edgecolor="black", linewidth=0.4)
-
-    w_bin_idx = np.searchsorted(bin_edges, W, side="right") - 1
-    ax.axvline(w_bin_idx - 0.5, color="red", linestyle="--", linewidth=1.5,
-               label=f"W threshold = {W}")
-
-    # Show at most ~20 tick labels so the x axis stays readable
-    step = max(1, len(bin_edges) // 20)
-    shown = list(range(0, len(bin_edges), step))
-    ax.set_xticks([x[i] for i in shown])
-    ax.set_xticklabels([str(bin_edges[i]) for i in shown], rotation=45, ha="right", fontsize=8)
-    ax.set_xlabel(f"Detected NCs per Muon in [1µs, 200µs] (M≥{M})", fontsize=13)
-    ax.set_ylabel("Number of Muons")
-    ax.set_title(
-        f"Detected NC Count per {label} Muon\n"
-        f"(time window [1µs, 200µs], M≥{M}; only muons with ≥1 NC)"
-    )
-    ax.legend(fontsize=11)
-    ax.set_yscale("log")
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
-
-    stats = "    ".join(
-        f"{r.label}: {sum(1 for v in d if v >= W)}/{max(len(d), 1)} "
-        f"≥W ({100*sum(1 for v in d if v >= W)/max(len(d), 1):.1f}%)"
-        for r, d in zip(results, all_data)
-    )
-    ax.text(0.5, -0.20, stats, transform=ax.transAxes,
-            ha="center", fontsize=8, fontstyle="italic")
-
-
-def plot_w_histogram(
-    results: list[SetupResult],
-    M_default: int,
-    W_default: int,
-    output_dir: str,
-) -> None:
-    """W-histogram at M_default: Ge77 and non-Ge77 muons side by side."""
-    fig, axes = plt.subplots(1, 2, figsize=(26, 8))
-    _draw_w_panel(axes[0], results, M_default, W_default, ge77=True)
-    _draw_w_panel(axes[1], results, M_default, W_default, ge77=False)
-    fig.tight_layout(rect=[0, 0.05, 1, 1])
-    fname = "07_w_histogram.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300)
-    plt.close(fig)
-    print(f"  Saved {fname}")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Plot 07b — TP vs FP scatter (muon confusion analysis)
-# ──────────────────────────────────────────────────────────────────────
 def plot_tp_fp_scatter(
     results: list["SetupResult"],
     M_values: list[int],
@@ -1410,7 +1163,6 @@ def plot_mw_sweep(
         print(f"  Saved {fname}")
 
 
-
 # ──────────────────────────────────────────────────────────────────────
 # Plots 12 — Figure of Merit
 # ──────────────────────────────────────────────────────────────────────
@@ -1572,75 +1324,6 @@ def plot_fom_summary_min_m(
     print(f"  Saved {fname}")
 
 
-def plot_fom_per_setup(
-    results: list[SetupResult],
-    M_values: list[int],
-    W_values: list[int],
-    output_dir: str,
-    total_primaries: int = 0,
-) -> None:
-    """Per-setup FoM heatmap (M × W grid).
-
-    Produces one PNG file per setup:
-      12_fom_heatmap_{label}.png  — 2-D colour map of FoM over (M, W)
-
-    The cell with the maximum FoM is highlighted.
-    ``total_primaries`` is the total number of simulated primary muons.
-    """
-    mw_pairs = [(M, W) for M in M_values for W in W_values]
-    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
-    x_arr    = np.arange(len(mw_pairs))
-    n_w      = len(W_values)
-
-    for r in results:
-        _tp  = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
-        grid = _cc_fom_grid(r, M_values, W_values, _tp)
-        safe_name = r.label.replace(" ", "_").replace("/", "_")
-        finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
-
-        # ── 1. Heatmap ────────────────────────────────────────────────
-        heat = np.array(
-            [[grid.get((M, W), float("nan")) for M in M_values] for W in W_values]
-        )  # shape (n_W, n_M)
-
-        fig_h, ax_h = plt.subplots(
-            figsize=(max(6, len(M_values) * 0.9), max(5, len(W_values) * 0.45))
-        )
-        im = ax_h.imshow(
-            heat, aspect="auto", origin="lower",
-            extent=[M_values[0] - 0.5, M_values[-1] + 0.5,
-                    W_values[0] - 0.5, W_values[-1] + 0.5],
-            cmap="viridis",
-        )
-        plt.colorbar(im, ax=ax_h, label="Figure of Merit")
-
-        if finite:
-            best = max(finite, key=finite.__getitem__)
-            ax_h.scatter(
-                best[0], best[1],
-                marker="*", s=250, color="red", zorder=5,
-                label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
-            )
-            ax_h.legend(fontsize=11, loc="upper right")
-
-        ax_h.set_xlabel("M  (NC threshold)", fontsize=13)
-        ax_h.set_ylabel("W  (muon threshold)", fontsize=13)
-        ax_h.set_xticks(M_values)
-        ax_h.set_yticks(W_values)
-        ax_h.set_title(f"Figure of Merit — {r.label}", fontsize=14, pad=10)
-        fig_h.tight_layout()
-        fname_h = f"12_fom_heatmap_{safe_name}.png"
-        fig_h.savefig(os.path.join(output_dir, fname_h), dpi=300)
-        plt.close(fig_h)
-        print(f"  Saved {fname_h}")
-
-
-
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Plot 08 — W2 vs NC coverage scatter (standalone)
-# ──────────────────────────────────────────────────────────────────────
 def plot_w2_nc_scatter(
     results: list[SetupResult],
     M_values: list[int],
@@ -1967,86 +1650,6 @@ def plot_w2_nc_correlation(
     plt.close(fig)
     print(f"  Saved {fname}")
 
-
-# ── Plot B — W2 × Muon metrics correlation scatter ─────────────────────
-
-def plot_w2_muon_correlation(
-    results: list[SetupResult],
-    M_values: list[int],
-    W_default: int,
-    output_dir: str,
-    color_map: dict[str, str] | None = None,
-) -> None:
-    """
-    Plot B — W2 vs Ge-77 Recall and Precision at W=W_default for every M.
-
-    Left 3 cols = Recall, right 3 cols = Precision.
-    Each cell: scatter + regression (top) + residuals (bottom).
-    """
-    w2_res = [r for r in results if r.w2_global is not None]
-    if len(w2_res) < 2:
-        print("  [SKIP] w2_muon_correlation: fewer than 2 setups have W2.")
-        return
-
-    ordered = _sorted_by_w2_cc(w2_res)
-    if color_map is None:
-        colors_all = _colors(len(ordered))
-        color_map  = {r.label: colors_all[i] for i, r in enumerate(ordered)}
-    w2_arr    = np.array([r.w2_global for r in ordered])
-    labels    = [r.label for r in ordered]
-    color_pts = [color_map.get(r.label, "gray") for r in ordered]
-
-    ncols_half = 3
-    nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
-    total_rows = nrows_M * 2
-    total_cols = ncols_half * 2
-
-    fig = plt.figure(figsize=(total_cols * 4.5, total_rows * 3))
-    fig.suptitle(
-        f"W2 Homogeneity vs Ge-77 Recall / Precision  (W = {W_default})\n"
-        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
-        fontsize=13,
-    )
-
-    for pi, M in enumerate(M_values):
-        logical_col = pi % ncols_half
-        logical_row = pi // ncols_half
-
-        for metric_fn, metric_name, col_offset in [
-            (_cc_recall,    "Recall",    0),
-            (_cc_precision, "Precision", ncols_half),
-        ]:
-            col = logical_col + col_offset
-            ax_scatter = fig.add_subplot(
-                total_rows, total_cols,
-                logical_row * 2 * total_cols + col + 1,
-            )
-            ax_resid = fig.add_subplot(
-                total_rows, total_cols,
-                (logical_row * 2 + 1) * total_cols + col + 1,
-                sharex=ax_scatter,
-            )
-
-            y_arr = np.array([metric_fn(r, M, W_default) for r in ordered])
-            _regression_overlay(ax_scatter, ax_resid, w2_arr, y_arr,
-                                color_pts, labels,
-                                y_label=f"{metric_name} (M≥{M}, W≥{W_default})")
-            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=12)
-            ax_scatter.set_ylim(-0.05, 1.05)
-            ax_scatter.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-            ax_resid.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
-            plt.setp(ax_scatter.get_xticklabels(), visible=False)
-
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fname = "14_w2_muon_correlation.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300)
-    plt.close(fig)
-    print(f"  Saved {fname}")
-
-
-# ── Plot C — Correlation matrix (Pearson + Spearman) ───────────────────
 
 def plot_w2_correlation_matrix(
     results: list[SetupResult],
@@ -3278,8 +2881,6 @@ def plot_recall_at_best_fom(
     print(f"  Saved {fname}")
 
 
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Shared helper — FoM background colormap + contours
 # ──────────────────────────────────────────────────────────────────────
@@ -4143,94 +3744,6 @@ def plot_ge_surv_best_fom(
     print(f"  Saved {fname}")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Plot 25c — ge_surv vs livetime: one plot per setup, all (M,W) labelled
-# ──────────────────────────────────────────────────────────────────────
-def plot_ge_surv_vs_livetime_per_setup(
-    results: list[SetupResult],
-    M_values: list[int],
-    W_values: list[int],
-    output_dir: str,
-    total_primaries: int = 0,
-    color_map: dict[str, str] | None = None,
-) -> None:
-    """One PNG per setup: scatter of all (M, W) combinations, labelled.
-
-    Points are coloured by M (using a discrete colormap) and annotated
-    with the W value so every operating point is identifiable.
-    """
-    if color_map is None:
-        _pal = _colors(len(results))
-        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
-
-    m_cmap = plt.cm.get_cmap("tab10", len(M_values))
-    m_colors = {M: m_cmap(i) for i, M in enumerate(M_values)}
-
-    safe_label = str.maketrans(" /\\:*?\"<>|", "__________")
-
-    for r in results:
-        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
-        points: list[tuple[float, float, int, int]] = []
-        for M in M_values:
-            for W in W_values:
-                cm = r.muon["confusion"].get((M, W))
-                if cm is None:
-                    continue
-                TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
-                ge_surv  = calc_ge_survival_confusion(
-                    cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
-                    cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
-                )
-                deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
-                points.append((1.0 - deadtime, ge_surv, M, W))
-
-        if not points:
-            continue
-
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-
-        fig, ax = plt.subplots(figsize=(10, 7))
-        pcm = _fom_colormap_background(ax, xs, ys)
-        if pcm is not None:
-            fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
-
-        for x, y, M, W in points:
-            ax.scatter([x], [y], color=m_colors[M], s=30, alpha=0.85, zorder=3)
-            ax.annotate(f"W={W}", xy=(x, y), xytext=(3, 2),
-                        textcoords="offset points", fontsize=6,
-                        color=m_colors[M], alpha=0.9)
-
-        ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
-        ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
-        ax.set_title(
-            f"Ge77 Survival vs Signal Livetime — {r.label}\n"
-            "(each point = one (M, W) combination; colour = M; label = W)",
-            fontsize=14,
-        )
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-        ax.legend(
-            handles=[
-                plt.Line2D([0], [0], marker="o", color="w",
-                           markerfacecolor=m_colors[M], markersize=7,
-                           label=f"M={M}")
-                for M in M_values
-            ],
-            fontsize=8, loc="best", title="M threshold",
-        )
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        safe = r.label.translate(safe_label)
-        fname = f"25c_ge_surv_vs_livetime_{safe}.png"
-        fig.savefig(os.path.join(output_dir, fname), dpi=300)
-        plt.close(fig)
-        print(f"  Saved {fname}")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Text output
-# ──────────────────────────────────────────────────────────────────────
 def write_nc_summary(
     results: list[SetupResult],
     M_values: list[int],
@@ -4388,8 +3901,6 @@ def write_survival_table(
                 f"{tp:>8,}  {fp:>8,}  {fn:>8,}\n"
             )
     print("  Saved survival_at_best_fom.txt")
-
-
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -4640,20 +4151,14 @@ def main() -> None:
     plot_nc_coverage_line(results, M_values, args.output_dir,
                           color_map=color_map)
     plot_nc_rank_spearman(results, M_values, args.output_dir, M_ref=1)
-    # Multiplicity histogram — secondary diagnostic, omitted from main output:
-    # plot_nc_multiplicity_histogram(results, M_default, args.output_dir)
     plot_nc_detectability_overview(results, M_default, args.output_dir,
                                    color_map=color_map)
     plot_ge77_muon_overview(results, M_default, W_default, args.output_dir,
                             color_map=color_map,
                             total_primary_muons=_total_primaries)
-    # Heatmaps deactivated — not useful for comparison at this scale.
     _heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
-    # plot_muon_heatmaps(results, _heatmap_ms, W_values, args.output_dir)
     plot_confusion_bar(results, M_default, W_default, args.output_dir,
                        color_map=color_map, total_primaries=_total_primaries)
-    # W histogram — too noisy at this scale, omitted:
-    # plot_w_histogram(results, M_default, W_default, args.output_dir)
 
     # Plot 07b — TP vs FP scatter (test: more TP → more FP?)
     plot_tp_fp_scatter(results, M_values, W_values, args.output_dir,
@@ -4666,8 +4171,6 @@ def main() -> None:
                      total_primaries=_total_primaries, color_map=color_map)
     plot_fom_summary_min_m(results, M_values, W_values, args.output_dir,
                            min_M=6, total_primaries=_total_primaries, color_map=color_map)
-    # plot_fom_per_setup: per-setup FoM heatmaps deactivated.
-    # plot_fom_per_setup(results, M_values, W_values, args.output_dir, total_primaries=_total_primaries)
 
     plot_w2_nc_scatter(results, M_values, args.output_dir, color_map=color_map)
     plot_w2_recall_best_fom_all_variants(results, M_values, W_values, args.output_dir,
@@ -4680,9 +4183,6 @@ def main() -> None:
     _corr_ms = [m for m in M_values if m <= 4]
     plot_w2_nc_correlation(results, _corr_ms, args.output_dir,
                            color_map=color_map)
-    # muon_correlation: large 30-panel grid — omitted; Spearman summary covers it.
-    # plot_w2_muon_correlation(results, M_values, W_default, args.output_dir,
-    #                          color_map=color_map)
     plot_w2_correlation_matrix(results, M_values, M_default, W_default, args.output_dir)
     plot_w2_coverage_profile(results, M_values, args.output_dir)
 
@@ -4774,9 +4274,6 @@ def main() -> None:
                           total_primaries=_total_primaries, color_map=color_map, m_min=1)
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=6)
-    # plot_ge_surv_vs_livetime_per_setup: per-setup M/W scatter (all combinations) deactivated.
-    # plot_ge_surv_vs_livetime_per_setup(results, M_values, W_values, args.output_dir,
-    #                                    total_primaries=_total_primaries, color_map=color_map)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
