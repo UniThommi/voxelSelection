@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 import matplotlib.cm as mcm
@@ -291,80 +292,335 @@ def plot_per_area_jaccard(
     print(f"  Per-area Jaccard plot saved to {output_path}")
 
 
+def _fmt_primaries(num_primaries: int) -> str:
+    """Format a large integer as a clean exponential string."""
+    import math
+    exp = int(round(math.log10(num_primaries))) if num_primaries > 0 else 0
+    if 10 ** exp == num_primaries:
+        return f"$10^{{{exp}}}$"
+    return f"{num_primaries:,}"
+
+
+def _draw_area_patches(
+    ax,
+    centers: np.ndarray,
+    hits: np.ndarray,
+    area: str,
+    half: float,
+    phi_half: float,
+    cmap,
+    norm,
+) -> None:
+    """Draw colored 195×195 mm² voxel rectangles onto ax for one area."""
+    if area == "wall":
+        for (cx, cy, cz), h in zip(centers, hits):
+            phi = np.arctan2(cy, cx)
+            ax.add_patch(mpatches.Rectangle(
+                (phi - phi_half, cz - half), 2 * phi_half, 2 * half,
+                facecolor=cmap(norm(h)), edgecolor="none",
+            ))
+        ax.set_xlim(-np.pi, np.pi)
+        ax.set_ylim(Z_BASE_GLOBAL, Z_BASE_GLOBAL + H_ZYLINDER)
+        ax.set_xlabel(r"$\varphi$ [rad]", fontsize=11)
+        ax.set_ylabel("z [mm]", fontsize=11)
+        ax.set_xticks([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
+        ax.set_xticklabels(
+            [r"$-\pi$", r"$-\pi/2$", "0", r"$\pi/2$", r"$\pi$"]
+        )
+    else:
+        for (cx, cy, _), h in zip(centers, hits):
+            ax.add_patch(mpatches.Rectangle(
+                (cx - half, cy - half), 2 * half, 2 * half,
+                facecolor=cmap(norm(h)), edgecolor="none",
+            ))
+        if area == "pit":
+            ax.add_patch(mpatches.Circle(
+                (0, 0), R_PIT, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_PIT * 1.1
+        elif area == "bot":
+            for r in (R_ZYL_BOT, R_ZYLINDER):
+                ax.add_patch(mpatches.Circle(
+                    (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_ZYLINDER * 1.1
+        elif area == "top":
+            for r in (R_ZYL_TOP, R_ZYLINDER):
+                ax.add_patch(mpatches.Circle(
+                    (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_ZYLINDER * 1.1
+        else:
+            lim = R_ZYLINDER * 1.1
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x [mm]", fontsize=10)
+        ax.set_ylabel("y [mm]", fontsize=10)
+
+
 def plot_hit_heatmap(
     areas_data: dict[str, tuple[np.ndarray, np.ndarray]],
     output_path: Path,
     voxel_size_mm: float = 195.0,
+    num_primaries: int | None = None,
+    num_ncs: int | None = None,
 ) -> None:
-    """4-panel heatmap: total photon hits per voxel, one subplot per area.
+    """Heatmap of total photon hits per voxel.
 
-    areas_data: {area_name: (centers (N,3), hit_counts (N,))}
-    All panels share the same color scale (global min/max across all areas).
-    pit / bot / top are shown in the x-y plane as colored rectangles.
-    wall is shown in the (φ, z) plane as a scatter.
+    Layout: wall (large, top row spanning full width);
+    pit / bot / top as three equal sub-panels in the bottom row.
+    All panels share the same color scale.
     """
-    AREA_ORDER = ["pit", "bot", "top", "wall"]
     half = voxel_size_mm / 2.0
+    phi_half = half / R_ZYLINDER  # arc → radians for the unrolled wall
 
     all_hits = np.concatenate([h for _, h in areas_data.values() if len(h) > 0])
     vmin, vmax = float(all_hits.min()), float(all_hits.max())
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     cmap = mcm.viridis
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12), squeeze=False)
+    fig = plt.figure(figsize=(18, 14))
+    gs = fig.add_gridspec(2, 3, height_ratios=[2.5, 1], hspace=0.45, wspace=0.38)
+    ax_wall = fig.add_subplot(gs[0, :])
+    ax_pit  = fig.add_subplot(gs[1, 0])
+    ax_bot  = fig.add_subplot(gs[1, 1])
+    ax_top  = fig.add_subplot(gs[1, 2])
+    area_axes = {"wall": ax_wall, "pit": ax_pit, "bot": ax_bot, "top": ax_top}
 
-    for idx, area in enumerate(AREA_ORDER):
-        ax = axes[idx // 2][idx % 2]
+    for area, ax in area_axes.items():
         if area not in areas_data or len(areas_data[area][0]) == 0:
             ax.set_visible(False)
             continue
-        centers, hits = areas_data[area]
-
-        if area == "wall":
-            phi = np.arctan2(centers[:, 1], centers[:, 0])
-            z   = centers[:, 2]
-            ax.scatter(phi, z, c=hits, cmap=cmap, norm=norm,
-                       s=6, linewidths=0, rasterized=True)
-            ax.set_xlim(-np.pi, np.pi)
-            ax.set_ylim(Z_BASE_GLOBAL, Z_BASE_GLOBAL + H_ZYLINDER)
-            ax.set_xlabel("φ [rad]")
-            ax.set_ylabel("z [mm]")
-        else:
-            for (cx, cy, _), h in zip(centers, hits):
-                ax.add_patch(mpatches.Rectangle(
-                    (cx - half, cy - half), voxel_size_mm, voxel_size_mm,
-                    facecolor=cmap(norm(h)), edgecolor="none",
-                ))
-            if area == "pit":
-                ax.add_patch(mpatches.Circle(
-                    (0, 0), R_PIT, fill=False, edgecolor="black", linewidth=1.2))
-                lim = R_PIT * 1.1
-            elif area == "bot":
-                for r in (R_ZYL_BOT, R_ZYLINDER):
-                    ax.add_patch(mpatches.Circle(
-                        (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
-                lim = R_ZYLINDER * 1.1
-            elif area == "top":
-                for r in (R_ZYL_TOP, R_ZYLINDER):
-                    ax.add_patch(mpatches.Circle(
-                        (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
-                lim = R_ZYLINDER * 1.1
-            ax.set_xlim(-lim, lim)
-            ax.set_ylim(-lim, lim)
-            ax.set_aspect("equal")
-            ax.set_xlabel("x [mm]")
-            ax.set_ylabel("y [mm]")
-
-        ax.set_title(f"{area.capitalize()}  (N={len(centers):,})", fontsize=11)
-        ax.grid(True, alpha=0.2)
+        centers_a, hits_a = areas_data[area]
+        _draw_area_patches(ax, centers_a, hits_a, area, half, phi_half, cmap, norm)
+        ax.set_title(f"{area.capitalize()}  ({len(centers_a):,} voxels)", fontsize=11)
+        ax.grid(True, alpha=0.15)
 
     sm = mcm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axes.ravel().tolist(), shrink=0.7, pad=0.04)
-    cbar.set_label("Total photon hits (summed over all NCs)", fontsize=11)
+    cbar = fig.colorbar(
+        sm, ax=[ax_wall, ax_pit, ax_bot, ax_top], shrink=0.85, pad=0.03,
+    )
+    cbar.set_label("Total photon hits (summed over all NC events)", fontsize=11)
 
-    fig.suptitle("Light Distribution — Total Photon Hits per Voxel", fontsize=14)
+    title = "SSD Hit Distribution — Total Photon Hits per Voxel"
+    if num_primaries is not None and num_ncs is not None:
+        subtitle = (f"{_fmt_primaries(num_primaries)} simulated muons"
+                    f"  ·  {num_ncs:,} neutron captures")
+        fig.suptitle(f"{title}\n{subtitle}", fontsize=14, y=0.995)
+    else:
+        fig.suptitle(title, fontsize=14)
+
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Hit heatmap saved to {output_path}")
+
+
+def plot_marginal_gain_heatmap(
+    gains_raw: np.ndarray,
+    available: np.ndarray,
+    selected_cols: list[int],
+    centers: np.ndarray,
+    layers: np.ndarray,
+    output_path: Path,
+    voxel_size_mm: float = 195.0,
+    step: int = 10,
+) -> None:
+    """Heatmap of marginal gain per voxel after `step` greedy selections.
+
+    Color coding:
+      • available voxels  — viridis colormap scaled to [0, max_gain]
+      • already selected  — bright red (#FF4444), clearly distinct
+      • spacing-excluded  — medium gray (#AAAAAA)
+    """
+    half = voxel_size_mm / 2.0
+    phi_half = half / R_ZYLINDER
+
+    selected_set = set(selected_cols)
+    avail_gains = gains_raw[available]
+    vmax_g = float(avail_gains.max()) if len(avail_gains) > 0 else 1.0
+    norm_g = mcolors.Normalize(vmin=0, vmax=max(vmax_g, 1))
+    cmap_g = mcm.viridis
+
+    SELECTED_COLOR = "#FF4444"
+    EXCLUDED_COLOR = "#AAAAAA"
+
+    fig = plt.figure(figsize=(18, 14))
+    gs = fig.add_gridspec(2, 3, height_ratios=[2.5, 1], hspace=0.45, wspace=0.38)
+    ax_wall = fig.add_subplot(gs[0, :])
+    ax_pit  = fig.add_subplot(gs[1, 0])
+    ax_bot  = fig.add_subplot(gs[1, 1])
+    ax_top  = fig.add_subplot(gs[1, 2])
+    area_axes = {"wall": ax_wall, "pit": ax_pit, "bot": ax_bot, "top": ax_top}
+
+    area_lims: dict[str, float] = {}
+    layer_to_ax = {a: ax for a, ax in area_axes.items()}
+
+    for i, (cx, cy, cz) in enumerate(centers):
+        area = str(layers[i])
+        ax = layer_to_ax.get(area)
+        if ax is None:
+            continue
+
+        if i in selected_set:
+            fc = SELECTED_COLOR
+        elif not available[i]:
+            fc = EXCLUDED_COLOR
+        else:
+            fc = cmap_g(norm_g(gains_raw[i]))
+
+        if area == "wall":
+            phi = np.arctan2(cy, cx)
+            ax.add_patch(mpatches.Rectangle(
+                (phi - phi_half, cz - half), 2 * phi_half, 2 * half,
+                facecolor=fc, edgecolor="none",
+            ))
+        else:
+            ax.add_patch(mpatches.Rectangle(
+                (cx - half, cy - half), 2 * half, 2 * half,
+                facecolor=fc, edgecolor="none",
+            ))
+            # Track max radius for limits
+            r = np.hypot(cx, cy)
+            area_lims[area] = max(area_lims.get(area, 0.0), r)
+
+    # Finish wall axes
+    ax_wall.set_xlim(-np.pi, np.pi)
+    ax_wall.set_ylim(Z_BASE_GLOBAL, Z_BASE_GLOBAL + H_ZYLINDER)
+    ax_wall.set_xlabel(r"$\varphi$ [rad]", fontsize=11)
+    ax_wall.set_ylabel("z [mm]", fontsize=11)
+    ax_wall.set_xticks([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
+    ax_wall.set_xticklabels([r"$-\pi$", r"$-\pi/2$", "0", r"$\pi/2$", r"$\pi$"])
+    ax_wall.set_title(f"Wall", fontsize=11)
+    ax_wall.grid(True, alpha=0.15)
+
+    # Finish flat-area axes
+    for area, ax in [("pit", ax_pit), ("bot", ax_bot), ("top", ax_top)]:
+        if area not in layers:
+            ax.set_visible(False)
+            continue
+        if area == "pit":
+            ax.add_patch(mpatches.Circle(
+                (0, 0), R_PIT, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_PIT * 1.1
+        elif area == "bot":
+            for r in (R_ZYL_BOT, R_ZYLINDER):
+                ax.add_patch(mpatches.Circle(
+                    (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_ZYLINDER * 1.1
+        elif area == "top":
+            for r in (R_ZYL_TOP, R_ZYLINDER):
+                ax.add_patch(mpatches.Circle(
+                    (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+            lim = R_ZYLINDER * 1.1
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x [mm]", fontsize=10)
+        ax.set_ylabel("y [mm]", fontsize=10)
+        ax.set_title(f"{area.capitalize()}", fontsize=11)
+        ax.grid(True, alpha=0.15)
+
+    # Colorbar for available voxels
+    sm = mcm.ScalarMappable(norm=norm_g, cmap=cmap_g)
+    sm.set_array([])
+    cbar = fig.colorbar(
+        sm, ax=[ax_wall, ax_pit, ax_bot, ax_top], shrink=0.85, pad=0.03,
+    )
+    cbar.set_label("Marginal gain (additional NCs covered)", fontsize=11)
+
+    # Legend patches
+    legend_patches = [
+        mpatches.Patch(facecolor=SELECTED_COLOR, label=f"Selected ({len(selected_set)})"),
+        mpatches.Patch(facecolor=EXCLUDED_COLOR, label="Spacing-excluded"),
+    ]
+    fig.legend(handles=legend_patches, loc="lower center", ncol=2,
+               fontsize=10, framealpha=0.85, bbox_to_anchor=(0.5, 0.01))
+
+    n_avail = int(available.sum())
+    n_excl  = int((~available).sum()) - len(selected_set)
+    fig.suptitle(
+        f"Marginal Gain after {step} Greedy Selections\n"
+        f"Available: {n_avail:,}  ·  Selected: {len(selected_set)}  ·  "
+        f"Excluded by spacing: {n_excl:,}",
+        fontsize=14, y=0.995,
+    )
+
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Marginal gain heatmap saved to {output_path}")
+
+
+def plot_ssd_voxels_3d(
+    centers: np.ndarray,
+    layers: np.ndarray,
+    output_path: Path,
+    voxel_size_mm: float = 195.0,
+) -> None:
+    """3D plot of all SSD voxels as 195×195 mm² patches.
+
+    Wall voxels: vertical patch in the tangential-z plane (normal = radial).
+    Pit / bot / top voxels: horizontal patch in the x-y plane.
+    """
+    half = voxel_size_mm / 2.0
+
+    polys: list[list] = []
+
+    for (cx, cy, cz), layer in zip(centers, layers):
+        if layer == "wall":
+            r = np.hypot(cx, cy)
+            if r < 1e-6:
+                continue
+            tx, ty = -cy / r, cx / r  # tangent direction
+            polys.append([
+                [cx + half * tx, cy + half * ty, cz - half],
+                [cx + half * tx, cy + half * ty, cz + half],
+                [cx - half * tx, cy - half * ty, cz + half],
+                [cx - half * tx, cy - half * ty, cz - half],
+            ])
+        else:  # pit, bot, top — horizontal
+            polys.append([
+                [cx - half, cy - half, cz],
+                [cx + half, cy - half, cz],
+                [cx + half, cy + half, cz],
+                [cx - half, cy + half, cz],
+            ])
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    coll = Poly3DCollection(polys, alpha=0.65, linewidths=0)
+    coll.set_facecolor("cyan")
+    coll.set_edgecolor("none")
+    ax.add_collection3d(coll)
+
+    # Cylinder outline for orientation
+    theta = np.linspace(0, 2 * np.pi, 200)
+    Z_top = Z_BASE_GLOBAL + H_ZYLINDER
+    for z_lvl in [Z_BASE_GLOBAL, Z_top]:
+        ax.plot(
+            R_ZYLINDER * np.cos(theta), R_ZYLINDER * np.sin(theta), z_lvl,
+            color="gray", alpha=0.3, linewidth=0.5,
+        )
+
+    ax.set_xlabel("x [mm]", fontsize=10)
+    ax.set_ylabel("y [mm]", fontsize=10)
+    ax.set_zlabel("z [mm]", fontsize=10)
+
+    layer_counts = {a: int(np.sum(layers == a))
+                    for a in ["pit", "bot", "top", "wall"]}
+    count_lines = "  ".join(
+        f"{a.upper()}: {n}" for a, n in layer_counts.items() if n > 0
+    )
+    ax.set_title(
+        f"SSD Voxel Geometry  (N={len(centers):,})\n{count_lines}",
+        fontsize=12,
+    )
+
+    R_lim = R_ZYLINDER * 1.1
+    ax.set_xlim(-R_lim, R_lim)
+    ax.set_ylim(-R_lim, R_lim)
+    ax.set_zlim(Z_BASE_GLOBAL - 200, Z_top + 200)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved: {output_path}")
+    print(f"  3D voxel geometry plot saved to {output_path}")
