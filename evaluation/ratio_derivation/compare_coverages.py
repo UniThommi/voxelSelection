@@ -958,7 +958,7 @@ def plot_muon_heatmaps(
             for wi, W in enumerate(W_values):
                 for si, r in enumerate(sorted_results):
                     conf = r.muon["confusion"][(M, W)]
-                    m = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
+                    m = compute_metrics(conf["TP"], conf["FP"], conf["FN"])
                     grid[wi, si] = max(m[metric], 1e-4)
             grids[metric] = grid
 
@@ -1032,10 +1032,10 @@ def plot_confusion_bar(
         all_pcts = []
         for i, (r, c) in enumerate(zip(results, colors)):
             conf = r.muon["confusion"][(M_default, W_default)]
-            val  = conf[key]
-            _denom = (total_primaries if total_primaries > 0
-                      else (conf["TP"] + conf["FP"] + conf["TN"] + conf["FN"]))
-            pct = 100.0 * val / max(_denom, 1)
+            tn_actual = total_primaries - conf["TP"] - conf["FP"] - conf["FN"]
+            counts = {"TP": conf["TP"], "FN": conf["FN"], "TN": tn_actual, "FP": conf["FP"]}
+            val  = counts[key]
+            pct = 100.0 * val / max(total_primaries, 1)
             all_pcts.append(pct)
             bar = ax.bar([i], [pct], 0.6, label=r.label, color=c)
             ax.text(
@@ -1061,10 +1061,9 @@ def plot_confusion_bar(
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.2f}%"))
         ax.grid(True, axis="y", alpha=0.3)
 
-    _denom_note = f"{total_primaries:,}" if total_primaries > 0 else "TP+FP+TN+FN per setup"
     fig.suptitle(
         f"Ge-77 Muon Classification (W≥{W_default}, M≥{M_default})\n"
-        f"(values as % of total muons; denominator = {_denom_note})",
+        f"(values as % of {total_primaries:,} total simulated muons)",
         fontsize=13,
     )
 
@@ -1313,11 +1312,11 @@ def plot_mw_sweep(
                     continue
                 if metric == "Recall":
                     vals.append(compute_metrics(
-                        cm["TP"], cm["FP"], cm["TN"], cm["FN"],
+                        cm["TP"], cm["FP"], cm["FN"],
                     )[metric])
                 elif metric == "Precision":
                     vals.append(compute_metrics(
-                        cm["TP"], cm["FP"], cm["TN"], cm["FN"],
+                        cm["TP"], cm["FP"], cm["FN"],
                     )[metric])
                 else:  # FoM
                     vals.append(calc_fom_confusion(
@@ -1346,9 +1345,9 @@ def plot_mw_sweep(
                     if cm is None:
                         continue
                     if metric == "Recall":
-                        v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                        v = compute_metrics(cm["TP"], cm["FP"], cm["FN"])[metric]
                     elif metric == "Precision":
-                        v = compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])[metric]
+                        v = compute_metrics(cm["TP"], cm["FP"], cm["FN"])[metric]
                     else:  # FoM
                         v = calc_fom_confusion(
                             cm["TP"], cm["FP"], cm["FN"], total_primaries,
@@ -1879,22 +1878,24 @@ def _cc_recall(r: SetupResult, M: int, W: int) -> float:
     cm = r.muon["confusion"].get((M, W))
     if cm is None:
         return 0.0
-    return compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])["Recall"]
+    return compute_metrics(cm["TP"], cm["FP"], cm["FN"])["Recall"]
 
 
 def _cc_precision(r: SetupResult, M: int, W: int) -> float:
     cm = r.muon["confusion"].get((M, W))
     if cm is None:
         return 0.0
-    return compute_metrics(cm["TP"], cm["FP"], cm["TN"], cm["FN"])["Precision"]
+    return compute_metrics(cm["TP"], cm["FP"], cm["FN"])["Precision"]
 
 
-def _cc_signal_survival(r: SetupResult, M: int, W: int) -> float:
-    """Signal survival at (M, W): 1 − (TP+FP)/(TP+FP+TN+FN)."""
+def _cc_signal_survival(r: SetupResult, M: int, W: int, total_primaries: int) -> float:
+    """Signal survival at (M, W): 1 − (TP+FP) / total_primaries."""
     cm = r.muon["confusion"].get((M, W))
     if cm is None:
         return 0.0
-    return 1.0 - calc_veto_fraction(cm["TP"], cm["FP"], cm["TN"], cm["FN"])
+    tp, fp, fn = cm["TP"], cm["FP"], cm["FN"]
+    tn = total_primaries - tp - fp - fn
+    return 1.0 - calc_veto_fraction(tp, fp, tn, fn)
 
 
 def _sorted_by_w2_cc(results: list[SetupResult]) -> list[SetupResult]:
@@ -3728,9 +3729,13 @@ def _draw_advisor_plot(
 
     Four curve types, each with inner (stat) and outer (stat⊕sys) bands:
       1. Advisor result
-      2. Statistical optimum — advisor (from stat-limit CSV)
+      2. Statistical optimum — advisor (from stat-limit CSV, ``stat_limit_rows`` param)
       3. Each setup in results_to_show at M_fixed
-      4. Statistical limit for each setup (computed from simulation memory)
+      4. NC-truth statistical limit for each setup (from ``r.stat_limit_rows``,
+         pre-computed by ``_compute_nc_truth_stat_limit`` in main())
+
+    Note: ``stat_limit_rows`` (parameter) = advisor CSV stat limit (curve 2).
+          ``r.stat_limit_rows`` (per-setup field) = NC-truth stat limit (curve 4).
 
     ``sig_surv_min`` restricts all curves to signal survival >= sig_surv_min.
     Returns the pcolormesh artist for the FoM background colorbar.
@@ -4296,15 +4301,20 @@ def write_confusion_matrices(
     M_values: list[int],
     W_values: list[int],
     output_dir: str,
+    total_primaries: int,
 ) -> None:
-    """Write confusion_matrices.txt for all (config, M, W)."""
+    """Write confusion_matrices.txt for all (config, M, W).
+
+    TN = total_primaries - TP - FP - FN (all simulated muons as denominator).
+    """
     fpath = os.path.join(output_dir, "confusion_matrices.txt")
     with open(fpath, "w") as f:
         f.write("Ge-77 Classification Confusion Matrices\n")
+        f.write(f"total_primaries = {total_primaries:,}\n")
         f.write("=" * 90 + "\n\n")
         hdr = (
             f"{'Config':<20} {'M':>3} {'W':>3}  "
-            f"{'TP':>7} {'FP':>7} {'TN':>7} {'FN':>7}  "
+            f"{'TP':>7} {'FP':>7} {'TN':>12} {'FN':>7}  "
             f"{'Recall':>7} {'Prec':>7}\n"
         )
         f.write(hdr)
@@ -4313,13 +4323,12 @@ def write_confusion_matrices(
             for M in M_values:
                 for W in W_values:
                     conf = r.muon["confusion"][(M, W)]
-                    m = compute_metrics(
-                        conf["TP"], conf["FP"], conf["TN"], conf["FN"]
-                    )
+                    tn   = total_primaries - conf["TP"] - conf["FP"] - conf["FN"]
+                    m    = compute_metrics(conf["TP"], conf["FP"], conf["FN"])
                     f.write(
                         f"{r.label:<20} {M:>3} {W:>3}  "
                         f"{conf['TP']:>7} {conf['FP']:>7} "
-                        f"{conf['TN']:>7} {conf['FN']:>7}  "
+                        f"{tn:>12} {conf['FN']:>7}  "
                         f"{m['Recall']:>7.4f} {m['Precision']:>7.4f}\n"
                     )
             f.write("\n")
@@ -4345,8 +4354,10 @@ def write_survival_table(
         f.write("=" * W + "\n\n")
         f.write("  Ge77 survival   = TP / (TP + FN)            = Recall\n")
         f.write("  Signal survival = (TP + FP) / all_muons\n")
-        _denom_note = total_primaries if total_primaries > 0 else "per-setup muon count"
-        f.write(f"  all_muons       = {_denom_note:,}\n\n")
+        if total_primaries > 0:
+            f.write(f"  all_muons       = {total_primaries:,}\n\n")
+        else:
+            f.write(f"  all_muons       = per-setup muon count\n\n")
 
         hdr = (
             f"  {'Setup':<25}  {'(M,W)':>8}  "
@@ -4370,7 +4381,7 @@ def write_survival_table(
             fp = cm.get("FP", 0)
             fn = cm.get("FN", 0)
             ge77_surv = _cc_recall(r, M_b, W_b)
-            sig_surv  = _cc_signal_survival(r, M_b, W_b)
+            sig_surv  = _cc_signal_survival(r, M_b, W_b, total_primaries=_tp)
             f.write(
                 f"  {r.label:<25}  {f'M{M_b}W{W_b}':>8}  "
                 f"{ge77_surv*100:>14.2f}%  {sig_surv*100:>15.4f}%  "
@@ -4582,7 +4593,7 @@ def main() -> None:
         nc   = r.nc
         ms   = r.muon["muon_stats"]
         conf = r.muon["confusion"][(M_default, W_default)]
-        m    = compute_metrics(conf["TP"], conf["FP"], conf["TN"], conf["FN"])
+        m    = compute_metrics(conf["TP"], conf["FP"], conf["FN"])
         print(f"\n--- {r.label} ---")
         print(f"  Total NCs:          {nc['nc_total']:,}")
         if nc["nc_any_photon"] >= 0:
@@ -4599,7 +4610,8 @@ def main() -> None:
                 f"within 200ns={gd['within_200ns']:,}  "
                 f"detected (TP)={conf['TP']:,}"
             )
-        print(f"  At (M={M_default}, W={W_default}): TP={conf['TP']}  FN={conf['FN']}  TN={conf['TN']}  FP={conf['FP']}")
+        _tn = _total_primaries - conf['TP'] - conf['FP'] - conf['FN']
+        print(f"  At (M={M_default}, W={W_default}): TP={conf['TP']}  FN={conf['FN']}  TN={_tn:,}  FP={conf['FP']}")
         print(f"  Recall={m['Recall']:.3f}  Precision={m['Precision']:.3f}")
         if r.w2_global is not None:
             print(
@@ -4769,7 +4781,8 @@ def main() -> None:
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
     write_nc_summary(results, M_values, args.output_dir)
-    write_confusion_matrices(results, M_values, W_values, args.output_dir)
+    write_confusion_matrices(results, M_values, W_values, args.output_dir,
+                             total_primaries=_total_primaries)
     write_survival_table(results, M_values, W_values, args.output_dir,
                          total_primaries=_total_primaries)
 
