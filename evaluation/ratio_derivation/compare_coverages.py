@@ -2213,6 +2213,197 @@ def plot_w2_recall_corr_split(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 17d — W2 global vs NC coverage: Pearson r and Spearman ρ vs M (all M)
+# ──────────────────────────────────────────────────────────────────────
+def plot_w2_nc_coverage_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """17d — W2 global vs NC coverage: Pearson r and Spearman ρ vs M (all M).
+
+    For every M computes the correlation between W2 and NC detection fraction
+    (_cc_nc_frac).  Both Pearson r and Spearman ρ are plotted vs M with
+    3-sigma and 5-sigma significance thresholds.
+    Saved as 17d_w2_nc_coverage_corr.png.
+    """
+    w2_res = [r for r in results if r.w2_global is not None]
+    if len(w2_res) < 3:
+        print("  [SKIP] 17d_w2_nc_coverage_corr: fewer than 3 setups have W2.")
+        return
+
+    w2_arr = np.array([r.w2_global for r in w2_res])
+    _n_w2 = len(w2_res)
+    pearson_r, spearman_rho = [], []
+    p_pearson, p_spearman   = [], []
+
+    for M in M_values:
+        nc_arr = np.array([_cc_nc_frac(r, M) for r in w2_res])
+        msk = np.isfinite(nc_arr) & np.isfinite(w2_arr)
+        if msk.sum() < 3 or np.std(w2_arr[msk]) == 0 or np.std(nc_arr[msk]) == 0:
+            pearson_r.append(np.nan);    p_pearson.append(np.nan)
+            spearman_rho.append(np.nan); p_spearman.append(np.nan)
+            continue
+        r_val, p_r   = scipy_stats.pearsonr(w2_arr[msk], nc_arr[msk])
+        rho,   p_rho = scipy_stats.spearmanr(w2_arr[msk], nc_arr[msk])
+        pearson_r.append(r_val);   p_pearson.append(p_r)
+        spearman_rho.append(rho);  p_spearman.append(p_rho)
+
+    x            = np.array(M_values)
+    pearson_r    = np.array(pearson_r)
+    p_pearson    = np.array(p_pearson)
+    spearman_rho = np.array(spearman_rho)
+    p_spearman   = np.array(p_spearman)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.axhline(0, color="black", linewidth=0.8)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=3.0)
+    _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
+
+    for vals, ps, label, color, marker in [
+        (pearson_r,   p_pearson,  "Pearson r",   "#1f77b4", "o"),
+        (spearman_rho, p_spearman, "Spearman ρ", "#d62728", "s"),
+    ]:
+        sig  = ps < _P_3SIGMA
+        nsig = ~sig & np.isfinite(vals)
+        ax.plot(x, vals, color=color, linewidth=1.8, label=label)
+        if sig.any():
+            ax.scatter(x[sig],  vals[sig],  color=color, s=60, marker=marker, zorder=4)
+        if nsig.any():
+            ax.scatter(x[nsig], vals[nsig], facecolors="none", edgecolors=color,
+                       s=60, marker=marker, linewidth=1.2, zorder=4)
+
+    ax.set_xlabel("Multiplicity threshold M", fontsize=13)
+    ax.set_ylabel("Correlation coefficient (W2 vs NC coverage)", fontsize=13)
+    ax.set_title(
+        "W2 Homogeneity vs NC Coverage  (all M)  — Pearson r and Spearman ρ vs M\n"
+        "(filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
+        fontsize=14,
+    )
+    ax.set_xticks(M_values)
+    ax.set_ylim(-1.1, 1.1)
+    ax.legend(fontsize=11, loc="upper right")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fname = "17d_w2_nc_coverage_corr.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 17e — W2 global vs Recall: Pearson r and Spearman ρ vs M (3 variants)
+# ──────────────────────────────────────────────────────────────────────
+def plot_w2_recall_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_m_constrained: int = 6,
+    total_primaries: int = 0,
+) -> None:
+    """17e — W2 global vs Recall: Pearson r and Spearman ρ vs M (3 variants).
+
+    Three side-by-side panels:
+      1. Best recall over all W at each M (all M)
+      2. Recall at fixed W = 1 at each M (all M)
+      3. Best recall over all W at each M (M ≥ min_m_constrained)
+    Each panel shows 3-sigma and 5-sigma Pearson significance thresholds.
+    Saved as 17e_w2_recall_corr.png.
+    """
+    w2_res = [r for r in results if r.w2_global is not None]
+    if len(w2_res) < 3:
+        print("  [SKIP] 17e_w2_recall_corr: fewer than 3 setups have W2.")
+        return
+
+    w2_arr = np.array([r.w2_global for r in w2_res])
+    _n_w2  = len(w2_res)
+
+    def _best_recall(r: "SetupResult", M: int) -> float:
+        best = np.nan
+        for W in W_values:
+            v = _cc_recall(r, M, W)
+            if np.isfinite(v) and (np.isnan(best) or v > best):
+                best = v
+        return best
+
+    def _corr_line(m_list: list[int], get_val) -> tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray
+    ]:
+        pr, sr, pp, sp = [], [], [], []
+        for M in m_list:
+            y_arr = np.array([get_val(r, M) for r in w2_res])
+            msk = np.isfinite(y_arr) & np.isfinite(w2_arr)
+            if msk.sum() < 3 or np.std(w2_arr[msk]) == 0 or np.std(y_arr[msk]) == 0:
+                pr.append(np.nan);  pp.append(np.nan)
+                sr.append(np.nan);  sp.append(np.nan)
+                continue
+            r_val, p_r   = scipy_stats.pearsonr(w2_arr[msk], y_arr[msk])
+            rho,   p_rho = scipy_stats.spearmanr(w2_arr[msk], y_arr[msk])
+            pr.append(r_val);  pp.append(p_r)
+            sr.append(rho);    sp.append(p_rho)
+        return np.array(pr), np.array(sr), np.array(pp), np.array(sp)
+
+    eligible_ge = [M for M in M_values if M >= min_m_constrained]
+
+    panels = [
+        (M_values,    _best_recall,
+         "Best Recall over all W  (all M)"),
+        (M_values,    lambda r, M: _cc_recall(r, M, 1),
+         "Recall at W = 1  (all M)"),
+        (eligible_ge, _best_recall,
+         f"Best Recall over all W  (M ≥ {min_m_constrained})"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        "W2 Homogeneity vs Ge-77 Muon Recall  — Pearson r and Spearman ρ vs M\n"
+        "(filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
+        fontsize=13,
+    )
+
+    for ax, (m_list, get_val, title) in zip(axes, panels):
+        if not m_list:
+            ax.set_visible(False)
+            continue
+        x = np.array(m_list)
+        pr, sr, pp, sp = _corr_line(m_list, get_val)
+
+        ax.axhline(0, color="black", linewidth=0.8)
+        _draw_pearson_rcrit(ax, _n_w2, sigma=3.0)
+        _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
+
+        for vals, ps, label, color, marker in [
+            (pr, pp, "Pearson r",   "#1f77b4", "o"),
+            (sr, sp, "Spearman ρ",  "#d62728", "s"),
+        ]:
+            sig  = ps < _P_3SIGMA
+            nsig = ~sig & np.isfinite(vals)
+            ax.plot(x, vals, color=color, linewidth=1.8, label=label)
+            if sig.any():
+                ax.scatter(x[sig],  vals[sig],  color=color, s=60,
+                           marker=marker, zorder=4)
+            if nsig.any():
+                ax.scatter(x[nsig], vals[nsig], facecolors="none",
+                           edgecolors=color, s=60, marker=marker,
+                           linewidth=1.2, zorder=4)
+
+        ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+        ax.set_ylabel("Correlation (W2 vs Recall)", fontsize=11)
+        ax.set_title(title, fontsize=11)
+        ax.set_xticks(m_list)
+        ax.set_ylim(-1.1, 1.1)
+        ax.legend(fontsize=9, loc="upper right")
+        ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fname = "17e_w2_recall_corr.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Plots 17a_z / 17b_z / 17c_z — same analysis for W2_z component
 # Plots 17a_phi / 17b_phi / 17c_phi — same analysis for W2_phi component
 # ──────────────────────────────────────────────────────────────────────
@@ -2892,22 +3083,33 @@ def _fom_colormap_background(
     normalize: bool = False,
     cmap: str = "viridis",
     alpha: float = 0.35,
+    x_range: "tuple[float, float] | None" = None,
+    y_range: "tuple[float, float] | None" = None,
 ) -> "matplotlib.cm.ScalarMappable":
     """Draw a FoM(signal_surv, ge_surv) colormap + labelled contours on ax.
 
-    The grid is clipped to the convex hull of the visible data range (with
-    a 5 % margin on each side).  Returns the pcolormesh artist so the
-    caller can attach a colorbar.  If ``normalize`` is True the FoM values
-    are rescaled to [0, 1] before plotting so the colorbar ticks read 0–1.
+    When ``x_range`` / ``y_range`` are given the grid covers exactly those
+    bounds (no data-driven extent needed).  Otherwise the grid is built from
+    the data in ``xs`` / ``ys`` with a 5 % margin.
+    Returns the pcolormesh artist so the caller can attach a colorbar.
+    If ``normalize`` is True the FoM values are rescaled to [0, 1].
     """
-    if not xs or not ys:
-        return None
-    mx, mx2 = min(xs), max(xs)
-    my, my2 = min(ys), max(ys)
-    dx = max((mx2 - mx) * 0.05, 1e-4)
-    dy = max((my2 - my) * 0.05, 1e-4)
-    xg = np.linspace(mx - dx, mx2 + dx, n_grid)
-    yg = np.linspace(my - dy, my2 + dy, n_grid)
+    if x_range is not None:
+        xg = np.linspace(x_range[0], x_range[1], n_grid)
+    else:
+        if not xs:
+            return None
+        mx, mx2 = min(xs), max(xs)
+        dx = max((mx2 - mx) * 0.05, 1e-4)
+        xg = np.linspace(mx - dx, mx2 + dx, n_grid)
+    if y_range is not None:
+        yg = np.linspace(y_range[0], y_range[1], n_grid)
+    else:
+        if not ys:
+            return None
+        my, my2 = min(ys), max(ys)
+        dy = max((my2 - my) * 0.05, 1e-4)
+        yg = np.linspace(my - dy, my2 + dy, n_grid)
     XX, YY = np.meshgrid(xg, yg)
     _fom_vec = np.vectorize(figure_of_merit)
     ZZ = _fom_vec(YY, XX)  # ge_surv=YY, signal_surv=XX
@@ -3368,23 +3570,12 @@ def _draw_advisor_plot(
         all_setup_rows.append(sr)
         all_sl_rows.append(slr)
 
-    # ── FoM background heatmap (normalised 0–1) ───────────────────────
-    all_xs_hm: list[float] = []
-    all_ys_hm: list[float] = []
-    for rr in adv_filt + sl_filt:
-        all_xs_hm.append(rr["sig_surv"])
-        all_ys_hm.append(rr["ge_77_surv"])
-    for rows_list in (all_setup_rows + all_sl_rows):
-        for rr in rows_list:
-            all_xs_hm.append(rr["sig_surv"])
-            all_ys_hm.append(rr["ge_77_surv"])
-
-    pcm = None
-    if all_xs_hm:
-        pcm = _fom_colormap_background(
-            ax, all_xs_hm, all_ys_hm,
-            normalize=True, cmap=heatmap_cmap, alpha=heatmap_alpha,
-        )
+    # ── FoM background heatmap (normalised 0–1, full axes range) ─────
+    pcm = _fom_colormap_background(
+        ax, [], [],
+        normalize=True, cmap=heatmap_cmap, alpha=heatmap_alpha,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
 
     # ── 1. Advisor result ─────────────────────────────────────────────
     if adv_filt:
@@ -3479,7 +3670,8 @@ def plot_ge_surv_vs_livetime_advisor(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.set_xlim(0.80, 1.005)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
@@ -3534,7 +3726,8 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.set_xlim(0.80, 1.005)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
@@ -4195,6 +4388,12 @@ def main() -> None:
                                min_m_constrained=6,
                                total_primaries=_total_primaries,
                                color_map=color_map)
+    # Plot 17d — W2 global vs NC coverage correlation (all M)
+    plot_w2_nc_coverage_corr_all_m(results, M_values, args.output_dir)
+    # Plot 17e — W2 global vs Recall correlation (3 variants, all M)
+    plot_w2_recall_corr_all_m(results, M_values, W_values, args.output_dir,
+                               min_m_constrained=6,
+                               total_primaries=_total_primaries)
     # Combined Spearman summary kept for backwards compatibility:
     plot_w2_spearman_vs_m(results, M_values, W_default, args.output_dir,
                           total_primaries=_total_primaries, W_values=W_values)
