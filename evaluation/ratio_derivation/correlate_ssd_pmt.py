@@ -26,14 +26,27 @@ Additionally, at the optimal ratio, the script produces:
 
 Usage
 -----
+Fixed-ratio mode (default) — evaluate at explicitly given per-layer ratios:
+
     python correlate_ssd_pmt.py \\
+        --muon-dir  /path/to/nc_truth/ \\
+        --ssd-hdf5  /path/to/data.hdf5 \\
+        --setup-dirs /path/A /path/B /path/C \\
+        --pit 2.0731 --bot 2.3843 --top 2.2004 --wall 1.8776 \\
+        [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
+        [--min-M-fom 6] [--output-dir ./correlation_results] \\
+        [--seed 42]
+
+Ratio-sweep mode — sweep the ratio to maximise SSD–PMT correlation:
+
+    python correlate_ssd_pmt.py \\
+        --ratio-sweep \\
         --muon-dir  /path/to/nc_truth/ \\
         --ssd-hdf5  /path/to/data.hdf5 \\
         --setup-dirs /path/A /path/B /path/C \\
         [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
         [--ratio-min 1.0] [--ratio-max 6.0] [--ratio-step 0.1] \\
-        [--min-M-fom 6] \\
-        [--output-dir ./correlation_results] \\
+        [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42] [--skip-per-layer]
 
 Author: Thomas Buerger (University of Tübingen)
@@ -1814,6 +1827,7 @@ def write_summary(
     ratio_max: float = 10.0,
     ratio_step: float = 0.1,
     min_M_fom: int = 6,
+    area_ratios: Optional[dict[str, float]] = None,
 ) -> None:
     import datetime
 
@@ -1837,12 +1851,20 @@ def write_summary(
     runtime_h  = total_primaries / MUSUN_RATE if MUSUN_RATE > 0 else 0.0
     runtime_yr = runtime_h / (24 * 365.25)
     n_runs     = total_primaries // max(MUONS_PER_RUN_DIR, 1)
+    if area_ratios is not None:
+        _ratio_mode_lines: list[str] = ["  Ratio mode         : fixed (no sweep)"]
+        for _lyr, _r in area_ratios.items():
+            _ratio_mode_lines.append(f"  {_lyr:>6} ratio     : {_r}")
+    else:
+        _ratio_mode_lines = [
+            f"  Ratio sweep        : [{ratio_min:.2f}, {ratio_max:.2f}]  step={ratio_step:.2f}"
+        ]
     L += [
         "1. SIMULATION OVERVIEW", _hr(),
         f"  Setups analysed    : {len(setups)}",
         f"  Total primaries    : {total_primaries:,}  ({n_runs} runs × {MUONS_PER_RUN_DIR:,})",
         f"  Simulated livetime : {runtime_h:,.0f} h  =  {runtime_yr:.2f} yr  (@ {MUSUN_RATE:.0f} µ/h)",
-        f"  Ratio sweep        : [{ratio_min:.2f}, {ratio_max:.2f}]  step={ratio_step:.2f}",
+        *_ratio_mode_lines,
         f"  M range            : 1 – {max(M_values)}",
         f"  W range            : 1 – {max(W_values)}",
         f"  W_default (recall) : {W_default}",
@@ -1864,28 +1886,34 @@ def write_summary(
         L.append(f"  {s.label:<30} {w2_str:>10}  {fom_str:>14}  {'M'+str(M_b)+'W'+str(W_b):>9}")
     L.append("")
 
-    # ── 3. Optimal ratios ─────────────────────────────────────────────
-    L += [
-        "3. OPTIMAL AREA RATIOS", _hr(),
-        f"  Global optimal ratio : {optimal_ratio:.4f}",
-        "  (Determined by max mean|Pearson r| for nc_coverage at M=1..4)",
-        "",
-    ]
-    boundary_warnings: list[str] = []
-    if abs(optimal_ratio - ratio_min) < 1e-9:
-        boundary_warnings.append(f"  *** GLOBAL optimum hit the LOWER boundary ({ratio_min:.2f}). ***")
-    if abs(optimal_ratio - ratio_max) < 1e-9:
-        boundary_warnings.append(f"  *** GLOBAL optimum hit the UPPER boundary ({ratio_max:.2f}). ***")
-    if per_layer_optima:
-        L.append("  Per-layer optimal ratios:")
-        for lyr, r in per_layer_optima.items():
-            flag = "  *** BOUNDARY ***" if abs(r - ratio_min) < 1e-9 or abs(r - ratio_max) < 1e-9 else ""
-            L.append(f"    {lyr:>4} : {r:.4f}{flag}")
-        L.append("")
-    if boundary_warnings:
-        L.append("  BOUNDARY WARNINGS:")
-        L.extend(boundary_warnings)
-        L.append("")
+    # ── 3. Fixed / optimal ratios ────────────────────────────────────
+    if area_ratios is not None:
+        L += ["3. FIXED AREA RATIOS", _hr()]
+        for _lyr, _r in area_ratios.items():
+            L.append(f"  {_lyr:>6}: {_r}")
+        L += [f"  Nominal key (mean): {optimal_ratio:.4f}", ""]
+    else:
+        L += [
+            "3. OPTIMAL AREA RATIOS", _hr(),
+            f"  Global optimal ratio : {optimal_ratio:.4f}",
+            "  (Determined by max mean|Pearson r| for nc_coverage at M=1..4)",
+            "",
+        ]
+        boundary_warnings: list[str] = []
+        if abs(optimal_ratio - ratio_min) < 1e-9:
+            boundary_warnings.append(f"  *** GLOBAL optimum hit the LOWER boundary ({ratio_min:.2f}). ***")
+        if abs(optimal_ratio - ratio_max) < 1e-9:
+            boundary_warnings.append(f"  *** GLOBAL optimum hit the UPPER boundary ({ratio_max:.2f}). ***")
+        if per_layer_optima:
+            L.append("  Per-layer optimal ratios:")
+            for lyr, r in per_layer_optima.items():
+                flag = "  *** BOUNDARY ***" if abs(r - ratio_min) < 1e-9 or abs(r - ratio_max) < 1e-9 else ""
+                L.append(f"    {lyr:>4} : {r:.4f}{flag}")
+            L.append("")
+        if boundary_warnings:
+            L.append("  BOUNDARY WARNINGS:")
+            L.extend(boundary_warnings)
+            L.append("")
 
     # ── 4. Correlation at optimal ratio ───────────────────────────────
     if not corr_df.empty:
@@ -2158,7 +2186,23 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed",           type=int, default=42,
                    help="Random seed for stochastic rounding (default: 42)")
     p.add_argument("--skip-per-layer", action="store_true",
-                   help="Skip the per-layer ratio sweep")
+                   help="Skip the per-layer ratio sweep (only relevant with --ratio-sweep)")
+    p.add_argument("--ratio-sweep", action="store_true",
+                   help="Enable the global+per-layer ratio sweep to find the optimal "
+                        "ratio. When not set (default), --pit/--bot/--top/--wall must "
+                        "all be provided and evaluation runs at those fixed ratios.")
+    p.add_argument("--pit",  type=float, default=None,
+                   help=f"Fixed pit  area ratio (required without --ratio-sweep; "
+                        f"physics default: {DEFAULT_AREA_RATIOS['pit']})")
+    p.add_argument("--bot",  type=float, default=None,
+                   help=f"Fixed bot  area ratio (required without --ratio-sweep; "
+                        f"physics default: {DEFAULT_AREA_RATIOS['bot']})")
+    p.add_argument("--top",  type=float, default=None,
+                   help=f"Fixed top  area ratio (required without --ratio-sweep; "
+                        f"physics default: {DEFAULT_AREA_RATIOS['top']})")
+    p.add_argument("--wall", type=float, default=None,
+                   help=f"Fixed wall area ratio (required without --ratio-sweep; "
+                        f"physics default: {DEFAULT_AREA_RATIOS['wall']})")
     return p.parse_args()
 
 
@@ -2223,26 +2267,74 @@ def main() -> None:
         setups.append(SetupData(label=label, w2=w2, pmt_nc=pmt_nc, pmt_muon=pmt_muon))
         setup_voxel_subsets.append(voxel_col_subset)
 
-    # ── 5. Global ratio sweep ─────────────────────────────────────────
-    ratio_factors = np.arange(args.ratio_min, args.ratio_max + args.ratio_step / 2, args.ratio_step)
-    print(f"\nGlobal ratio sweep [{args.ratio_min:.2f}, {args.ratio_max:.2f}] "
-          f"step={args.ratio_step:.2f} ({len(ratio_factors)} steps) ...")
-    corr_df, optimal_ratio = global_ratio_sweep(
-        setups, ssd_coo_data, setup_voxel_subsets, alignment,
-        ratio_factors, args.m, M_values, W_values, args.W_default,
-        seed=args.seed, total_primaries=total_primaries,
-    )
+    # ── 5. Ratio evaluation — fixed ratios or sweep ───────────────────
+    _ALL_LAYERS = ("pit", "bot", "top", "wall")
+    cli_ratio_map = {
+        lyr: getattr(args, lyr) for lyr in _ALL_LAYERS if getattr(args, lyr) is not None
+    }
 
-    # ── 6. Per-layer ratio sweep ──────────────────────────────────────
-    per_layer_corr_df: Optional[pd.DataFrame]    = None
-    per_layer_optima:  Optional[dict[str, float]] = None
-    if not args.skip_per_layer:
-        print("\nPer-layer ratio sweep ...")
-        per_layer_corr_df, per_layer_optima = per_layer_ratio_sweep(
-            setups, ssd_coo_data, setup_voxel_subsets, alignment,
-            optimal_ratio, ratio_factors, args.m, M_values, W_values,
-            args.W_default, seed=args.seed, total_primaries=total_primaries,
+    corr_df:             pd.DataFrame                = pd.DataFrame()
+    per_layer_corr_df:   Optional[pd.DataFrame]      = None
+    per_layer_optima:    Optional[dict[str, float]]  = None
+    _fixed_area_ratios:  Optional[dict[str, float]]  = None
+
+    if not args.ratio_sweep:
+        # ── Fixed ratio mode ──────────────────────────────────────────
+        missing_layers = [lyr for lyr in _ALL_LAYERS if lyr not in cli_ratio_map]
+        if missing_layers:
+            sys.exit(
+                f"Error: --ratio-sweep is not set; all four layer ratios must be "
+                f"provided.  Missing: {', '.join(f'--{l}' for l in missing_layers)}"
+            )
+        _fixed_area_ratios = {lyr: cli_ratio_map[lyr] for lyr in _ALL_LAYERS}
+        nominal_ratio = float(np.mean(list(_fixed_area_ratios.values())))
+        print(f"\nFixed area ratios (no ratio sweep):")
+        for _lyr, _r in _fixed_area_ratios.items():
+            print(f"  {_lyr:>6}: {_r}")
+        print(f"  Nominal key (mean): {nominal_ratio:.4f}")
+
+        (raw_rows, raw_cols, raw_vals, _, _, layers_arr, num_ncs_val, _) = ssd_coo_data
+        num_voxels = len(voxel_ids)
+
+        print(f"\nEvaluating {len(setups)} setup(s) at fixed ratios ...")
+        for i, setup in enumerate(setups):
+            print(f"  {setup.label}", end=" ... ", flush=True)
+            setup.ssd_results[nominal_ratio] = evaluate_ssd_at_ratio(
+                raw_rows, raw_cols, raw_vals, num_ncs_val, num_voxels, layers_arr,
+                _fixed_area_ratios, args.m, M_values, W_values, alignment,
+                setup_voxel_subsets[i], seed=args.seed,
+            )
+            nc_m1 = _ssd_nc_frac(setup.ssd_results[nominal_ratio], 1)
+            print(f"NC(M=1)={nc_m1:.3f}")
+
+        optimal_ratio = nominal_ratio
+
+    else:
+        # ── Ratio sweep mode ──────────────────────────────────────────
+        if cli_ratio_map:
+            warnings.warn(
+                "--ratio-sweep is active; --pit/--bot/--top/--wall flags are "
+                "ignored during the sweep."
+            )
+
+        ratio_factors = np.arange(
+            args.ratio_min, args.ratio_max + args.ratio_step / 2, args.ratio_step
         )
+        print(f"\nGlobal ratio sweep [{args.ratio_min:.2f}, {args.ratio_max:.2f}] "
+              f"step={args.ratio_step:.2f} ({len(ratio_factors)} steps) ...")
+        corr_df, optimal_ratio = global_ratio_sweep(
+            setups, ssd_coo_data, setup_voxel_subsets, alignment,
+            ratio_factors, args.m, M_values, W_values, args.W_default,
+            seed=args.seed, total_primaries=total_primaries,
+        )
+
+        if not args.skip_per_layer:
+            print("\nPer-layer ratio sweep ...")
+            per_layer_corr_df, per_layer_optima = per_layer_ratio_sweep(
+                setups, ssd_coo_data, setup_voxel_subsets, alignment,
+                optimal_ratio, ratio_factors, args.m, M_values, W_values,
+                args.W_default, seed=args.seed, total_primaries=total_primaries,
+            )
 
     # ── 7. Plots ──────────────────────────────────────────────────────
     print("\nGenerating plots ...")
@@ -2285,6 +2377,7 @@ def main() -> None:
         total_primaries, odir,
         ratio_min=args.ratio_min, ratio_max=args.ratio_max,
         ratio_step=args.ratio_step, min_M_fom=args.min_M_fom,
+        area_ratios=_fixed_area_ratios,
     )
     print(f"\nDone. Results saved to: {odir}")
 
