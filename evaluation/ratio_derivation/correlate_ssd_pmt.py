@@ -794,6 +794,9 @@ def plot_corr_vs_ratio(
     output_dir: str,
     optimal_ratio: float,
 ) -> None:
+    if corr_df.empty or "metric" not in corr_df.columns:
+        print(f"  [SKIP] No correlation data (ratio sweep not run)")
+        return
     df = corr_df[corr_df["metric"] == metric].copy()
     if df.empty:
         print(f"  [SKIP] No data for metric={metric!r}")
