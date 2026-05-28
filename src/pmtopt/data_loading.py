@@ -571,6 +571,59 @@ def load_raw_sparse(
             voxel_ids, centers, layers, num_ncs, num_primaries)
 
 
+def load_invalid_voxel_data(
+    filepath: str,
+    valid_voxel_ids: set,
+    verbose: bool = False,
+) -> tuple:
+    """Load centers, layers, and total hit sums for geometrically invalid voxels.
+
+    Invalid voxels are those present in the HDF5 but absent from valid_voxel_ids.
+
+    Returns
+    -------
+    centers : np.ndarray, shape (n_invalid, 3)
+    layers  : np.ndarray of str, shape (n_invalid,)
+    hits    : np.ndarray, shape (n_invalid,) — summed photon hits over all NCs
+    """
+    with h5py.File(filepath, "r") as f:
+        all_keys = sorted(
+            c.decode() if isinstance(c, bytes) else str(c)
+            for c in f["target_columns"][:]
+        )
+        invalid_keys = [k for k in all_keys if k not in valid_voxel_ids]
+
+        if not invalid_keys:
+            return (
+                np.empty((0, 3), dtype=np.float64),
+                np.empty(0, dtype=object),
+                np.empty(0, dtype=np.float64),
+            )
+
+        n_invalid = len(invalid_keys)
+        centers = np.empty((n_invalid, 3), dtype=np.float64)
+        layers = np.empty(n_invalid, dtype=object)
+        for i, key in enumerate(invalid_keys):
+            centers[i] = f[f"voxels/{key}/center"][:]
+            lr = f[f"voxels/{key}/layer"][()]
+            layers[i] = lr.decode() if isinstance(lr, bytes) else str(lr)
+
+        col_to_idx = {k: i for i, k in enumerate(all_keys)}
+        invalid_col_indices = np.array([col_to_idx[k] for k in invalid_keys], dtype=np.int32)
+
+        num_ncs = f["target_matrix"].shape[0]
+        hits = np.zeros(n_invalid, dtype=np.float64)
+        BATCH = 2000
+        if verbose:
+            print(f"  Loading hit sums for {n_invalid} invalid voxels ...")
+        for row_start in range(0, num_ncs, BATCH):
+            row_end = min(row_start + BATCH, num_ncs)
+            block = f["target_matrix"][row_start:row_end, :][:, invalid_col_indices]
+            hits += block.sum(axis=0)
+
+    return centers, layers, hits
+
+
 def binarize_from_raw(
     raw_rows: np.ndarray,
     raw_cols: np.ndarray,

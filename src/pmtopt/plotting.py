@@ -53,16 +53,20 @@ def plot_selected_voxels(
             label=f"Bot ring inner (r={R_ZYL_BOT})")
 
     layer_markers = {"pit": "o", "bot": "s", "top": "^", "wall": "D"}
+    layer_colors = {"pit": "#1f77b4", "bot": "#2ca02c", "top": "#ff7f0e", "wall": "#d62728"}
+    layer_edge_colors = {"pit": "#0a3d6b", "bot": "#0a4d0a", "top": "#7f3f00", "wall": "#7f0000"}
 
     for layer in ["pit", "bot", "top", "wall"]:
         mask = selected_layers == layer
         if not np.any(mask):
             continue
         pts = selected_centers[mask]
+        color = layer_colors.get(layer, "red")
+        edge_color = layer_edge_colors.get(layer, "darkred")
         ax.scatter(
             pts[:, 0], pts[:, 1], pts[:, 2],
-            c="red", marker=layer_markers.get(layer, "o"),
-            s=30, alpha=0.8, edgecolors="darkred", linewidths=0.5,
+            c=color, marker=layer_markers.get(layer, "o"),
+            s=30, alpha=0.8, edgecolors=edge_color, linewidths=0.5,
             label=f"Selected ({layer}: {mask.sum()})",
         )
 
@@ -423,6 +427,8 @@ def plot_marginal_gain_heatmap(
     output_path: Path,
     voxel_size_mm: float = 195.0,
     step: int = 10,
+    invalid_centers: np.ndarray | None = None,
+    invalid_layers: np.ndarray | None = None,
 ) -> None:
     """Heatmap of marginal gain per voxel after `step` greedy selections.
 
@@ -453,6 +459,27 @@ def plot_marginal_gain_heatmap(
 
     area_lims: dict[str, float] = {}
     layer_to_ax = {a: ax for a, ax in area_axes.items()}
+
+    # Draw invalid voxels first (gray, underneath the main layer)
+    n_invalid = 0
+    if invalid_centers is not None and len(invalid_centers) > 0:
+        n_invalid = len(invalid_centers)
+        for (cx, cy, cz), layer in zip(invalid_centers, invalid_layers):
+            area = str(layer)
+            ax = layer_to_ax.get(area)
+            if ax is None:
+                continue
+            if area == "wall":
+                phi = np.arctan2(cy, cx)
+                ax.add_patch(mpatches.Rectangle(
+                    (phi - phi_half, cz - half), 2 * phi_half, 2 * half,
+                    facecolor=EXCLUDED_COLOR, edgecolor="none",
+                ))
+            else:
+                ax.add_patch(mpatches.Rectangle(
+                    (cx - half, cy - half), 2 * half, 2 * half,
+                    facecolor=EXCLUDED_COLOR, edgecolor="none",
+                ))
 
     for i, (cx, cy, cz) in enumerate(centers):
         area = str(layers[i])
@@ -528,19 +555,20 @@ def plot_marginal_gain_heatmap(
     cbar.set_label("Marginal gain (additional NCs covered)", fontsize=11)
 
     # Legend patches
+    n_avail = int(available.sum())
+    n_excl  = int((~available).sum()) - len(selected_set)
     legend_patches = [
         mpatches.Patch(facecolor=SELECTED_COLOR, label=f"Selected ({len(selected_set)})"),
-        mpatches.Patch(facecolor=EXCLUDED_COLOR, label="Spacing-excluded"),
+        mpatches.Patch(facecolor=EXCLUDED_COLOR,
+                       label=f"Spacing-excluded ({n_excl:,}) / invalid ({n_invalid:,})"),
     ]
     fig.legend(handles=legend_patches, loc="lower center", ncol=2,
                fontsize=10, framealpha=0.85, bbox_to_anchor=(0.5, 0.01))
 
-    n_avail = int(available.sum())
-    n_excl  = int((~available).sum()) - len(selected_set)
     fig.suptitle(
         f"Marginal Gain after {step} Greedy Selections\n"
         f"Available: {n_avail:,}  ·  Selected: {len(selected_set)}  ·  "
-        f"Excluded by spacing: {n_excl:,}",
+        f"Spacing-excluded: {n_excl:,}  ·  Invalid: {n_invalid:,}",
         fontsize=14, y=0.995,
     )
 
@@ -587,9 +615,9 @@ def plot_ssd_voxels_3d(
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
 
-    coll = Poly3DCollection(polys, alpha=0.65, linewidths=0)
+    coll = Poly3DCollection(polys, alpha=0.65, linewidths=0.3)
     coll.set_facecolor("cyan")
-    coll.set_edgecolor("none")
+    coll.set_edgecolor("black")
     ax.add_collection3d(coll)
 
     # Cylinder outline for orientation
