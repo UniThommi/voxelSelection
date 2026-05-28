@@ -62,6 +62,7 @@ from pmtopt.geometry import (
 from pmtopt.data_loading import (
     load_raw_sparse, binarize_from_raw,
     load_muon_data, build_muon_index, load_nc_muon_ids,
+    load_invalid_voxel_data,
 )
 from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
@@ -339,7 +340,18 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         skip_validity=args.no_spacing,
     )
 
-    # ---- Hit distribution heatmap (raw hits, all areas) ----
+    # ---- Load invalid voxel data for visualization ----
+    # Only needed when the validity filter is active (i.e. --no-spacing not set).
+    if not args.no_spacing:
+        _inv_centers, _inv_layers, _inv_hits = load_invalid_voxel_data(
+            args.hdf5_file, set(voxel_ids), verbose=verbose,
+        )
+    else:
+        _inv_centers = np.empty((0, 3), dtype=np.float64)
+        _inv_layers  = np.empty(0, dtype=object)
+        _inv_hits    = np.empty(0, dtype=np.float64)
+
+    # ---- Hit distribution heatmap (raw hits, all areas, incl. invalid) ----
     if verbose:
         print("\nGenerating hit distribution heatmap ...")
     _hits_per_voxel = np.bincount(
@@ -348,8 +360,15 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     _areas_hit_data = {}
     for _area in ["pit", "bot", "top", "wall"]:
         _mask = layers == _area
-        if _mask.any():
-            _areas_hit_data[_area] = (centers[_mask], _hits_per_voxel[_mask])
+        _mask_inv = _inv_layers == _area
+        _vc = centers[_mask] if _mask.any() else np.empty((0, 3))
+        _vh = _hits_per_voxel[_mask] if _mask.any() else np.empty(0)
+        _ic = _inv_centers[_mask_inv] if _mask_inv.any() else np.empty((0, 3))
+        _ih = _inv_hits[_mask_inv] if _mask_inv.any() else np.empty(0)
+        _ac = np.vstack([_vc, _ic]) if (len(_vc) or len(_ic)) else np.empty((0, 3))
+        _ah = np.concatenate([_vh, _ih]) if (len(_vh) or len(_ih)) else np.empty(0)
+        if len(_ac):
+            _areas_hit_data[_area] = (_ac, _ah)
     plot_hit_heatmap(
         _areas_hit_data,
         output_dir / f"{base_name}_hit_heatmap.png",
@@ -561,6 +580,8 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                     centers, layers,
                     output_path=_mg_path,
                     step=10,
+                    invalid_centers=_inv_centers,
+                    invalid_layers=_inv_layers,
                 )
 
         elif args.optimize == "muon-ge77":
