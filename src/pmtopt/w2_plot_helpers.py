@@ -56,12 +56,16 @@ _Z_WMAX     = float(Z_BASE + H_CYLINDER)
 # W2 decomposition helpers (pure numpy — no external deps)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_w2_z(centers: np.ndarray, ref: np.ndarray) -> float:
-    """1-D W2 between z-marginals via quantile integral (10001 grid points)."""
+def _compute_w2_z(centers: np.ndarray) -> float:
+    """1-D W2 between z-marginal of config and Uniform([_Z_WMIN, _Z_WMAX]).
+
+    Reference: 10001 quantile levels of Uniform([Z_BASE, Z_BASE + H_CYLINDER]).
+    Quantile function: Q_ref(q) = _Z_WMIN + (_Z_WMAX - _Z_WMIN) * q.
+    """
     q = np.linspace(0.0, 1.0, 10001)
-    return float(np.sqrt(np.mean(
-        (np.quantile(centers[:, 2], q) - np.quantile(ref[:, 2], q)) ** 2
-    )))
+    q_cfg = np.quantile(centers[:, 2], q)
+    q_ref = _Z_WMIN + (_Z_WMAX - _Z_WMIN) * q
+    return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
 def _compute_w2_phi(centers: np.ndarray) -> float:
@@ -867,7 +871,7 @@ def plot_all_w2_explanation(
 
     # Compute decomposed metrics for the best config
     try:
-        w2_z   = _compute_w2_z(best_centers, ref)
+        w2_z   = _compute_w2_z(best_centers)   # uniform z reference
         w2_phi = _compute_w2_phi(best_centers)
     except Exception:
         w2_z = w2_phi = None
