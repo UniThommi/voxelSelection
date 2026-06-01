@@ -3013,6 +3013,150 @@ def plot_w2_r_recall_corr_split(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plot 17a FoM variant — W2 vs FoM scatter grid (per M panel, all W2 variants)
+# ──────────────────────────────────────────────────────────────────────
+
+def _plot_17a_fom_w2_variant(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    w2_getter: "Callable",
+    w2_label: str,
+    fname: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """Scatter grid: W2 vs best-FoM-over-W for each M panel.
+
+    Analogous to _plot_17a_w2_variant (NC coverage) but uses the best FoM
+    optimised over all W thresholds at each fixed M.  Each panel shows one M.
+    """
+    w2_res = [r for r in results if w2_getter(r) is not None]
+    if len(w2_res) < 2:
+        print(f"  [SKIP] {fname}: fewer than 2 setups have {w2_label}.")
+        return
+
+    ordered = sorted(w2_res, key=lambda r: -(w2_getter(r) or 0.0))
+    if color_map is None:
+        cols_all  = _colors(len(ordered))
+        color_map = {r.label: cols_all[i] for i, r in enumerate(ordered)}
+    w2_arr    = np.array([w2_getter(r) for r in ordered])
+    labels    = [r.label for r in ordered]
+    color_pts = [color_map.get(r.label, "gray") for r in ordered]
+
+    ncols = min(len(M_values), 4)
+    nrows = (len(M_values) + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4.5, nrows * 4.2), squeeze=False)
+    fig.suptitle(
+        f"{w2_label} vs FoM (best over W)\n"
+        "(OLS fit · Pearson r · Spearman ρ per M)",
+        fontsize=13,
+    )
+
+    for pi, M in enumerate(M_values):
+        row, col = divmod(pi, ncols)
+        ax = axes[row][col]
+        fom_arr: list[float] = []
+        for r in ordered:
+            _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+            best = np.nan
+            for W in W_values:
+                cm = r.muon["confusion"].get((M, W))
+                if cm is None:
+                    continue
+                v = calc_fom_confusion(
+                    cm["TP"], cm["FP"], cm["FN"], _tp,
+                    tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+                    fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
+                )
+                if np.isfinite(v) and (np.isnan(best) or v > best):
+                    best = v
+            fom_arr.append(best)
+        y_arr = np.array(fom_arr)
+        _scatter_corr_panel(
+            ax, w2_arr, y_arr, color_pts, labels,
+            x_label=w2_label,
+            y_label=f"Best FoM (M={M})",
+            title=f"M = {M}",
+        )
+
+    for pi in range(len(M_values), nrows * ncols):
+        row, col = divmod(pi, ncols)
+        axes[row][col].set_visible(False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_w2_fom_scatter_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """17a_fom — W2_global vs FoM (best over W) scatter grid (one panel per M)."""
+    _plot_17a_fom_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_global, "W2_global (mm)", "17a_fom_scatter.png",
+        total_primaries=total_primaries, color_map=color_map,
+    )
+
+
+def plot_w2_z_fom_scatter(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """17a_z_fom — W2_z vs FoM (best over W) scatter grid (one panel per M)."""
+    _plot_17a_fom_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_z, "W2_z (mm)", "17a_z_fom_scatter.png",
+        total_primaries=total_primaries, color_map=color_map,
+    )
+
+
+def plot_w2_phi_fom_scatter(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """17a_phi_fom — W2_phi vs FoM (best over W) scatter grid (one panel per M)."""
+    _plot_17a_fom_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_phi, "W2_φ (rad)", "17a_phi_fom_scatter.png",
+        total_primaries=total_primaries, color_map=color_map,
+    )
+
+
+def plot_w2_r_fom_scatter(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """17a_r_fom — W2_r vs FoM (best over W) scatter grid (one panel per M)."""
+    _plot_17a_fom_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_r, "W2_r (mm)", "17a_r_fom_scatter.png",
+        total_primaries=total_primaries, color_map=color_map,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Plots 17d_z / 17d_phi / 17d_r — NC coverage correlation for W2 variants
 # Plots 17e_z / 17e_phi / 17e_r — 4-curve recall correlation for W2 variants
 # ──────────────────────────────────────────────────────────────────────
@@ -3860,12 +4004,13 @@ def _draw_advisor_plot(
     sig_surv_min: float = 0.0,
     heatmap_cmap: str = "YlOrBr",
     heatmap_alpha: float = 0.30,
+    label_overrides: "dict[str, str] | None" = None,
 ) -> "matplotlib.cm.ScalarMappable | None":
     """Draw all advisor-comparison curves onto *ax*.
 
     Four curve types, each with inner (stat) and outer (stat⊕sys) bands:
-      1. Advisor result
-      2. Statistical optimum — advisor (from stat-limit CSV, ``stat_limit_rows`` param)
+      1. L1000 CDR Baseline (advisor CSV data)
+      2. L1000 CDR Baseline — stat. limit (from stat-limit CSV, ``stat_limit_rows`` param)
       3. Each setup in results_to_show at M_fixed
       4. NC-truth statistical limit for each setup (from ``r.stat_limit_rows``,
          pre-computed by ``_compute_nc_truth_stat_limit`` in main())
@@ -3874,6 +4019,7 @@ def _draw_advisor_plot(
           ``r.stat_limit_rows`` (per-setup field) = NC-truth stat limit (curve 4).
 
     ``sig_surv_min`` restricts all curves to signal survival >= sig_surv_min.
+    ``label_overrides`` maps r.label.lower() → display label for user setups.
     Returns the pcolormesh artist for the FoM background colorbar.
     """
     W_lo = float(W_range[0])  if W_range else -np.inf
@@ -3910,37 +4056,39 @@ def _draw_advisor_plot(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
 
-    # ── 1. Advisor result ─────────────────────────────────────────────
+    # ── 1. L1000 CDR Baseline ─────────────────────────────────────────
     if adv_filt:
         xs, ys, si, co = _rows_to_band_arrays(adv_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
-                               color="black", label="Advisor result",
+                               color="black", label="L1000 CDR Baseline",
                                linestyle="-", linewidth=2.0, zorder=5,
                                point_labels=_w_labels_sorted(adv_filt))
 
-    # ── 2. Statistical optimum — advisor ──────────────────────────────
+    # ── 2. L1000 CDR Baseline — stat. limit ───────────────────────────
     if sl_filt:
         xs, ys, si, co = _rows_to_band_arrays(sl_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
-                               color="dimgray", label="Stat. optimum (advisor)",
+                               color="dimgray", label="L1000 CDR Baseline — stat. limit",
                                linestyle="--", linewidth=1.8, zorder=4,
                                point_labels=_w_labels_sorted(sl_filt))
 
     # ── 3 + 4. User setups and their statistical limits ───────────────
+    _overrides = label_overrides or {}
     for r, sr, slr in zip(results_to_show, all_setup_rows, all_sl_rows):
         c = color_map.get(r.label, "gray")
+        disp_label = _overrides.get(r.label.lower(), r.label)
 
         if sr:
             xs, ys, si, co = _rows_to_band_arrays(sr)
             _plot_curve_with_bands(ax, xs, ys, si, co,
-                                   color=c, label=f"{r.label}",
+                                   color=c, label=disp_label,
                                    linestyle="-", linewidth=1.5, zorder=3,
                                    point_labels=_w_labels_sorted(sr))
 
         if slr:
             xs, ys, si, co = _rows_to_band_arrays(slr)
             _plot_curve_with_bands(ax, xs, ys, si, co,
-                                   color=c, label=f"{r.label} — stat. limit",
+                                   color=c, label=f"{disp_label} — stat. limit",
                                    linestyle=":", linewidth=1.2, zorder=3,
                                    alpha_inner=0.15, alpha_outer=0.07,
                                    point_labels=_w_labels_sorted(slr))
@@ -3967,13 +4115,17 @@ def plot_ge_surv_vs_livetime_advisor(
     color_map: dict[str, str] | None = None,
     M_fixed: int = 6,
     statistical_limit_csv: str | None = None,
+    baseline_display_label: str | None = None,
 ) -> None:
     """Plot 25b: Ge-77 survival vs signal livetime at M_fixed, all setups.
 
-    Overlays advisor result, advisor statistical optimum (from stat-limit CSV),
+    Overlays L1000 CDR Baseline, its stat. limit (from stat-limit CSV),
     all user setups, and the statistical limit for each user setup.
     Every curve carries an inner (statistical) and outer (stat ⊕ 35 % systematic)
     uncertainty band. All W values are included.
+
+    ``baseline_display_label`` overrides the display name of the setup identified
+    as the baseline (label containing 'baseline', case-insensitive).
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -3984,11 +4136,17 @@ def plot_ge_surv_vs_livetime_advisor(
 
     W_range = W_values
 
+    _label_overrides: dict[str, str] | None = None
+    if baseline_display_label:
+        _bl = _find_baseline_result(results)
+        _label_overrides = {_bl.label.lower(): baseline_display_label}
+
     fig, ax = plt.subplots(figsize=(12, 9))
     pcm = _draw_advisor_plot(
         ax, results, W_range, M_fixed, total_primaries,
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
+        label_overrides=_label_overrides,
     )
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
@@ -4022,12 +4180,15 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     color_map: dict[str, str] | None = None,
     M_fixed: int = 6,
     statistical_limit_csv: str | None = None,
+    baseline_display_label: str | None = None,
 ) -> None:
     """Plot 25b_baseline: same as plot 25b but shows only the baseline setup.
 
     The baseline setup is identified by a case-insensitive 'baseline' match
     in the setup label.  Falls back to the first setup with a warning if none
     is found.
+
+    ``baseline_display_label`` overrides the baseline's legend label.
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -4039,12 +4200,17 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     W_range = W_values
 
     baseline = _find_baseline_result(results)
+    _bl_disp = baseline_display_label if baseline_display_label else baseline.label
+    _label_overrides: dict[str, str] | None = None
+    if baseline_display_label:
+        _label_overrides = {baseline.label.lower(): baseline_display_label}
 
     fig, ax = plt.subplots(figsize=(12, 9))
     pcm = _draw_advisor_plot(
         ax, [baseline], W_range, M_fixed, total_primaries,
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
+        label_overrides=_label_overrides,
     )
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
@@ -4052,7 +4218,7 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
     ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
     ax.set_title(
-        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — Baseline only\n"
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — {_bl_disp} only\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
         f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
         fontsize=12,
@@ -4079,6 +4245,7 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     total_primaries: int = 0,
     color_map: dict[str, str] | None = None,
     M_fixed: int = 6,
+    baseline_display_label: str | None = None,
 ) -> None:
     """Plot 25: baseline setup curve + its NC-truth statistical limit.
 
@@ -4089,6 +4256,8 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
 
     The baseline is identified by a case-insensitive 'baseline' match in the
     setup label; falls back to the first setup with a warning.
+
+    ``baseline_display_label`` overrides the baseline's legend label if given.
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -4107,6 +4276,8 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
 
     setup_filt = _collect(setup_rows)
     sl_filt    = _collect(sl_rows)
+
+    disp_label = baseline_display_label if baseline_display_label else baseline.label
 
     # FoM background heatmap
     all_xs: list[float] = [r["sig_surv"]   for r in setup_filt + sl_filt]
@@ -4130,14 +4301,14 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     if setup_filt:
         xs, ys, si, co = _rows_to_band_arrays(setup_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
-                               color=c, label=baseline.label,
+                               color=c, label=disp_label,
                                linestyle="-", linewidth=2.0, zorder=4,
                                point_labels=_w_labels(setup_filt))
 
     if sl_filt:
         xs, ys, si, co = _rows_to_band_arrays(sl_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
-                               color=c, label=f"{baseline.label} — NC truth stat. limit",
+                               color=c, label=f"{disp_label} — NC truth stat. limit",
                                linestyle=":", linewidth=1.5, zorder=3,
                                alpha_inner=0.15, alpha_outer=0.07,
                                point_labels=_w_labels(sl_filt))
@@ -4155,7 +4326,7 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
     ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
     ax.set_title(
-        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — Baseline + NC-truth limit\n"
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — {disp_label} + NC-truth limit\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
         f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
         fontsize=12,
@@ -4463,8 +4634,8 @@ def parse_args() -> argparse.Namespace:
                         help="Min photon hits per PMT per NC (default: 1).")
     parser.add_argument("--M-max", type=int, default=15,
                         help="Max M for sweep (default: 15).")
-    parser.add_argument("--W-max", type=int, default=20,
-                        help="Max W for sweep (default: 20).")
+    parser.add_argument("--W-max", type=int, default=30,
+                        help="Max W for sweep (default: 30).")
     parser.add_argument("--M-default", type=int, default=1,
                         help="Fixed M for confusion/W plots (default: 1).")
     parser.add_argument("--W-default", type=int, default=1,
@@ -4496,6 +4667,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to statistical-limit CSV for plot 25b overlay "
             "(format per line: 'x cut <val>, ge_77_surv: <val>, sig_surv: <val>')."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-display-label",
+        default="Homogeneous PMT Distribution",
+        metavar="LABEL",
+        help=(
+            "Display label for the baseline setup in Plot 25/25b comparison plots "
+            "(default: 'Homogeneous PMT Distribution')."
         ),
     )
     return parser.parse_args()
@@ -4720,6 +4900,16 @@ def main() -> None:
     plot_w2_nc_coverage_scatter(results, M_values, args.output_dir,
                                 color_map=color_map)
 
+    # Plot 17a_fom — W2 vs FoM scatter grid (one panel per M, all W2 variants)
+    plot_w2_fom_scatter_all_m(results, M_values, W_values, args.output_dir,
+                              total_primaries=_total_primaries, color_map=color_map)
+    plot_w2_z_fom_scatter(results, M_values, W_values, args.output_dir,
+                          total_primaries=_total_primaries, color_map=color_map)
+    plot_w2_phi_fom_scatter(results, M_values, W_values, args.output_dir,
+                            total_primaries=_total_primaries, color_map=color_map)
+    plot_w2_r_fom_scatter(results, M_values, W_values, args.output_dir,
+                          total_primaries=_total_primaries, color_map=color_map)
+
     # Plot 17b — FoM correlation for all W2 variants (all M)
     plot_w2_fom_corr_mge(results, M_values, W_values, args.output_dir,
                          min_m=1, total_primaries=_total_primaries)
@@ -4780,6 +4970,7 @@ def main() -> None:
         total_primaries=_total_primaries,
         color_map=color_map,
         M_fixed=args.advisor_M,
+        baseline_display_label=args.baseline_display_label,
     )
     if args.advisor_csv:
         plot_ge_surv_vs_livetime_advisor(
@@ -4789,6 +4980,7 @@ def main() -> None:
             color_map=color_map,
             M_fixed=args.advisor_M,
             statistical_limit_csv=args.statistical_limit_csv,
+            baseline_display_label=args.baseline_display_label,
         )
         plot_ge_surv_vs_livetime_advisor_baseline(
             results, W_values, args.output_dir,
@@ -4797,6 +4989,7 @@ def main() -> None:
             color_map=color_map,
             M_fixed=args.advisor_M,
             statistical_limit_csv=args.statistical_limit_csv,
+            baseline_display_label=args.baseline_display_label,
         )
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=1)
