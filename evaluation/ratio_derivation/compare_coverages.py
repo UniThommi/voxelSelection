@@ -135,6 +135,9 @@ from pmtopt.geometry import (
     MUSUN_RATE,
     MUONS_PER_RUN_DIR,
     VETO_DURATION_H,
+    R_PIT,
+    R_ZYL_BOT,
+    R_ZYL_TOP,
     R_ZYLINDER,
     Z_BASE_GLOBAL,
 )
@@ -145,9 +148,9 @@ from pmtopt.geometry import (
 # top ring at top).  Z_BASE_GLOBAL = Z_ORIGIN + Z_OFFSET = 20 - 5000 = -4980 mm.
 _W2_Z_MIN: float = float(Z_BASE_GLOBAL)          # -4980 mm
 _W2_Z_MAX: float = float(Z_BASE_GLOBAL + 8900)   #  3920 mm
-_W2_R_MAX: float = float(R_ZYLINDER)             #  4300 mm (outer radius)
 # Number of quantile levels shared by W2_z and W2_r (same count → comparable).
 _W2_NQUANT: int = 10_001
+_W2_R_MAX: float = float(R_ZYLINDER)  # 4300 mm
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -205,53 +208,30 @@ def _compute_w2_z(centers: np.ndarray) -> float:
 
 
 def _compute_w2_phi(centers: np.ndarray) -> float:
-    """Circular W2 between phi-marginal of config and Uniform([0, 2π)).
+    """1-D W2 between phi-marginal of config and Uniform([0, 2π)).
 
-    Reference: N = len(centers) equally-spaced midpoints in [0, 2π),
-    i.e. q_uni[k] = 2π(k + 0.5)/N.  These are the exact quantiles of
-    Uniform([0, 2π)), so the reference IS truly uniform.
-
-    Boundary note: midpoints at (k + 0.5)/N avoid q=0 and q=1, so there
-    is no duplication of the φ=0 / φ=2π boundary point.
-
-    Optimal rotation is found via exhaustive cyclic-shift search over all N
-    cyclic shifts.  The extended-array trick handles the 2π wraparound
-    exactly.  O(N²) — fast for N ≤ 500.
+    Reference: Q_ref(q) = 2π × q (fixed linear-uniform, no rotation search).
+    W2_phi = 0 only if PMT azimuths are perfectly uniformly spaced starting at 0.
     """
-    phi   = (np.arctan2(centers[:, 1], centers[:, 0]) + 2 * np.pi) % (2 * np.pi)
-    N     = len(phi)
-    phi_s = np.sort(phi)
-    # Extend by one period so every cyclic shift stays contiguous.
-    phi_ext = np.concatenate([phi_s, phi_s + 2 * np.pi])
-    # Uniform reference: N midpoints in [0, 2π) — no boundary duplication.
-    q_uni = 2 * np.pi * (np.arange(N) + 0.5) / N
-    costs = np.array([np.mean((phi_ext[k:k + N] - q_uni) ** 2) for k in range(N)])
-    return float(np.sqrt(costs.min()))
+    phi = (np.arctan2(centers[:, 1], centers[:, 0]) + 2 * np.pi) % (2 * np.pi)
+    q = np.linspace(0.0, 1.0, _W2_NQUANT)
+    q_cfg = np.quantile(phi, q)
+    q_ref = 2.0 * np.pi * q
+    return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
 def _compute_w2_r(centers: np.ndarray) -> float:
-    """1-D W2 between radial marginal and area-uniform distribution on [0, R_ZYLINDER].
+    """1-D W2 between radial marginal and Uniform([0, R_ZYLINDER]).
 
-    Reference: _W2_NQUANT quantile levels of the area-uniform distribution,
-    whose CDF is F(r) = (r / R_ZYLINDER)² and quantile function is
-    Q_ref(q) = R_ZYLINDER * sqrt(q).
-
-    Physical justification for area-uniform over linear-uniform:
-    In 2-D polar coordinates the natural "flat" measure on a disk is area-
-    proportional (density ∝ r), not constant in r.  Choosing the area-uniform
-    reference means W2_r measures how far the radial PMT distribution deviates
-    from what one would expect if the full detector footprint (a disk of radius
-    R_ZYLINDER) were covered uniformly in area.
-
-    This replaces the old approach that used the r-marginal of the 3-D
-    surface-area reference, which had a spike at r = R_ZYLINDER (wall PMTs)
-    plus area-weighted rings from the flat surfaces — not a controlled
-    reference distribution.
+    Reference: Q_ref(q) = R_ZYLINDER × q (linear-uniform on [0, R_ZYLINDER]).
+    W2_r = 0 only if PMTs are uniformly spaced in r from 0 to R_ZYLINDER.
+    The homogeneous (surface-proportional) setup concentrates 69 % at r = R_ZYLINDER
+    and therefore has W2_r >> 0.
     """
     r_cfg = np.sqrt(centers[:, 0] ** 2 + centers[:, 1] ** 2)
     q = np.linspace(0.0, 1.0, _W2_NQUANT)
     q_cfg = np.quantile(r_cfg, q)
-    q_ref = _W2_R_MAX * np.sqrt(q)   # area-uniform quantile function
+    q_ref = _W2_R_MAX * q
     return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
@@ -280,6 +260,15 @@ def _try_compute_w2(config_json: str) -> dict[str, Optional[float]]:
         if len(voxel_dicts) < 2:
             return empty
         centers = np.array([v["center"] for v in voxel_dicts], dtype=float)
+        r_cfg = np.sqrt(centers[:, 0] ** 2 + centers[:, 1] ** 2)
+        # Diagnostic: show r statistics to verify input to W2_r
+        print(
+            f"  [W2_r diag] N={len(r_cfg)}  "
+            f"r: min={r_cfg.min():.1f}  median={np.median(r_cfg):.1f}  "
+            f"max={r_cfg.max():.1f}  "
+            f"frac@r>{R_ZYLINDER-200:.0f}={np.mean(r_cfg > R_ZYLINDER-200):.3f}  "
+            f"center[0] range=[{centers[:,0].min():.1f}, {centers[:,0].max():.1f}]"
+        )
         ref = get_w2_ref()
         w2_global = float(compute_wasserstein_homogeneity(centers, reference=ref)["w2"])
         w2_z      = _compute_w2_z(centers)    # uniform z reference
@@ -308,26 +297,20 @@ def plot_w2_uniform_ref_validation(output_dir: str) -> None:
     n = _W2_NQUANT
     q = np.linspace(0.0, 1.0, n)
 
-    # Reference quantile arrays
-    ref_z   = _W2_Z_MIN + (_W2_Z_MAX - _W2_Z_MIN) * q
-    ref_r   = _W2_R_MAX * np.sqrt(q)
-    # Phi uses midpoints (same size as a typical 300-PMT config is incidental;
-    # here we show 1000 midpoints for visual clarity)
-    n_phi   = 1000
-    ref_phi = 2 * np.pi * (np.arange(n_phi) + 0.5) / n_phi
+    # Reference quantile arrays (all three now linear-uniform on their range)
+    ref_z   = _W2_Z_MIN + (_W2_Z_MAX - _W2_Z_MIN) * q   # Uniform z
+    ref_r   = _W2_R_MAX * q                               # Uniform r (linear)
+    ref_phi = 2.0 * np.pi * q                             # Uniform phi
 
     # ── Diagnostics ──────────────────────────────────────────────────
     print("  [W2 Ref Validation]")
-    print(f"    N_ref (z, r): {n}  |  N_ref (phi midpoints shown): {n_phi}")
-    assert ref_phi[0] > 0.0 and ref_phi[-1] < 2 * np.pi, (
-        "Phi boundary duplication detected — first/last midpoints must be "
-        "strictly inside (0, 2π)."
-    )
-    print(f"    phi ∈ [{ref_phi[0]:.6f}, {ref_phi[-1]:.6f}] rad  [no boundary dup ✓]")
+    print(f"    N_ref (z, r, phi): {n}")
     print(f"    z   ∈ [{ref_z[0]:.1f}, {ref_z[-1]:.1f}] mm  "
           f"(span = {ref_z[-1] - ref_z[0]:.0f} mm) ✓")
     print(f"    r   ∈ [{ref_r[0]:.4f}, {ref_r[-1]:.1f}] mm  "
           f"(max = R_ZYLINDER = {_W2_R_MAX:.0f} mm) ✓")
+    print(f"    phi ∈ [{ref_phi[0]:.6f}, {ref_phi[-1]:.6f}] rad  "
+          f"(span = {ref_phi[-1]:.4f} ≈ 2π = {2*np.pi:.4f}) ✓")
 
     # ── Plots ─────────────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
@@ -347,65 +330,39 @@ def plot_w2_uniform_ref_validation(output_dir: str) -> None:
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel 2 — W2_phi: histogram of uniform phi reference midpoints
+    # Panel 2 — W2_phi: CDF of linear-uniform phi reference
     ax = axes[1]
-    ax.bar(
-        np.degrees(ref_phi), np.ones(n_phi),
-        width=360.0 / n_phi * 0.9, color="#2ca02c", alpha=0.7,
-        label=f"N={n_phi} midpoints",
-    )
-    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Expected height")
+    ax.plot(np.degrees(ref_phi), q, color="#2ca02c", linewidth=1.8, label="Uniform ref CDF")
+    ax.plot([0.0, 360.0], [0.0, 1.0], "k--", linewidth=1.0, label="Expected (linear)")
     ax.set_xlabel("φ  (degrees)", fontsize=11)
-    ax.set_ylabel("Bin height (should be 1)", fontsize=11)
+    ax.set_ylabel("CDF", fontsize=11)
     ax.set_title(
-        f"W2_phi reference\nUniform([0, 2π)) — midpoint formula\n"
-        f"N = config size (shown: {n_phi})",
+        f"W2_phi reference\nUniform([0, 2π))  — fixed (no rotation search)\n"
+        f"N_ref = {n:,}  |  Q(q) = 2π·q",
         fontsize=11,
     )
     ax.set_xlim(0, 360)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
-    # Verify no duplication at boundaries
-    ax.annotate(
-        f"φ_first = {np.degrees(ref_phi[0]):.4f}°\n"
-        f"φ_last  = {np.degrees(ref_phi[-1]):.4f}°\n"
-        f"(no 0° / 360° boundary dup)",
-        xy=(0.02, 0.97), xycoords="axes fraction",
-        fontsize=7, va="top", ha="left",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                  edgecolor="gray", alpha=0.85),
-    )
 
-    # Panel 3 — W2_r: CDF of area-uniform r reference
+    # Panel 3 — W2_r: CDF of linear-uniform r reference
     ax = axes[2]
-    ax.plot(ref_r, q, color="#d62728", linewidth=1.8, label="Area-uniform ref CDF")
-    # Expected CDF: F(r) = (r / R_max)²
-    r_line = np.linspace(0, _W2_R_MAX, 500)
-    ax.plot(r_line, (r_line / _W2_R_MAX) ** 2, "k--", linewidth=1.0,
-            label=r"Expected: $F(r)=(r/R_{max})^2$")
+    ax.plot(ref_r, q, color="#d62728", linewidth=1.8, label="Linear-uniform ref CDF")
+    ax.plot([0.0, _W2_R_MAX], [0.0, 1.0], "k--", linewidth=1.0,
+            label=r"Expected: $F(r)=r/R_{max}$")
     ax.set_xlabel("r  (mm)", fontsize=11)
     ax.set_ylabel("CDF", fontsize=11)
     ax.set_title(
-        f"W2_r reference\nArea-uniform on [0, {_W2_R_MAX:.0f} mm]\n"
-        f"N_ref = {n:,}  |  Q(q) = R_max·√q",
+        f"W2_r reference\nUniform([0, {_W2_R_MAX:.0f} mm])\n"
+        f"N_ref = {n:,}  |  Q(q) = R_max·q",
         fontsize=11,
     )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
-    # Annotate r range
-    ax.annotate(
-        f"r_first = {ref_r[0]:.4f} mm\n"
-        f"r_last  = {ref_r[-1]:.1f} mm (= R_ZYLINDER)",
-        xy=(0.05, 0.92), xycoords="axes fraction",
-        fontsize=8, va="top", ha="left",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                  edgecolor="gray", alpha=0.85),
-    )
 
     fig.suptitle(
         "W2 Uniform Reference Validation\n"
-        "W2_z and W2_r use N_ref = {:,} deterministic quantile levels; "
-        "W2_phi uses N = config size midpoints".format(n),
+        "All three metrics use Uniform references with N_ref = {:,} quantile levels".format(n),
         fontsize=12,
     )
     fig.tight_layout()

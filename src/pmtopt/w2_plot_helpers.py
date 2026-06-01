@@ -69,14 +69,15 @@ def _compute_w2_z(centers: np.ndarray) -> float:
 
 
 def _compute_w2_phi(centers: np.ndarray) -> float:
-    """Circular W2 vs Uniform([0,2π)) via optimal-rotation search over N cyclic shifts."""
-    phi   = (np.arctan2(centers[:, 1], centers[:, 0]) + 2 * np.pi) % (2 * np.pi)
-    N     = len(phi)
-    phi_s = np.sort(phi)
-    phi_ext = np.concatenate([phi_s, phi_s + 2 * np.pi])
-    q_uni = 2 * np.pi * (np.arange(N) + 0.5) / N
-    costs = np.array([np.mean((phi_ext[k:k + N] - q_uni) ** 2) for k in range(N)])
-    return float(np.sqrt(costs.min()))
+    """1-D W2 between phi-marginal of config and Uniform([0, 2π)).
+
+    Reference: Q_ref(q) = 2π × q (fixed linear-uniform, no rotation search).
+    """
+    phi = (np.arctan2(centers[:, 1], centers[:, 0]) + 2 * np.pi) % (2 * np.pi)
+    q = np.linspace(0.0, 1.0, 10001)
+    q_cfg = np.quantile(phi, q)
+    q_ref = 2.0 * np.pi * q
+    return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
