@@ -135,7 +135,19 @@ from pmtopt.geometry import (
     MUSUN_RATE,
     MUONS_PER_RUN_DIR,
     VETO_DURATION_H,
+    R_ZYLINDER,
+    Z_BASE_GLOBAL,
 )
+
+# ── W2 uniform-reference geometry constants ───────────────────────────
+# Z range: full cylinder height [Z_BASE, Z_BASE + 8900 mm].
+# 8900 mm = H_CYLINDER in homogeneous.py (full wall span, pit at bottom,
+# top ring at top).  Z_BASE_GLOBAL = Z_ORIGIN + Z_OFFSET = 20 - 5000 = -4980 mm.
+_W2_Z_MIN: float = float(Z_BASE_GLOBAL)          # -4980 mm
+_W2_Z_MAX: float = float(Z_BASE_GLOBAL + 8900)   #  3920 mm
+_W2_R_MAX: float = float(R_ZYLINDER)             #  4300 mm (outer radius)
+# Number of quantile levels shared by W2_z and W2_r (same count → comparable).
+_W2_NQUANT: int = 10_001
 
 # ──────────────────────────────────────────────────────────────────────
 # Data containers
@@ -175,45 +187,82 @@ def _count_areas_from_json(config_json: str) -> dict[str, int]:
         return {}
 
 
-def _compute_w2_z(centers: np.ndarray, ref: np.ndarray) -> float:
-    """1-D Wasserstein-2 between z-marginals of config and reference (quantile method)."""
-    q = np.linspace(0.0, 1.0, 10001)
-    return float(np.sqrt(np.mean(
-        (np.quantile(centers[:, 2], q) - np.quantile(ref[:, 2], q)) ** 2
-    )))
+def _compute_w2_z(centers: np.ndarray) -> float:
+    """1-D W2 between z-marginal of config and Uniform([_W2_Z_MIN, _W2_Z_MAX]).
+
+    Reference: _W2_NQUANT equally-spaced quantile levels of a uniform distribution
+    over the full cylinder height [Z_BASE, Z_BASE + 8900 mm].
+    The quantile function is Q_ref(q) = Z_MIN + (Z_MAX - Z_MIN) * q.
+
+    This replaces the old approach that used the z-marginal of the 3-D
+    surface-area reference, which was NOT uniform in z (it had spikes at the
+    flat-surface z-values plus a uniform band from the wall).
+    """
+    q = np.linspace(0.0, 1.0, _W2_NQUANT)
+    q_cfg = np.quantile(centers[:, 2], q)
+    q_ref = _W2_Z_MIN + (_W2_Z_MAX - _W2_Z_MIN) * q   # uniform quantile function
+    return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
 def _compute_w2_phi(centers: np.ndarray) -> float:
-    """Circular Wasserstein-2 of the azimuthal distribution vs Uniform([0, 2π)).
+    """Circular W2 between phi-marginal of config and Uniform([0, 2π)).
 
-    Uses an optimal-rotation search: minimise the 1-D linear W2 over all N
-    cyclic shifts of the sorted config phi-array against a uniform reference.
-    The extended-array trick handles the 2π wraparound correctly.
-    O(N²) — fast for N ≤ 500.
+    Reference: N = len(centers) equally-spaced midpoints in [0, 2π),
+    i.e. q_uni[k] = 2π(k + 0.5)/N.  These are the exact quantiles of
+    Uniform([0, 2π)), so the reference IS truly uniform.
+
+    Boundary note: midpoints at (k + 0.5)/N avoid q=0 and q=1, so there
+    is no duplication of the φ=0 / φ=2π boundary point.
+
+    Optimal rotation is found via exhaustive cyclic-shift search over all N
+    cyclic shifts.  The extended-array trick handles the 2π wraparound
+    exactly.  O(N²) — fast for N ≤ 500.
     """
     phi   = (np.arctan2(centers[:, 1], centers[:, 0]) + 2 * np.pi) % (2 * np.pi)
     N     = len(phi)
     phi_s = np.sort(phi)
     # Extend by one period so every cyclic shift stays contiguous.
     phi_ext = np.concatenate([phi_s, phi_s + 2 * np.pi])
-    # Uniform reference quantile midpoints in [0, 2π).
+    # Uniform reference: N midpoints in [0, 2π) — no boundary duplication.
     q_uni = 2 * np.pi * (np.arange(N) + 0.5) / N
     costs = np.array([np.mean((phi_ext[k:k + N] - q_uni) ** 2) for k in range(N)])
     return float(np.sqrt(costs.min()))
 
 
-def _compute_w2_r(centers: np.ndarray, ref: np.ndarray) -> float:
-    """1-D Wasserstein-2 between radial marginals r=sqrt(x²+y²) vs reference."""
+def _compute_w2_r(centers: np.ndarray) -> float:
+    """1-D W2 between radial marginal and area-uniform distribution on [0, R_ZYLINDER].
+
+    Reference: _W2_NQUANT quantile levels of the area-uniform distribution,
+    whose CDF is F(r) = (r / R_ZYLINDER)² and quantile function is
+    Q_ref(q) = R_ZYLINDER * sqrt(q).
+
+    Physical justification for area-uniform over linear-uniform:
+    In 2-D polar coordinates the natural "flat" measure on a disk is area-
+    proportional (density ∝ r), not constant in r.  Choosing the area-uniform
+    reference means W2_r measures how far the radial PMT distribution deviates
+    from what one would expect if the full detector footprint (a disk of radius
+    R_ZYLINDER) were covered uniformly in area.
+
+    This replaces the old approach that used the r-marginal of the 3-D
+    surface-area reference, which had a spike at r = R_ZYLINDER (wall PMTs)
+    plus area-weighted rings from the flat surfaces — not a controlled
+    reference distribution.
+    """
     r_cfg = np.sqrt(centers[:, 0] ** 2 + centers[:, 1] ** 2)
-    r_ref = np.sqrt(ref[:, 0] ** 2 + ref[:, 1] ** 2)
-    q = np.linspace(0.0, 1.0, 10001)
-    return float(np.sqrt(np.mean(
-        (np.quantile(r_cfg, q) - np.quantile(r_ref, q)) ** 2
-    )))
+    q = np.linspace(0.0, 1.0, _W2_NQUANT)
+    q_cfg = np.quantile(r_cfg, q)
+    q_ref = _W2_R_MAX * np.sqrt(q)   # area-uniform quantile function
+    return float(np.sqrt(np.mean((q_cfg - q_ref) ** 2)))
 
 
 def _try_compute_w2(config_json: str) -> dict[str, Optional[float]]:
-    """Compute W2_global, W2_z, W2_phi, and W2_r from a voxel JSON file."""
+    """Compute W2_global, W2_z, W2_phi, and W2_r from a voxel JSON file.
+
+    W2_global — 3-D EMD vs surface-area-proportional reference (unchanged).
+    W2_z      — 1-D quantile W2 vs Uniform([Z_BASE, Z_BASE+8900 mm]).
+    W2_phi    — circular W2 vs Uniform([0, 2π)) via cyclic-shift search.
+    W2_r      — 1-D quantile W2 vs area-uniform distribution on [0, R_ZYLINDER].
+    """
     empty: dict[str, Optional[float]] = {"w2_global": None, "w2_z": None, "w2_phi": None, "w2_r": None}
     try:
         from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
@@ -233,13 +282,137 @@ def _try_compute_w2(config_json: str) -> dict[str, Optional[float]]:
         centers = np.array([v["center"] for v in voxel_dicts], dtype=float)
         ref = get_w2_ref()
         w2_global = float(compute_wasserstein_homogeneity(centers, reference=ref)["w2"])
-        w2_z      = _compute_w2_z(centers, ref)
-        w2_phi    = _compute_w2_phi(centers)
-        w2_r      = _compute_w2_r(centers, ref)
+        w2_z      = _compute_w2_z(centers)    # uniform z reference
+        w2_phi    = _compute_w2_phi(centers)   # uniform phi reference (unchanged)
+        w2_r      = _compute_w2_r(centers)    # area-uniform r reference
         return {"w2_global": w2_global, "w2_z": w2_z, "w2_phi": w2_phi, "w2_r": w2_r}
     except Exception as exc:
         print(f"  [WARN] W2 computation failed for {config_json!r}: {exc}")
         return empty
+
+
+def plot_w2_uniform_ref_validation(output_dir: str) -> None:
+    """Generate validation plots for the W2 uniform reference distributions.
+
+    Produces ``00_w2_ref_validation.png`` with three panels:
+
+    - W2_z: CDF of the uniform z reference vs the expected straight line.
+    - W2_phi: histogram of the N-midpoint uniform phi reference (should be flat).
+    - W2_r: CDF of the area-uniform r reference vs expected sqrt curve.
+
+    Also prints a short diagnostics table confirming:
+    - N_ref is identical for z and r (_W2_NQUANT).
+    - Phi midpoints lie strictly inside (0, 2π) — no boundary duplication.
+    - z and r spans match the detector geometry.
+    """
+    n = _W2_NQUANT
+    q = np.linspace(0.0, 1.0, n)
+
+    # Reference quantile arrays
+    ref_z   = _W2_Z_MIN + (_W2_Z_MAX - _W2_Z_MIN) * q
+    ref_r   = _W2_R_MAX * np.sqrt(q)
+    # Phi uses midpoints (same size as a typical 300-PMT config is incidental;
+    # here we show 1000 midpoints for visual clarity)
+    n_phi   = 1000
+    ref_phi = 2 * np.pi * (np.arange(n_phi) + 0.5) / n_phi
+
+    # ── Diagnostics ──────────────────────────────────────────────────
+    print("  [W2 Ref Validation]")
+    print(f"    N_ref (z, r): {n}  |  N_ref (phi midpoints shown): {n_phi}")
+    assert ref_phi[0] > 0.0 and ref_phi[-1] < 2 * np.pi, (
+        "Phi boundary duplication detected — first/last midpoints must be "
+        "strictly inside (0, 2π)."
+    )
+    print(f"    phi ∈ [{ref_phi[0]:.6f}, {ref_phi[-1]:.6f}] rad  [no boundary dup ✓]")
+    print(f"    z   ∈ [{ref_z[0]:.1f}, {ref_z[-1]:.1f}] mm  "
+          f"(span = {ref_z[-1] - ref_z[0]:.0f} mm) ✓")
+    print(f"    r   ∈ [{ref_r[0]:.4f}, {ref_r[-1]:.1f}] mm  "
+          f"(max = R_ZYLINDER = {_W2_R_MAX:.0f} mm) ✓")
+
+    # ── Plots ─────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    # Panel 1 — W2_z: CDF of uniform z reference
+    ax = axes[0]
+    ax.plot(ref_z, q, color="#1f77b4", linewidth=1.8, label="Uniform ref CDF")
+    ax.plot([_W2_Z_MIN, _W2_Z_MAX], [0.0, 1.0], "k--", linewidth=1.0,
+            label="Expected (linear)")
+    ax.set_xlabel("z  (mm)", fontsize=11)
+    ax.set_ylabel("CDF", fontsize=11)
+    ax.set_title(
+        f"W2_z reference\nUniform([{_W2_Z_MIN:.0f}, {_W2_Z_MAX:.0f}] mm)\n"
+        f"N_ref = {n:,}",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2 — W2_phi: histogram of uniform phi reference midpoints
+    ax = axes[1]
+    ax.bar(
+        np.degrees(ref_phi), np.ones(n_phi),
+        width=360.0 / n_phi * 0.9, color="#2ca02c", alpha=0.7,
+        label=f"N={n_phi} midpoints",
+    )
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Expected height")
+    ax.set_xlabel("φ  (degrees)", fontsize=11)
+    ax.set_ylabel("Bin height (should be 1)", fontsize=11)
+    ax.set_title(
+        f"W2_phi reference\nUniform([0, 2π)) — midpoint formula\n"
+        f"N = config size (shown: {n_phi})",
+        fontsize=11,
+    )
+    ax.set_xlim(0, 360)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    # Verify no duplication at boundaries
+    ax.annotate(
+        f"φ_first = {np.degrees(ref_phi[0]):.4f}°\n"
+        f"φ_last  = {np.degrees(ref_phi[-1]):.4f}°\n"
+        f"(no 0° / 360° boundary dup)",
+        xy=(0.02, 0.97), xycoords="axes fraction",
+        fontsize=7, va="top", ha="left",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                  edgecolor="gray", alpha=0.85),
+    )
+
+    # Panel 3 — W2_r: CDF of area-uniform r reference
+    ax = axes[2]
+    ax.plot(ref_r, q, color="#d62728", linewidth=1.8, label="Area-uniform ref CDF")
+    # Expected CDF: F(r) = (r / R_max)²
+    r_line = np.linspace(0, _W2_R_MAX, 500)
+    ax.plot(r_line, (r_line / _W2_R_MAX) ** 2, "k--", linewidth=1.0,
+            label=r"Expected: $F(r)=(r/R_{max})^2$")
+    ax.set_xlabel("r  (mm)", fontsize=11)
+    ax.set_ylabel("CDF", fontsize=11)
+    ax.set_title(
+        f"W2_r reference\nArea-uniform on [0, {_W2_R_MAX:.0f} mm]\n"
+        f"N_ref = {n:,}  |  Q(q) = R_max·√q",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    # Annotate r range
+    ax.annotate(
+        f"r_first = {ref_r[0]:.4f} mm\n"
+        f"r_last  = {ref_r[-1]:.1f} mm (= R_ZYLINDER)",
+        xy=(0.05, 0.92), xycoords="axes fraction",
+        fontsize=8, va="top", ha="left",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                  edgecolor="gray", alpha=0.85),
+    )
+
+    fig.suptitle(
+        "W2 Uniform Reference Validation\n"
+        "W2_z and W2_r use N_ref = {:,} deterministic quantile levels; "
+        "W2_phi uses N = config size midpoints".format(n),
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fname = "00_w2_ref_validation.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {fname}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2222,18 +2395,63 @@ def plot_w2_nc_coverage_corr_all_m(
 ) -> None:
     """17d — W2 global vs NC coverage: Pearson r and Spearman ρ vs M (all M).
 
-    For every M computes the correlation between W2 and NC detection fraction
-    (_cc_nc_frac).  Both Pearson r and Spearman ρ are plotted vs M with
-    3-sigma and 5-sigma significance thresholds.
+    Delegates to _plot_17d_w2_variant with the global W2 getter.
     Saved as 17d_w2_nc_coverage_corr.png.
     """
-    w2_res = [r for r in results if r.w2_global is not None]
+    _plot_17d_w2_variant(
+        results, M_values, output_dir,
+        lambda r: r.w2_global, "W2_global (mm)", "17d_w2_nc_coverage_corr.png",
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 17e — W2 global vs Recall: 4-curve Pearson and Spearman correlation
+# ──────────────────────────────────────────────────────────────────────
+def plot_w2_recall_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_m_constrained: int = 6,
+    total_primaries: int = 0,
+) -> None:
+    """17e — W2 global vs Recall: 4-curve Pearson and Spearman correlation vs M.
+
+    Delegates to _plot_17e_w2_variant with the global W2 getter.
+    Saved as 17e_w2_recall_corr.png.
+    """
+    _plot_17e_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_global, "W2_global (mm)", "17e_w2_recall_corr.png",
+        min_m_constrained=min_m_constrained,
+        total_primaries=total_primaries,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Private helpers for parametric 17d (NC coverage) and 17e (4-curve recall)
+# ──────────────────────────────────────────────────────────────────────
+
+def _plot_17d_w2_variant(
+    results: list["SetupResult"],
+    M_values: list[int],
+    output_dir: str,
+    w2_getter,
+    w2_label: str,
+    fname: str,
+) -> None:
+    """Parametric NC coverage correlation for 17d variants (global/z/phi/r).
+
+    Pearson r and Spearman ρ between the selected W2 component and NC detection
+    fraction, plotted vs M (all M).  Includes 3σ and 5σ significance lines.
+    """
+    w2_res = [r for r in results if w2_getter(r) is not None]
     if len(w2_res) < 3:
-        print("  [SKIP] 17d_w2_nc_coverage_corr: fewer than 3 setups have W2.")
+        print(f"  [SKIP] {fname}: fewer than 3 setups have W2.")
         return
 
-    w2_arr = np.array([r.w2_global for r in w2_res])
-    _n_w2 = len(w2_res)
+    w2_arr = np.array([w2_getter(r) for r in w2_res])
+    _n_w2  = len(w2_res)
     pearson_r, spearman_rho = [], []
     p_pearson, p_spearman   = [], []
 
@@ -2261,7 +2479,7 @@ def plot_w2_nc_coverage_corr_all_m(
     _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
 
     for vals, ps, label, color, marker in [
-        (pearson_r,   p_pearson,  "Pearson r",   "#1f77b4", "o"),
+        (pearson_r,    p_pearson,  "Pearson r",  "#1f77b4", "o"),
         (spearman_rho, p_spearman, "Spearman ρ", "#d62728", "s"),
     ]:
         sig  = ps < _P_3SIGMA
@@ -2274,9 +2492,9 @@ def plot_w2_nc_coverage_corr_all_m(
                        s=60, marker=marker, linewidth=1.2, zorder=4)
 
     ax.set_xlabel("Multiplicity threshold M", fontsize=13)
-    ax.set_ylabel("Correlation coefficient (W2 vs NC coverage)", fontsize=13)
+    ax.set_ylabel(f"Correlation ({w2_label} vs NC coverage)", fontsize=13)
     ax.set_title(
-        "W2 Homogeneity vs NC Coverage  (all M)  — Pearson r and Spearman ρ vs M\n"
+        f"{w2_label} vs NC Coverage  (all M)  — Pearson r and Spearman ρ vs M\n"
         "(filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
         fontsize=14,
     )
@@ -2285,119 +2503,142 @@ def plot_w2_nc_coverage_corr_all_m(
     ax.legend(fontsize=11, loc="upper right")
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fname = "17d_w2_nc_coverage_corr.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Plot 17e — W2 global vs Recall: Pearson r and Spearman ρ vs M (3 variants)
-# ──────────────────────────────────────────────────────────────────────
-def plot_w2_recall_corr_all_m(
+def _plot_17e_w2_variant(
     results: list["SetupResult"],
     M_values: list[int],
     W_values: list[int],
     output_dir: str,
+    w2_getter,
+    w2_label: str,
+    fname: str,
     min_m_constrained: int = 6,
     total_primaries: int = 0,
 ) -> None:
-    """17e — W2 global vs Recall: Pearson r and Spearman ρ vs M (3 variants).
+    """Parametric 4-curve recall correlation for 17e variants (global/z/phi/r).
 
-    Three side-by-side panels:
-      1. Best recall over all W at each M (all M)
-      2. Recall at fixed W = 1 at each M (all M)
-      3. Best recall over all W at each M (M ≥ min_m_constrained)
-    Each panel shows 3-sigma and 5-sigma Pearson significance thresholds.
-    Saved as 17e_w2_recall_corr.png.
+    Two-panel figure (Pearson r left, Spearman ρ right), each with four curves:
+      1. MW at best FoM   — W* = argmax_W FoM(M,W) at each M (all M)
+      2. Recall at best FoM — Recall(M, W*_FoM) for same W* (all M)
+      3. MW at best MW    — W* = argmax_W Recall(M,W) at each M (M ≥ min_m_constrained)
+      4. Recall at best MW — Recall(M, W*_recall) for same W* (M ≥ min_m_constrained)
+    Both panels include 3σ and 5σ Pearson significance threshold lines.
     """
-    w2_res = [r for r in results if r.w2_global is not None]
+    w2_res = [r for r in results if w2_getter(r) is not None]
     if len(w2_res) < 3:
-        print("  [SKIP] 17e_w2_recall_corr: fewer than 3 setups have W2.")
+        print(f"  [SKIP] {fname}: fewer than 3 setups have W2.")
         return
 
-    w2_arr = np.array([r.w2_global for r in w2_res])
+    w2_arr = np.array([w2_getter(r) for r in w2_res])
     _n_w2  = len(w2_res)
+    eligible_m = [M for M in M_values if M >= min_m_constrained]
 
-    def _best_recall(r: "SetupResult", M: int) -> float:
-        best = np.nan
+    def _w_at_best_fom(r: "SetupResult", M: int) -> float:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        fom_grid = _cc_fom_grid(r, [M], W_values, _tp)
+        best_fom, best_w = np.nan, np.nan
         for W in W_values:
-            v = _cc_recall(r, M, W)
-            if np.isfinite(v) and (np.isnan(best) or v > best):
-                best = v
-        return best
+            fom = fom_grid.get((M, W), np.nan)
+            if np.isfinite(fom) and (np.isnan(best_fom) or fom > best_fom):
+                best_fom = fom
+                best_w = float(W)
+        return best_w
 
-    def _corr_line(m_list: list[int], get_val) -> tuple[
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray
-    ]:
+    def _recall_at_best_fom(r: "SetupResult", M: int) -> float:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        fom_grid = _cc_fom_grid(r, [M], W_values, _tp)
+        best_fom, best_rec = np.nan, np.nan
+        for W in W_values:
+            fom = fom_grid.get((M, W), np.nan)
+            if np.isfinite(fom) and (np.isnan(best_fom) or fom > best_fom):
+                best_fom = fom
+                best_rec = _cc_recall(r, M, W)
+        return best_rec
+
+    def _w_at_best_recall(r: "SetupResult", M: int) -> float:
+        best_rec, best_w = np.nan, np.nan
+        for W in W_values:
+            rec = _cc_recall(r, M, W)
+            if np.isfinite(rec) and (np.isnan(best_rec) or rec > best_rec):
+                best_rec = rec
+                best_w = float(W)
+        return best_w
+
+    def _recall_at_best_recall(r: "SetupResult", M: int) -> float:
+        best_rec = np.nan
+        for W in W_values:
+            rec = _cc_recall(r, M, W)
+            if np.isfinite(rec) and (np.isnan(best_rec) or rec > best_rec):
+                best_rec = rec
+        return best_rec
+
+    def _corr_line(m_list, get_val):
         pr, sr, pp, sp = [], [], [], []
         for M in m_list:
-            y_arr = np.array([get_val(r, M) for r in w2_res])
-            msk = np.isfinite(y_arr) & np.isfinite(w2_arr)
-            if msk.sum() < 3 or np.std(w2_arr[msk]) == 0 or np.std(y_arr[msk]) == 0:
-                pr.append(np.nan);  pp.append(np.nan)
-                sr.append(np.nan);  sp.append(np.nan)
+            y = np.array([get_val(r, M) for r in w2_res])
+            msk = np.isfinite(y) & np.isfinite(w2_arr)
+            if msk.sum() < 3 or np.std(w2_arr[msk]) == 0 or np.std(y[msk]) == 0:
+                pr.append(np.nan); pp.append(np.nan)
+                sr.append(np.nan); sp.append(np.nan)
                 continue
-            r_val, p_r   = scipy_stats.pearsonr(w2_arr[msk], y_arr[msk])
-            rho,   p_rho = scipy_stats.spearmanr(w2_arr[msk], y_arr[msk])
-            pr.append(r_val);  pp.append(p_r)
-            sr.append(rho);    sp.append(p_rho)
+            r_val, p_r = scipy_stats.pearsonr(w2_arr[msk], y[msk])
+            rho,  p_rho = scipy_stats.spearmanr(w2_arr[msk], y[msk])
+            pr.append(r_val); pp.append(p_r)
+            sr.append(rho);   sp.append(p_rho)
         return np.array(pr), np.array(sr), np.array(pp), np.array(sp)
 
-    eligible_ge = [M for M in M_values if M >= min_m_constrained]
-
-    panels = [
-        (M_values,    _best_recall,
-         "Best Recall over all W  (all M)"),
-        (M_values,    lambda r, M: _cc_recall(r, M, 1),
-         "Recall at W = 1  (all M)"),
-        (eligible_ge, _best_recall,
-         f"Best Recall over all W  (M ≥ {min_m_constrained})"),
+    # (m_list, metric_fn, label, color, marker, linestyle)
+    curves = [
+        (M_values,   _w_at_best_fom,        "MW at best FoM",     "#ff7f0e", "o", "-"),
+        (M_values,   _recall_at_best_fom,   "Recall at best FoM", "#1f77b4", "s", "-"),
+        (eligible_m, _w_at_best_recall,     "MW at best MW",      "#2ca02c", "^", "--"),
+        (eligible_m, _recall_at_best_recall,"Recall at best MW",  "#d62728", "D", "--"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
     fig.suptitle(
-        "W2 Homogeneity vs Ge-77 Muon Recall  — Pearson r and Spearman ρ vs M\n"
-        "(filled = 3σ significant; dashed = 3σ / dash-dot = 5σ Pearson threshold)",
-        fontsize=13,
+        f"{w2_label} vs Ge-77 Recall  —  Pearson r (left) / Spearman ρ (right) vs M\n"
+        f"Dashed curves restricted to M ≥ {min_m_constrained}  •  "
+        "filled markers = 3σ significant  •  horizontal lines = 3σ / 5σ threshold",
+        fontsize=11,
     )
 
-    for ax, (m_list, get_val, title) in zip(axes, panels):
-        if not m_list:
-            ax.set_visible(False)
-            continue
-        x = np.array(m_list)
-        pr, sr, pp, sp = _corr_line(m_list, get_val)
-
+    for col_idx, (ax, corr_name) in enumerate(zip(axes, ["Pearson r", "Spearman ρ"])):
         ax.axhline(0, color="black", linewidth=0.8)
         _draw_pearson_rcrit(ax, _n_w2, sigma=3.0)
         _draw_pearson_rcrit(ax, _n_w2, sigma=5.0, linestyle="-.")
 
-        for vals, ps, label, color, marker in [
-            (pr, pp, "Pearson r",   "#1f77b4", "o"),
-            (sr, sp, "Spearman ρ",  "#d62728", "s"),
-        ]:
+        for m_list, get_val, label, color, marker, ls in curves:
+            if not m_list:
+                continue
+            pr, sr, pp, sp = _corr_line(m_list, get_val)
+            vals = pr if col_idx == 0 else sr
+            ps   = pp if col_idx == 0 else sp
+            x    = np.array(m_list)
+
             sig  = ps < _P_3SIGMA
             nsig = ~sig & np.isfinite(vals)
-            ax.plot(x, vals, color=color, linewidth=1.8, label=label)
+            ax.plot(x, vals, color=color, linewidth=1.8, label=label, linestyle=ls)
             if sig.any():
                 ax.scatter(x[sig],  vals[sig],  color=color, s=60,
                            marker=marker, zorder=4)
             if nsig.any():
-                ax.scatter(x[nsig], vals[nsig], facecolors="none",
-                           edgecolors=color, s=60, marker=marker,
-                           linewidth=1.2, zorder=4)
+                ax.scatter(x[nsig], vals[nsig], facecolors="none", edgecolors=color,
+                           s=60, marker=marker, linewidth=1.2, zorder=4)
 
         ax.set_xlabel("Multiplicity threshold M", fontsize=11)
-        ax.set_ylabel("Correlation (W2 vs Recall)", fontsize=11)
-        ax.set_title(title, fontsize=11)
-        ax.set_xticks(m_list)
+        ax.set_ylabel(f"Correlation ({w2_label} vs metric)", fontsize=11)
+        ax.set_title(corr_name, fontsize=12)
+        ax.set_xticks(M_values)
         ax.set_ylim(-1.1, 1.1)
         ax.legend(fontsize=9, loc="upper right")
         ax.grid(alpha=0.3)
 
     fig.tight_layout()
-    fname = "17e_w2_recall_corr.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -2768,6 +3009,98 @@ def plot_w2_r_recall_corr_split(
         lambda r: r.w2_r, "W2_r (mm)", "17c_r_recall_corr.png",
         min_m_constrained=min_m_constrained,
         total_primaries=total_primaries, color_map=color_map,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plots 17d_z / 17d_phi / 17d_r — NC coverage correlation for W2 variants
+# Plots 17e_z / 17e_phi / 17e_r — 4-curve recall correlation for W2 variants
+# ──────────────────────────────────────────────────────────────────────
+
+def plot_w2_z_nc_coverage_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """17d_z — W2_z vs NC coverage: Pearson r and Spearman ρ vs M (all M)."""
+    _plot_17d_w2_variant(
+        results, M_values, output_dir,
+        lambda r: r.w2_z, "W2_z (mm)", "17d_z_nc_coverage_corr.png",
+    )
+
+
+def plot_w2_phi_nc_coverage_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """17d_phi — W2_phi vs NC coverage: Pearson r and Spearman ρ vs M (all M)."""
+    _plot_17d_w2_variant(
+        results, M_values, output_dir,
+        lambda r: r.w2_phi, "W2_φ (rad)", "17d_phi_nc_coverage_corr.png",
+    )
+
+
+def plot_w2_r_nc_coverage_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """17d_r — W2_r vs NC coverage: Pearson r and Spearman ρ vs M (all M)."""
+    _plot_17d_w2_variant(
+        results, M_values, output_dir,
+        lambda r: r.w2_r, "W2_r (mm)", "17d_r_nc_coverage_corr.png",
+    )
+
+
+def plot_w2_z_recall_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_m_constrained: int = 6,
+    total_primaries: int = 0,
+) -> None:
+    """17e_z — W2_z vs Recall: 4-curve Pearson and Spearman correlation vs M."""
+    _plot_17e_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_z, "W2_z (mm)", "17e_z_recall_corr.png",
+        min_m_constrained=min_m_constrained,
+        total_primaries=total_primaries,
+    )
+
+
+def plot_w2_phi_recall_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_m_constrained: int = 6,
+    total_primaries: int = 0,
+) -> None:
+    """17e_phi — W2_phi vs Recall: 4-curve Pearson and Spearman correlation vs M."""
+    _plot_17e_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_phi, "W2_φ (rad)", "17e_phi_recall_corr.png",
+        min_m_constrained=min_m_constrained,
+        total_primaries=total_primaries,
+    )
+
+
+def plot_w2_r_recall_corr_all_m(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    min_m_constrained: int = 6,
+    total_primaries: int = 0,
+) -> None:
+    """17e_r — W2_r vs Recall: 4-curve Pearson and Spearman correlation vs M."""
+    _plot_17e_w2_variant(
+        results, M_values, W_values, output_dir,
+        lambda r: r.w2_r, "W2_r (mm)", "17e_r_recall_corr.png",
+        min_m_constrained=min_m_constrained,
+        total_primaries=total_primaries,
     )
 
 
@@ -4330,6 +4663,10 @@ def main() -> None:
     # ── 6. Generate plots ─────────────────────────────────────────────
     print("Generating plots ...")
 
+    # W2 reference validation (always generated — documents the uniform references)
+    print("  Generating W2 reference validation ...")
+    plot_w2_uniform_ref_validation(args.output_dir)
+
     # Build a global color map keyed by label so every setup uses the same
     # colour in all plots regardless of which subsets each function receives.
     _pal_global = _colors(len(results))
@@ -4379,51 +4716,43 @@ def main() -> None:
     plot_w2_correlation_matrix(results, M_values, M_default, W_default, args.output_dir)
     plot_w2_coverage_profile(results, M_values, args.output_dir)
 
-    # W2 correlation: three dedicated plots replacing the combined Spearman summary.
+    # W2 correlation plots: only keep global NC-coverage scatter; focus on correlation lines.
     plot_w2_nc_coverage_scatter(results, M_values, args.output_dir,
                                 color_map=color_map)
+
+    # Plot 17b — FoM correlation for all W2 variants (all M)
     plot_w2_fom_corr_mge(results, M_values, W_values, args.output_dir,
-                         min_m=6, total_primaries=_total_primaries)
-    plot_w2_recall_corr_split(results, M_values, W_values, args.output_dir,
-                               min_m_constrained=6,
-                               total_primaries=_total_primaries,
-                               color_map=color_map)
-    # Plot 17d — W2 global vs NC coverage correlation (all M)
+                         min_m=1, total_primaries=_total_primaries)
+    plot_w2_z_fom_corr_mge(results, M_values, W_values, args.output_dir,
+                            min_m=1, total_primaries=_total_primaries)
+    plot_w2_phi_fom_corr_mge(results, M_values, W_values, args.output_dir,
+                              min_m=1, total_primaries=_total_primaries)
+    plot_w2_r_fom_corr_mge(results, M_values, W_values, args.output_dir,
+                             min_m=1, total_primaries=_total_primaries)
+
+    # Plot 17d — NC coverage correlation for all W2 variants (all M)
     plot_w2_nc_coverage_corr_all_m(results, M_values, args.output_dir)
-    # Plot 17e — W2 global vs Recall correlation (3 variants, all M)
+    plot_w2_z_nc_coverage_corr_all_m(results, M_values, args.output_dir)
+    plot_w2_phi_nc_coverage_corr_all_m(results, M_values, args.output_dir)
+    plot_w2_r_nc_coverage_corr_all_m(results, M_values, args.output_dir)
+
+    # Plot 17e — 4-curve recall correlation for all W2 variants (all M)
     plot_w2_recall_corr_all_m(results, M_values, W_values, args.output_dir,
                                min_m_constrained=6,
                                total_primaries=_total_primaries)
+    plot_w2_z_recall_corr_all_m(results, M_values, W_values, args.output_dir,
+                                 min_m_constrained=6,
+                                 total_primaries=_total_primaries)
+    plot_w2_phi_recall_corr_all_m(results, M_values, W_values, args.output_dir,
+                                   min_m_constrained=6,
+                                   total_primaries=_total_primaries)
+    plot_w2_r_recall_corr_all_m(results, M_values, W_values, args.output_dir,
+                                  min_m_constrained=6,
+                                  total_primaries=_total_primaries)
+
     # Combined Spearman summary kept for backwards compatibility:
     plot_w2_spearman_vs_m(results, M_values, W_default, args.output_dir,
                           total_primaries=_total_primaries, W_values=W_values)
-
-    # W2 z-component: 17a_z / 17b_z / 17c_z
-    plot_w2_z_nc_coverage_scatter(results, M_values, args.output_dir, color_map=color_map)
-    plot_w2_z_fom_corr_mge(results, M_values, W_values, args.output_dir,
-                            min_m=6, total_primaries=_total_primaries)
-    plot_w2_z_recall_corr_split(results, M_values, W_values, args.output_dir,
-                                 min_m_constrained=6,
-                                 total_primaries=_total_primaries,
-                                 color_map=color_map)
-
-    # W2 phi-component: 17a_phi / 17b_phi / 17c_phi
-    plot_w2_phi_nc_coverage_scatter(results, M_values, args.output_dir, color_map=color_map)
-    plot_w2_phi_fom_corr_mge(results, M_values, W_values, args.output_dir,
-                              min_m=6, total_primaries=_total_primaries)
-    plot_w2_phi_recall_corr_split(results, M_values, W_values, args.output_dir,
-                                   min_m_constrained=6,
-                                   total_primaries=_total_primaries,
-                                   color_map=color_map)
-
-    # W2 r-component: 17a_r / 17b_r / 17c_r
-    plot_w2_r_nc_coverage_scatter(results, M_values, args.output_dir, color_map=color_map)
-    plot_w2_r_fom_corr_mge(results, M_values, W_values, args.output_dir,
-                             min_m=6, total_primaries=_total_primaries)
-    plot_w2_r_recall_corr_split(results, M_values, W_values, args.output_dir,
-                                  min_m_constrained=6,
-                                  total_primaries=_total_primaries,
-                                  color_map=color_map)
 
     # NC-recall correlation for multiple W thresholds
     for _W_fixed in [1, 2, 3, 5, 10]:
