@@ -3678,9 +3678,12 @@ def plot_ge_surv_vs_livetime(
         all_xs.extend(r["sig_surv"]   for r in sl_filt)
         all_ys.extend(r["ge_77_surv"] for r in sl_filt)
 
-    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
 
     for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
@@ -3719,12 +3722,8 @@ def plot_ge_surv_vs_livetime(
         )
     ax.legend(handles=legend_handles, fontsize=11, loc="upper left")
     ax.grid(True, alpha=0.3)
-    # Lock axis limits to heatmap extent so no blank background areas appear.
-    if all_xs and all_ys:
-        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
-        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
-        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
-        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
     fig.tight_layout()
     fname = "25_ge_surv_vs_livetime.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
@@ -4690,9 +4689,12 @@ def plot_ge_surv_best_fom(
         all_ys = list(all_ys) + [r["ge_77_surv"] for r in sl_filt]
 
     fig, ax = plt.subplots(figsize=(10, 7))
-    pcm = _fom_colormap_background(ax, all_xs, all_ys)
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
 
     for r, c, x, y, lbl in zip(results, colors, pts_x, pts_y, pt_labels):
         if np.isfinite(x):
@@ -4734,17 +4736,113 @@ def plot_ge_surv_best_fom(
         )
     ax.legend(handles=legend_handles, fontsize=11, loc="upper left")
     ax.grid(True, alpha=0.3)
-    # Lock axis limits to heatmap extent so no blank background areas appear.
-    if all_xs and all_ys:
-        _ax_dx = max((max(all_xs) - min(all_xs)) * 0.05, 1e-4)
-        _ax_dy = max((max(all_ys) - min(all_ys)) * 0.05, 1e-4)
-        ax.set_xlim(min(all_xs) - _ax_dx, max(all_xs) + _ax_dx)
-        ax.set_ylim(min(all_ys) - _ax_dy, max(all_ys) + _ax_dy)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
     fig.tight_layout()
     fname = f"25{'d' if m_min <= 1 else 'e'}_ge_surv_best_fom{'_M_ge6' if m_min > 1 else ''}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
+
+
+def write_plot25_fom_summary(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    stat_limit_rows: "list[dict] | None" = None,
+    total_primaries: int = 0,
+) -> None:
+    """Write plot25_fom_summary.txt: best operating points per setup for plot 25."""
+
+    def _get_point_metrics(r: SetupResult, M: int, W: int, _tp: int):
+        cm = r.muon["confusion"].get((M, W))
+        if cm is None:
+            return float("nan"), float("nan"), float("nan")
+        TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+        ge_surv  = calc_ge_survival_confusion(
+            cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+            cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+        )
+        deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+        sig_surv = 1.0 - deadtime
+        fom = figure_of_merit(ge_surv, sig_surv)
+        return fom, ge_surv, sig_surv
+
+    def _best_point(r: SetupResult, m_search: list[int], _tp: int):
+        """Return (M, W, fom, ge_surv, sig_surv) at best FoM, or Nones/nans."""
+        grid  = _cc_fom_grid(r, m_search, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if not valid:
+            return None, None, float("nan"), float("nan"), float("nan")
+        best_M, best_W = max(valid, key=valid.__getitem__)
+        fom, ge, sig   = _get_point_metrics(r, best_M, best_W, _tp)
+        return best_M, best_W, fom, ge, sig
+
+    fpath = os.path.join(output_dir, "plot25_fom_summary.txt")
+    with open(fpath, "w") as f:
+        f.write("Plot 25 — FoM Summary: Best Operating Points\n")
+        f.write("=" * 70 + "\n\n")
+        f.write("FoM      = figure_of_merit(ge_surv, sig_surv)\n")
+        f.write("ge_surv  = Σ FN Ge-77 NCs / Σ all Ge-77 NCs  (lower = better)\n")
+        f.write("sig_surv = 1 − deadtime                        (higher = better)\n")
+        f.write("M > 6 means M ≥ 7 (strict inequality)\n\n")
+
+        for r in results:
+            _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+
+            bM,  bW,  bFom,  bGe,  bSig  = _best_point(r, M_values, _tp)
+            m_gt6 = [M for M in M_values if M > 6]
+            if m_gt6:
+                bM7, bW7, bFom7, bGe7, bSig7 = _best_point(r, m_gt6, _tp)
+            else:
+                bM7, bW7, bFom7, bGe7, bSig7 = None, None, float("nan"), float("nan"), float("nan")
+
+            f.write(f"Setup: {r.label}\n")
+            f.write("-" * 60 + "\n")
+
+            f.write("  Best FoM (any M):\n")
+            if bM is not None:
+                f.write(f"    M        = {bM}\n")
+                f.write(f"    W        = {bW}\n")
+                f.write(f"    FoM      = {bFom:.6f}\n")
+                f.write(f"    ge_surv  = {bGe * 100:.4f}%\n")
+                f.write(f"    sig_surv = {bSig * 100:.4f}%\n")
+            else:
+                f.write("    (no valid data)\n")
+
+            f.write("  Best FoM (M > 6, i.e. M ≥ 7):\n")
+            if not m_gt6:
+                f.write("    (no M values > 6 available in dataset)\n")
+            elif bM7 is not None:
+                f.write(f"    M        = {bM7}\n")
+                f.write(f"    W        = {bW7}\n")
+                f.write(f"    FoM      = {bFom7:.6f}\n")
+                f.write(f"    ge_surv  = {bGe7 * 100:.4f}%\n")
+                f.write(f"    sig_surv = {bSig7 * 100:.4f}%\n")
+            else:
+                f.write("    (no valid data)\n")
+            f.write("\n")
+
+        f.write("=" * 70 + "\n")
+        f.write("NC-Truth Statistical Limit (from simulation data, W swept 1–50)\n")
+        f.write("(restricted to sig_surv ≥ 80 % — same range shown in the plots)\n")
+        f.write("-" * 60 + "\n")
+        sl_valid = [
+            row for row in (stat_limit_rows or [])
+            if np.isfinite(row.get("sig_surv", float("nan"))) and row["sig_surv"] >= 0.80
+        ]
+        if sl_valid:
+            best_sl  = max(sl_valid, key=lambda row: figure_of_merit(row["ge_77_surv"], row["sig_surv"]))
+            sl_fom   = figure_of_merit(best_sl["ge_77_surv"], best_sl["sig_surv"])
+            f.write(f"  W at best FoM = {int(best_sl['x_cut'])}\n")
+            f.write(f"  FoM           = {sl_fom:.6f}\n")
+            f.write(f"  ge_surv       = {best_sl['ge_77_surv'] * 100:.4f}%\n")
+            f.write(f"  sig_surv      = {best_sl['sig_surv'] * 100:.4f}%\n")
+        else:
+            f.write("  (no stat-limit rows available with sig_surv ≥ 80 %)\n")
+
+    print(f"  Saved plot25_fom_summary.txt")
 
 
 def write_nc_summary(
@@ -5330,6 +5428,9 @@ def main() -> None:
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=6,
                           stat_limit_rows=_stat_limit_rows, stat_limit_color=_sl_color)
+    write_plot25_fom_summary(results, M_values, W_values, args.output_dir,
+                             stat_limit_rows=_stat_limit_rows,
+                             total_primaries=_total_primaries)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
