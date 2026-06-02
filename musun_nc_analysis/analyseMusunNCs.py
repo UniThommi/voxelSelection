@@ -7,7 +7,7 @@ Outputs (all to <output_path>/musun_nc_analysis/):
   - Standard distributions: all muons + Ge77 only + Ge77 vs non-Ge77 + NC vs non-NC
   - NC spatial / time distributions
   - Outlier analysis (muons above 99th-percentile NC count on log scale)
-  - Convergence analysis: W1 + KS vs number of runs
+  - Convergence analysis: W1 distance vs number of runs (k) and vs sample size (N)
   - statistics.txt
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 from itertools import combinations as _combinations
-from scipy.stats import ks_2samp, wasserstein_distance
+from scipy.stats import wasserstein_distance
 
 try:
     import psutil as _psutil
@@ -1553,17 +1553,19 @@ def _transform(data: np.ndarray, obs: str) -> np.ndarray:
     return data   # zenith and azimuth: raw degrees
 
 
-def _w1_ks_sorted(sorted_p: np.ndarray, sorted_q: np.ndarray) -> tuple[float, float]:
-    """W1 and KS between two *pre-sorted* empirical distributions.
+def _w1_sorted(sorted_p: np.ndarray, sorted_q: np.ndarray) -> float:
+    """Wasserstein-1 distance between two *pre-sorted* empirical distributions.
 
-    Memory layout (peak = 3 × (n+m) × 8 bytes, vs scipy's ~4×):
+    Memory layout (peak = 3 × (n+m) × 8 bytes):
       1. all_vals  — merged sorted union, freed after np.diff
       2. deltas    — interval widths (nm-1,)
       3. cdf_diff  — |F_p - F_q| at each breakpoint (nm-1,)
+
+    Returns np.nan if either array is empty.
     """
     n, m = len(sorted_p), len(sorted_q)
     if n == 0 or m == 0:
-        return float("nan"), float("nan")
+        return float("nan")
 
     nm = n + m
     all_vals = np.empty(nm, dtype=np.float64)
@@ -1574,16 +1576,14 @@ def _w1_ks_sorted(sorted_p: np.ndarray, sorted_q: np.ndarray) -> tuple[float, fl
     deltas = np.diff(all_vals)        # (nm-1,) — new allocation
     bpts = all_vals[:-1]              # view, no copy
 
-    # |F_p(x) - F_q(x)| at each left-breakpoint
     cdf_diff = (np.searchsorted(sorted_p, bpts, side="right") / n
                 - np.searchsorted(sorted_q, bpts, side="right") / m)
-    del all_vals                      # free nm floats before taking abs + dot
+    del all_vals
     np.abs(cdf_diff, out=cdf_diff)
 
     w1 = float(np.dot(cdf_diff, deltas))
-    ks = float(cdf_diff.max())
     del cdf_diff, deltas
-    return w1, ks
+    return w1
 
 
 def _merge_sorted_runs(sorted_runs: list[np.ndarray],
@@ -1608,16 +1608,15 @@ def convergence_analysis(
     run_list: list[RunData], out_dir: Path, full_convergence: bool = False
 ) -> dict[str, int]:
     """
-    Compute W1 and KS convergence metrics vs number of runs k.
+    Compute W1 convergence metrics vs number of runs k.
 
-    For NC count per muon: produces two figures (log-transformed and raw),
-    each with two rows (full distribution / cut at NC_MUON_CUT) × two
-    columns (W1 / KS).
+    For NC count per muon: produces W1 figures for the full distribution
+    and cut distributions (cuts at NC_CUT_100 and NC_MUON_CUT).
 
-    If full_convergence=True, also produces single W1+KS figures for zenith,
+    If full_convergence=True, also produces W1 figures for zenith,
     azimuth, and energy.
 
-    Returns recommended minimum k per observable.
+    Returns recommended minimum k per observable (threshold = 5% of W1(k=1)).
     """
     n_runs = len(run_list)
     if n_runs < 2:
@@ -1630,32 +1629,29 @@ def convergence_analysis(
 
     def _compute_metrics(
         sorted_runs_local: list[np.ndarray],
-    ) -> tuple[list[float], list[float], np.ndarray, np.ndarray]:
-        """W1 and KS vs k for given pre-sorted per-run arrays."""
+    ) -> tuple[list[float], np.ndarray]:
+        """W1 vs k for given pre-sorted per-run arrays."""
         sorted_ref = _merge_sorted_runs(sorted_runs_local, run_indices)
         if sorted_ref.size == 0:
             del sorted_ref
-            return [], [], np.zeros((n_runs, N_PERMUTATIONS)), np.zeros((n_runs, N_PERMUTATIONS))
-        det_w1, det_ks = [], []
+            return [], np.zeros((n_runs, N_PERMUTATIONS))
+        det_w1: list[float] = []
         for k in k_vals:
             sk = _merge_sorted_runs(sorted_runs_local, list(range(k)))
-            w1, ks = _w1_ks_sorted(sk, sorted_ref)
+            w1 = _w1_sorted(sk, sorted_ref)
             del sk
             det_w1.append(w1 if not np.isnan(w1) else 0.0)
-            det_ks.append(ks if not np.isnan(ks) else 0.0)
         rand_w1_m = np.zeros((n_runs, N_PERMUTATIONS))
-        rand_ks_m = np.zeros((n_runs, N_PERMUTATIONS))
         for perm_i in range(N_PERMUTATIONS):
             shuffled = run_indices.copy()
             rng.shuffle(shuffled)
             for k in k_vals:
                 sk = _merge_sorted_runs(sorted_runs_local, shuffled[:k])
-                w1, ks = _w1_ks_sorted(sk, sorted_ref)
+                w1 = _w1_sorted(sk, sorted_ref)
                 del sk
                 rand_w1_m[k - 1, perm_i] = w1 if not np.isnan(w1) else 0.0
-                rand_ks_m[k - 1, perm_i] = ks if not np.isnan(ks) else 0.0
         del sorted_ref
-        return det_w1, det_ks, rand_w1_m, rand_ks_m
+        return det_w1, rand_w1_m
 
     def _rec_k_from_w1(det_w1: list[float]) -> tuple[int, float]:
         if not det_w1 or det_w1[0] <= 0:
@@ -1664,7 +1660,7 @@ def convergence_analysis(
         rec = next((k for k, w in enumerate(det_w1, 1) if w <= thr), n_runs)
         return rec, thr
 
-    def _draw_panel(
+    def _draw_w1_panel(
         ax: "plt.Axes",
         title: str,
         det_vals: list[float],
@@ -1709,11 +1705,6 @@ def convergence_analysis(
     recommendations: dict[str, int] = {}
     t_conv = _log_resources("convergence start")
 
-    # ------------------------------------------------------------------ #
-    # NC count per muon — 4 figures:                                      #
-    #   full dist  : 1×2 (W1 | KS), log and raw variants                 #
-    #   cuts ≤100 and ≤1000: 2×2 (rows=cut | cols=W1/KS), log and raw    #
-    # ------------------------------------------------------------------ #
     print("\n  Convergence: NC count per muon ...", flush=True)
 
     nc_full_raw:   list[np.ndarray] = []
@@ -1729,9 +1720,9 @@ def convergence_analysis(
         nc_cut_raw.append(np.sort(cut) if cut.size > 0
                           else np.array([], dtype=np.float64))
 
-    dw1_fr,    dks_fr,    rw1_fr,    rks_fr    = _compute_metrics(nc_full_raw)
-    dw1_c100r, dks_c100r, rw1_c100r, rks_c100r = _compute_metrics(nc_cut100_raw)
-    dw1_cr,    dks_cr,    rw1_cr,    rks_cr    = _compute_metrics(nc_cut_raw)
+    dw1_fr,    rw1_fr    = _compute_metrics(nc_full_raw)
+    dw1_c100r, rw1_c100r = _compute_metrics(nc_cut100_raw)
+    dw1_cr,    rw1_cr    = _compute_metrics(nc_cut_raw)
     del nc_full_raw, nc_cut100_raw, nc_cut_raw
     gc.collect()
     _log_resources("nc_count: all metrics computed", t_conv)
@@ -1746,72 +1737,41 @@ def convergence_analysis(
     print(f"    Cut ≤{NC_CUT_100} dist  — W1 thr = {thr_c100r:.4f}  →  rec k = {rec_cut100}")
     print(f"    Cut ≤{NC_MUON_CUT:,} dist — W1 thr = {thr_cr:.4f}    →  rec k = {rec_cut}")
 
-    # -- Full distribution: 1×2 figure --
-    for fig_tag, fig_label, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec in [
-        ("raw", "raw (no transform)",
-         dw1_fr, dks_fr, rw1_fr, rks_fr, "NC count", None, None),
-    ]:
-        if not d_w1:
-            continue
-        rw1_mean = r_w1.mean(axis=1)
-        rw1_std  = r_w1.std(axis=1)
-        rks_mean = r_ks.mean(axis=1)
-        rks_std  = r_ks.std(axis=1)
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        fig.suptitle(
-            "Convergence: NC count per muon — full distribution",
-            fontsize=14,
-        )
-        _draw_panel(axes[0], "W₁  —  Full (all muons)",
-                    d_w1, rw1_mean, rw1_std,
-                    f"W₁ ({xlabel})", thr, rec,
-                    w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
-                    show_deterministic=False)
-        _draw_panel(axes[1], "KS  —  Full (all muons)",
-                    d_ks, rks_mean, rks_std,
-                    "KS statistic D", None, None,
-                    show_deterministic=False)
+    # Full distribution: 1×1 W1 figure
+    if dw1_fr:
+        rw1_mean = rw1_fr.mean(axis=1)
+        rw1_std  = rw1_fr.std(axis=1)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        fig.suptitle("Convergence: NC count per muon — full distribution", fontsize=14)
+        _draw_w1_panel(ax, "W₁  —  Full (all muons)",
+                       dw1_fr, rw1_mean, rw1_std,
+                       "W₁ (NC count)", None, None,
+                       w1_at_k1=dw1_fr[0] if dw1_fr[0] > 0 else None,
+                       show_deterministic=False)
         plt.tight_layout()
-        _save(fig, out_dir / f"convergence_nc_count_full_{fig_tag}.png")
+        _save(fig, out_dir / "convergence_nc_count_full.png")
 
-    # -- Cut distributions: 2×2 figure --
-    for fig_tag, fig_label, rows_data in [
-        ("raw", "raw (no transform)", [
-            (f"Cut ≤ {NC_CUT_100}",
-             dw1_c100r, dks_c100r, rw1_c100r, rks_c100r, "NC count", None, None),
-            (f"Cut ≤ {NC_MUON_CUT:,}",
-             dw1_cr, dks_cr, rw1_cr, rks_cr, "NC count", None, None),
-        ]),
-    ]:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(
-            "Convergence: NC count per muon — cut distributions",
-            fontsize=14,
-        )
-        for row, (row_title, d_w1, d_ks, r_w1, r_ks, xlabel, thr, rec) in enumerate(rows_data):
+    # Cut distributions: 2×1 W1 figure
+    rows_data = [
+        (f"Cut ≤ {NC_CUT_100}",     dw1_c100r, rw1_c100r, "NC count", None, None),
+        (f"Cut ≤ {NC_MUON_CUT:,}", dw1_cr,    rw1_cr,    "NC count", None, None),
+    ]
+    if any(d for d, *_ in rows_data):
+        fig, axes = plt.subplots(2, 1, figsize=(9, 10))
+        fig.suptitle("Convergence: NC count per muon — cut distributions", fontsize=14)
+        for row, (row_title, d_w1, r_w1, xlabel, thr, rec) in enumerate(rows_data):
             if not d_w1:
                 continue
             rw1_mean = r_w1.mean(axis=1)
             rw1_std  = r_w1.std(axis=1)
-            rks_mean = r_ks.mean(axis=1)
-            rks_std  = r_ks.std(axis=1)
-            _draw_panel(axes[row, 0],
-                        f"W₁  —  {row_title}",
-                        d_w1, rw1_mean, rw1_std,
-                        f"W₁ ({xlabel})", thr, rec,
-                        w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
-                        show_deterministic=False)
-            _draw_panel(axes[row, 1],
-                        f"KS  —  {row_title}",
-                        d_ks, rks_mean, rks_std,
-                        "KS statistic D", None, None,
-                        show_deterministic=False)
+            _draw_w1_panel(axes[row], f"W₁  —  {row_title}",
+                           d_w1, rw1_mean, rw1_std,
+                           f"W₁ ({xlabel})", thr, rec,
+                           w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
+                           show_deterministic=False)
         plt.tight_layout()
-        _save(fig, out_dir / f"convergence_nc_count_cuts_{fig_tag}.png")
+        _save(fig, out_dir / "convergence_nc_count_cuts.png")
 
-    # ------------------------------------------------------------------ #
-    # Other observables (zenith, azimuth, energy) — only if requested     #
-    # ------------------------------------------------------------------ #
     if not full_convergence:
         return recommendations
 
@@ -1840,7 +1800,7 @@ def convergence_analysis(
             sorted_runs.append(np.sort(raw))
         t_obs = _log_resources(f"{obs_key}: sorted {n_runs} runs", t_obs)
 
-        det_w1, det_ks, rand_w1, rand_ks = _compute_metrics(sorted_runs)
+        det_w1, rand_w1 = _compute_metrics(sorted_runs)
         del sorted_runs
         gc.collect()
         _log_resources(f"{obs_key}: metrics done", t_obs)
@@ -1854,23 +1814,12 @@ def convergence_analysis(
 
         rand_w1_mean = rand_w1.mean(axis=1)
         rand_w1_std  = rand_w1.std(axis=1)
-        rand_ks_mean = rand_ks.mean(axis=1)
-        rand_ks_std  = rand_ks.std(axis=1)
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig, ax = plt.subplots(figsize=(9, 6))
         fig.suptitle(f"Convergence analysis: {obs_title}", fontsize=14)
-        for ax, metric, det_vals, r_mean, r_std, ylabel in [
-            (axes[0], "W₁ distance", det_w1, rand_w1_mean, rand_w1_std,
-             f"W₁ ({obs_xlabel})"),
-            (axes[1], "KS statistic", det_ks, rand_ks_mean, rand_ks_std,
-             "KS statistic D"),
-        ]:
-            thr_v     = threshold if metric == "W₁ distance" else None
-            rec_v     = rec_k    if metric == "W₁ distance" else None
-            w1_ref    = det_w1[0] if (metric == "W₁ distance" and det_w1[0] > 0) else None
-            _draw_panel(ax, metric, det_vals, r_mean, r_std, ylabel, thr_v, rec_v,
-                        w1_at_k1=w1_ref)
-
+        _draw_w1_panel(ax, "W₁ distance", det_w1, rand_w1_mean, rand_w1_std,
+                       f"W₁ ({obs_xlabel})", threshold, rec_k,
+                       w1_at_k1=det_w1[0] if det_w1[0] > 0 else None)
         _save(fig, out_dir / f"convergence_{obs_key}.png")
         _log_resources(f"{obs_key}: saved — total conv elapsed", t_conv)
 
@@ -1941,7 +1890,7 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
         pw_w1 = np.zeros((n_runs, n_runs))
         pair_vals: list[float] = []
         for i, j in pair_indices:
-            w1, _ = _w1_ks_sorted(sorted_arrays[i], sorted_arrays[j])
+            w1 = _w1_sorted(sorted_arrays[i], sorted_arrays[j])
             pw_w1[i, j] = w1
             pw_w1[j, i] = w1
             pair_vals.append(w1)
@@ -2255,30 +2204,6 @@ def load_nc_fields_flat(
     return all_fields, ge77_fields
 
 
-def level1_dkw_bound(
-    n1: int = 10_000_000,
-    n2: int = 100_000_000,
-    delta: float = 0.05,
-    eps_target: float = 1e-3,
-) -> float:
-    """Print and return Δ_max = ε(n1) + ε(n2) under the DKW inequality."""
-    eps1 = np.sqrt(np.log(2.0 / delta) / (2.0 * n1))
-    eps2 = np.sqrt(np.log(2.0 / delta) / (2.0 * n2))
-    delta_max = eps1 + eps2
-    print(f"\n{'='*60}")
-    print("Level 1 — DKW Analytical Bound")
-    print(f"  n(1e7)    = {n1:.2e},  n(1e8) = {n2:.2e}")
-    print(f"  ε(n1, δ={delta}) = {eps1:.6f}")
-    print(f"  ε(n2, δ={delta}) = {eps2:.6f}")
-    print(f"  Δ_max = ε(n1) + ε(n2) = {delta_max:.6f}")
-    print(f"  ε_target  = {eps_target:.2e}")
-    if delta_max < eps_target:
-        print("  PASS: Δ_max < ε_target  ← KS sup-norm bounded at 95% confidence")
-    else:
-        print("  INFO: Δ_max ≥ ε_target  (DKW bound not tight enough for this ε_target)")
-    return delta_max
-
-
 def level2_pairwise_fluctuations(
     run_list: list[RunData],
     extractor=None,
@@ -2314,7 +2239,7 @@ def level2_pairwise_fluctuations(
             if field_key in _CIRCULAR_FIELDS:
                 w1 = _w1_circular_phi(sorted_arrs[i], sorted_arrs[j])
             else:
-                w1, _ = _w1_ks_sorted(sorted_arrs[i], sorted_arrs[j])
+                w1 = _w1_sorted(sorted_arrs[i], sorted_arrs[j])
             if not np.isnan(w1):
                 w1_vals.append(w1)
 
@@ -2329,11 +2254,14 @@ def level2_pairwise_fluctuations(
     return fluctuations
 
 
-_SUBSAMPLE_DIRS: list[tuple[str, float]] = [
-    ("1e4", 1e4),
-    ("1e5", 1e5),
-    ("1e6", 1e6),
-    ("1e7", 1e7),
+# Sub-directory names and their expected muon counts for Level-3 learning curve.
+# Each tuple is (directory_name, expected_total_muons).  The vertex cross-check
+# verifies the actual count via //hit/vertices/evtid/pages.
+_SUBSAMPLE_DIRS: list[tuple[str, int]] = [
+    ("1e4", 10_000),
+    ("1e5", 100_000),
+    ("1e6", 1_000_000),
+    ("1e7", 10_000_000),
 ]
 
 
@@ -2353,7 +2281,7 @@ def _w1_circular_phi(a: np.ndarray, b: np.ndarray, K: int = 200) -> float:
     3. For each shift c, the sorted shifted array (b + c) % 2π is obtained
        in O(1) by splitting at the wrap-around index via np.searchsorted
        and concatenating the two halves (no full re-sort required).
-    4. Evaluate the linear W1 against a via _w1_ks_sorted  [O(n+m) per
+    4. Evaluate the linear W1 against a via _w1_sorted  [O(n+m) per
        call since both inputs are sorted].
     5. Return the minimum W1 over all K candidates.
 
@@ -2391,10 +2319,34 @@ def _w1_circular_phi(a: np.ndarray, b: np.ndarray, K: int = 200) -> float:
             b_c = b_s + c - TWO_PI
         else:
             b_c = np.concatenate([b_s[idx:] + c - TWO_PI, b_s[:idx] + c])
-        w1, _ = _w1_ks_sorted(a_s, b_c)
+        w1 = _w1_sorted(a_s, b_c)
         if w1 < best:
             best = w1
     return best
+
+
+def _count_muons_in_dir(hdf5_files: list[Path]) -> int:
+    """Count unique muon evtids across all HDF5 files via //hit/vertices/evtid/pages.
+
+    Each muon appears exactly once in the vertices group, so the number of
+    unique evtids equals the number of simulated muons.  This is the ground-
+    truth count used to validate that a sub-directory contains the expected N.
+    """
+    all_evtids: list[np.ndarray] = []
+    for fp in hdf5_files:
+        try:
+            with h5py.File(fp, "r") as f:
+                if VERTICES_GROUP not in f:
+                    continue
+                vgrp = f[VERTICES_GROUP]
+                if int(vgrp["entries"][()]) == 0:
+                    continue
+                all_evtids.append(_pages(vgrp, "evtid").astype(np.int64))
+        except Exception as exc:
+            print(f"  WARNING: could not read vertices from {fp.name}: {exc}")
+    if not all_evtids:
+        return 0
+    return int(np.unique(np.concatenate(all_evtids)).size)
 
 
 def _compute_swd_all_params(
@@ -2663,15 +2615,22 @@ def _convergence_summary(
 
 def _fit_power_law(
     n_arr: np.ndarray, w1_arr: np.ndarray
-) -> tuple[float, float] | None:
-    """Fit D(n) = a * n^(-b) via log-log polyfit on valid (n, w1) pairs.
-    Returns (a, b) or None if fewer than 2 valid points.
+) -> tuple[float, float, float] | None:
+    """Fit W1(N) = a · N^{-α} via log-log OLS on valid (N, W1) pairs.
+
+    Returns (a, alpha, alpha_se) or None if fewer than 3 valid points.
+    alpha_se is the OLS standard error of the exponent from the polyfit
+    covariance matrix.  The theoretical i.i.d. value is alpha = 0.5
+    (Fournier & Guillin 2015, Ann. Probab. 43(6)).
     """
     valid = ~np.isnan(w1_arr) & (w1_arr > 0) & (n_arr > 0)
-    if valid.sum() < 2:
+    if valid.sum() < 3:
         return None
-    coeffs = np.polyfit(np.log10(n_arr[valid]), np.log10(w1_arr[valid]), 1)
-    return float(10 ** coeffs[1]), float(-coeffs[0])
+    coeffs, cov = np.polyfit(
+        np.log10(n_arr[valid]), np.log10(w1_arr[valid]), 1, cov=True
+    )
+    alpha_se = float(np.sqrt(cov[0, 0]))
+    return float(10 ** coeffs[1]), float(-coeffs[0]), alpha_se
 
 
 def _plot_learning_curve(
@@ -2697,25 +2656,29 @@ def _plot_learning_curve(
         ax.scatter(n_arr[valid], w1_arr[valid],
                    color=COLORS["blue"], zorder=5, s=60, label="W1 to 1e8 ref")
 
-        # Mark N=1e8 anchor (W1=0) on the x-axis spine as a filled diamond
         anchor_mask = (n_arr >= 1e8 - 1) & (w1_arr == 0.0)
         if anchor_mask.any():
-            # Display near the bottom of the log-y range as a visual anchor
             ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8,
                        label="N=1e8 (W1=0, ref=self)")
 
         fit = _fit_power_law(n_arr, w1_arr)
         if fit is not None:
-            a_f, b_f = fit
+            a_f, b_f, b_se = fit
             n_min = float(n_arr[valid].min()) if valid.any() else 1e4
             n_plot = np.logspace(np.log10(n_min), 8.5, 300)
             ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
                     color=COLORS["red"], linewidth=1.5,
-                    label=f"D(n)={a_f:.3g}·n^(−{b_f:.3f})")
+                    label=f"α={b_f:.3f}±{b_se:.3f} (fit, F&G 2015)")
             w1_1e8 = a_f * 1e8 ** (-b_f)
             ax.scatter([1e8], [w1_1e8], marker="*", s=120,
                        color=COLORS["red"], zorder=6,
                        label=f"D(1e8)≈{w1_1e8:.4g}")
+            # Theoretical α=0.5 reference anchored at first valid data point
+            n0 = float(n_arr[valid][0])
+            w0 = float(w1_arr[valid][0])
+            ax.plot(n_plot, w0 * (n_plot / n0) ** (-0.5), ":",
+                    color="gray", linewidth=1.2, alpha=0.7,
+                    label="α=0.5 (i.i.d. CLT theory)")
 
         if field_key in fluctuations:
             m_fl, s_fl = fluctuations[field_key]
@@ -2775,7 +2738,7 @@ def _plot_learning_curve_normalized(
 
         fit = _fit_power_law(n_arr, w1_norm)
         if fit is not None:
-            a_f, b_f = fit
+            a_f, b_f, _ = fit
             n_min = float(n_arr[valid].min()) if valid.any() else 1e4
             n_plot = np.logspace(np.log10(n_min), 8.5, 300)
             ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
@@ -2843,7 +2806,7 @@ def _plot_learning_curve_comparison(
                        label=subset_label)
             fit = _fit_power_law(n_arr, w1_arr)
             if fit is not None:
-                a_f, b_f = fit
+                a_f, b_f, _ = fit
                 n_min = float(n_arr[valid].min())
                 n_plot = np.logspace(np.log10(n_min), 8.5, 300)
                 ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
@@ -2887,7 +2850,7 @@ def _plot_swd_learning_curve(
                        color=color, marker=marker, s=60, zorder=5, label=label)
             fit = _fit_power_law(n_arr, arr)
             if fit is not None:
-                a_f, b_f = fit
+                a_f, b_f, _ = fit
                 n_min = float(n_arr[valid].min())
                 n_plot = np.logspace(np.log10(n_min), 8.5, 300)
                 ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
@@ -2917,11 +2880,16 @@ def level3_learning_curve(
     fluctuations_ge77: dict[str, tuple[float, float]],
     out_dir: Path,
 ) -> None:
-    """Load sub-sampled data; compute W1 vs 1e8 reference; fit power law; save plots.
+    """Load sub-directory data; compute W1 vs 1e8 reference; fit power law; save plots.
+
+    For each entry in _SUBSAMPLE_DIRS the directory data_path/<dir>/ is loaded
+    in full (no subsampling).  Before loading, _count_muons_in_dir verifies that
+    the number of unique muon evtids in //hit/vertices/evtid/pages exactly matches
+    the expected count from the directory name.  A mismatch raises RuntimeError.
 
     Circular W1 is used for nc_phi_rad (see _w1_circular_phi).
-    An anchor point at N=1e8 with W1=0 is appended after the subsample loop;
-    the power-law fit excludes this zero point (handled by the ``valid`` mask).
+    An anchor at N=1e8 with W1=0 is appended; the power-law fit excludes it via
+    the (w1 > 0) mask.
     A Sliced Wasserstein Distance (SWD) across all parameters is computed as a
     combined multivariate convergence metric.
     """
@@ -2929,8 +2897,6 @@ def level3_learning_curve(
     print("Level 3 — Learning Curve & Power Law Extrapolation")
 
     # Build reference arrays from all 10 runs (= full 1e8 dataset).
-    # Sorted for use with _w1_ks_sorted; unsorted phi is fine for _w1_circular_phi
-    # (which sorts internally), but we also sort it for consistency.
     ref_all:  dict[str, np.ndarray] = {}
     ref_ge77: dict[str, np.ndarray] = {}
     for field_key in NC_FIELDS_FOR_CONV:
@@ -2949,8 +2915,8 @@ def level3_learning_curve(
         for k in NC_FIELDS_FOR_CONV
     }
 
-    total_nc = sum(rd.nc_evtid.size for rd in run_list)
-    total_ge77_nc = sum((rd.nc_ge77 == 1).sum() for rd in run_list)
+    total_nc      = sum(rd.nc_evtid.size for rd in run_list)
+    total_ge77_nc = sum(int((rd.nc_ge77 == 1).sum()) for rd in run_list)
     print(f"  Reference (all):  {total_nc:,} NCs | "
           f"Ge77-muon subset: {total_ge77_nc:,} Ge77-flagged NCs")
 
@@ -2960,10 +2926,10 @@ def level3_learning_curve(
     swd_ge77: list[float] = []
     n_vals: list[float] = []
 
-    for size_dir, n_val in _SUBSAMPLE_DIRS:
+    for size_dir, n_expected in _SUBSAMPLE_DIRS:
         subdir = data_path / size_dir
         if not subdir.exists():
-            print(f"  WARNING: {subdir} not found; skipping n={n_val:.0e}")
+            print(f"  WARNING: {subdir} not found; skipping n={n_expected:.0e}")
             continue
         hdf5_files = sorted(subdir.glob("output_t*.hdf5"))
         if not hdf5_files:
@@ -2972,9 +2938,22 @@ def level3_learning_curve(
             print(f"  WARNING: no HDF5 files in {subdir}; skipping")
             continue
 
-        print(f"  Loading {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
+        # --- Vertex cross-check: actual muon count must match directory name ---
+        print(f"  Verifying {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
+        n_actual = _count_muons_in_dir(hdf5_files)
+        if n_actual != n_expected:
+            raise RuntimeError(
+                f"Level 3 vertex cross-check FAILED for {subdir}:\n"
+                f"  Expected {n_expected:,} unique muon evtids (from directory name '{size_dir}'),\n"
+                f"  but //hit/vertices/evtid/pages contains {n_actual:,} unique evtids.\n"
+                f"  Ensure each sub-directory is a simulation of exactly the stated "
+                f"number of muons."
+            )
+        print(f"    OK: {n_actual:,} unique muon evtids == expected {n_expected:,}.")
+
+        print(f"  Loading {size_dir}/  (N={n_expected:.0e}) ...", flush=True)
         sub_all_fields, sub_ge77_fields = load_nc_fields_flat(hdf5_files)
-        n_vals.append(n_val)
+        n_vals.append(float(n_expected))
 
         for field_key in NC_FIELDS_FOR_CONV:
             for sub_fields, w1_dict, ref_sorted in [
@@ -2987,11 +2966,10 @@ def level3_learning_curve(
                     w1_dict[field_key].append(float("nan"))
                     continue
                 if field_key in _CIRCULAR_FIELDS:
-                    # Circular W1: finds the optimal cyclic shift before comparing
                     w1 = _w1_circular_phi(sub_arr, ref_s)
                 else:
                     sub_s = np.sort(sub_arr)
-                    w1, _ = _w1_ks_sorted(sub_s, ref_s)
+                    w1 = _w1_sorted(sub_s, ref_s)
                 w1_dict[field_key].append(float(w1))
             print(f"    {field_key:20s}: W1(all)={w1_all[field_key][-1]:.6g}"
                   f"  W1(ge77)={w1_ge77[field_key][-1]:.6g}")
@@ -3003,8 +2981,15 @@ def level3_learning_curve(
         swd_ge77.append(swd_g)
         print(f"    {'SWD (all params)':20s}: SWD(all)={swd_a:.6g}  SWD(ge77)={swd_g:.6g}")
 
+    if len(n_vals) == 0:
+        raise RuntimeError(
+            "Level 3: none of the expected sub-directories were found or passed "
+            f"the vertex cross-check under {data_path}.\n"
+            f"Expected: {[d for d, _ in _SUBSAMPLE_DIRS]}"
+        )
     if len(n_vals) < 2:
-        print("  Fewer than 2 sample sizes found; skipping learning-curve plots.")
+        print("  Only 1 sample size available; power-law fit requires ≥ 2. "
+              "Add more sub-directories.")
         return
 
     # Append N=1e8 anchor: comparing the full reference to itself gives W1=0.
@@ -3043,24 +3028,27 @@ def run_statistical_convergence_test(
     data_path: Path,
     run_list: list[RunData],
     out_dir: Path,
-    eps_target: float = 1e-3,
 ) -> None:
-    """Orchestrate the 3-level statistical convergence test.
+    """Orchestrate the W1-based statistical convergence test.
 
-    Level 1: DKW analytical KS bound for 1e7 vs 1e8 samples.
-    Level 2: Pairwise W1 fluctuation scale from the 10×1e7 runs.
-    Level 3: W1 learning curve for 1e4/1e5/1e6/1e7 vs full 1e8 reference.
+    Level 2: Pairwise W1 fluctuation scale from all C(R,2) run pairs,
+             for all muons and Ge77 muons separately.
+    Level 3: W1 learning curve for subsamples N ∈ {1e4,1e5,1e6,1e7} vs the
+             full 1e8 reference distribution, with power-law fit W1(N) = a·N^{-α}.
+             Raises RuntimeError if no sub-sampled data directories exist.
+
+    The scientific basis for the convergence limits (global absolute threshold
+    and relative improvement threshold) is printed and saved to
+    convergence_theory.txt.
     """
     n_muons_per_run = int(np.mean([rd.n_muons_total for rd in run_list]))
     total_muons     = sum(rd.n_muons_total for rd in run_list)
 
     print(f"\n{'='*60}")
-    print("3-Level Statistical Convergence Test")
+    print("W1 Statistical Convergence Test")
     print(f"  {len(run_list)} runs  |  ~{n_muons_per_run:.2e} muons/run  "
           f"|  total ~{total_muons:.2e} muons")
     print(f"{'='*60}")
-
-    level1_dkw_bound(n1=n_muons_per_run, n2=total_muons, eps_target=eps_target)
 
     fluctuations = level2_pairwise_fluctuations(
         run_list, extractor=_extract_nc_fields_run, label="all muons"
@@ -3178,17 +3166,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Also compute convergence for zenith, azimuth, and energy (slow).",
     )
-    p.add_argument(
-        "--convergence-test",
-        action="store_true",
-        default=False,
-        help=(
-            "Run the 3-level statistical convergence test: "
-            "(1) DKW analytical bound, "
-            "(2) pairwise W1 fluctuations across the 10 runs, "
-            "(3) learning curve vs sub-sampled data in 1e4/…/1e7/ subdirectories."
-        ),
-    )
+    return p.parse_args()
 
 
 def main() -> None:
@@ -3276,15 +3254,13 @@ def main() -> None:
     pairwise_w1_analysis(run_list, out_dir)
     _log_resources("pairwise W1 analysis done", t_main)
 
-    if args.convergence_test:
-        print("\n--- 3-Level Statistical Convergence Test ---")
-        run_statistical_convergence_test(
-            data_path=data_path,
-            run_list=run_list,
-            out_dir=out_dir,
-            eps_target=args.eps_target,
-        )
-        _log_resources("convergence test done", t_main)
+    print("\n--- W1 Statistical Convergence Test ---")
+    run_statistical_convergence_test(
+        data_path=data_path,
+        run_list=run_list,
+        out_dir=out_dir,
+    )
+    _log_resources("convergence test done", t_main)
 
     print("\n--- Statistics ---")
     write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
