@@ -35,13 +35,35 @@ def _read_pages(group: h5py.Group, field_name: str) -> np.ndarray:
     return group[field_name]["pages"][:]
 
 
-def _load_nc_from_file(fpath: str) -> pd.DataFrame | None:
+def _load_material_mapping_from_file(fpath: str) -> dict[int, str]:
+    """Load {material_id: material_name} mapping from one HDF5 file.
+
+    Reads /hit/materials/materialNames/pages and /hit/materials/materialsID/pages
+    and zips them into a lookup dict.  Returns an empty dict if the group is
+    absent or unreadable (e.g. older simulation output).
+    """
+    try:
+        with h5py.File(fpath, "r") as f:
+            mat_grp = f["hit"]["materials"]
+            raw_names = mat_grp["materialNames"]["pages"][:]
+            raw_ids   = mat_grp["materialsID"]["pages"][:]
+        names = [
+            n.decode("utf-8") if isinstance(n, bytes) else str(n)
+            for n in raw_names
+        ]
+        ids = raw_ids.astype(int)
+        return {int(mid): name for mid, name in zip(ids, names)}
+    except Exception:
+        return {}
+
+
+def _load_nc_from_file(fpath: str, include_material_id: bool = False) -> pd.DataFrame | None:
     """Load MyNeutronCaptureOutput from one HDF5 file. Returns None if empty."""
     with h5py.File(fpath, "r") as f:
         grp = f["hit"]["MyNeutronCaptureOutput"]
         if int(grp["entries"][()]) == 0:
             return None
-        return pd.DataFrame({
+        data: dict = {
             "muon_id":    _read_pages(grp, "evtid"),
             "nc_id":      _read_pages(grp, "nC_track_id"),
             "nc_time_ns": _read_pages(grp, "nC_time_in_ns"),
@@ -49,7 +71,15 @@ def _load_nc_from_file(fpath: str) -> pd.DataFrame | None:
             "nc_x":       _read_pages(grp, "nC_x_position_in_m"),
             "nc_y":       _read_pages(grp, "nC_y_position_in_m"),
             "nc_z":       _read_pages(grp, "nC_z_position_in_m"),
-        })
+        }
+        if include_material_id:
+            try:
+                data["nc_material_id"] = _read_pages(grp, "nC_material_id").astype(np.int32)
+            except KeyError:
+                data["nc_material_id"] = np.full(
+                    len(data["muon_id"]), -1, dtype=np.int32
+                )
+        return pd.DataFrame(data)
 
 
 def _load_optical_from_file(fpath: str) -> pd.DataFrame | None:
@@ -102,7 +132,9 @@ def _run_id_from_dir(run_dir: str) -> int:
         ) from exc
 
 
-def _load_nc_from_run_dir(run_dir: str, run_id: int) -> pd.DataFrame:
+def _load_nc_from_run_dir(
+    run_dir: str, run_id: int, include_material: bool = False
+) -> pd.DataFrame:
     """Concatenate NC truth DataFrames from all output_t*.hdf5 in run_dir.
 
     Raises RuntimeError if the same (muon_id, nc_id) appears in more than
@@ -111,11 +143,46 @@ def _load_nc_from_run_dir(run_dir: str, run_id: int) -> pd.DataFrame:
 
     Adds a ``run_id`` column (integer extracted from the directory name) so
     that NCs from different runs can be distinguished after concatenation.
+
+    When ``include_material`` is True, also loads ``nC_material_id`` and maps
+    it to ``nc_material_name`` using a per-run material dictionary built by
+    merging the ``/hit/materials`` groups from *all* files in the run.  New
+    ID→name pairs from each file are added to the mapping; a RuntimeError is
+    raised if any file introduces the same ID with a different name (or the
+    same name with a different ID) than an already-seen entry.
     """
     files = sorted(glob.glob(os.path.join(run_dir, "output_t*.hdf5")))
     if not files:
         raise FileNotFoundError(f"No output_t*.hdf5 in {run_dir!r}")
-    frames = [_load_nc_from_file(f) for f in files]
+
+    material_mapping: dict[int, str] = {}
+    if include_material:
+        run_label = os.path.basename(run_dir)
+        for fpath in files:
+            fname = os.path.basename(fpath)
+            file_mapping = _load_material_mapping_from_file(fpath)
+            for mid, name in file_mapping.items():
+                if mid in material_mapping:
+                    if material_mapping[mid] != name:
+                        raise RuntimeError(
+                            f"Material mapping conflict in run {run_label!r} "
+                            f"(file {fname!r}): ID {mid} previously mapped to "
+                            f"{material_mapping[mid]!r} but now maps to {name!r}."
+                        )
+                else:
+                    # Also check the reverse: same name, different ID
+                    existing_id = next(
+                        (k for k, v in material_mapping.items() if v == name), None
+                    )
+                    if existing_id is not None:
+                        raise RuntimeError(
+                            f"Material mapping conflict in run {run_label!r} "
+                            f"(file {fname!r}): name {name!r} previously had "
+                            f"ID {existing_id} but now has ID {mid}."
+                        )
+                    material_mapping[mid] = name
+
+    frames = [_load_nc_from_file(f, include_material_id=include_material) for f in files]
     frames = [df for df in frames if df is not None]
     if not frames:
         raise ValueError(f"No NC entries in {run_dir!r}")
@@ -135,6 +202,12 @@ def _load_nc_from_run_dir(run_dir: str, run_id: int) -> pd.DataFrame:
         )
 
     df["run_id"] = run_id
+
+    if include_material and "nc_material_id" in df.columns:
+        df["nc_material_name"] = (
+            df["nc_material_id"].map(material_mapping).fillna("").astype(str)
+        )
+
     return df
 
 
@@ -235,11 +308,20 @@ def check_all_files_integrity(
     print(f"  All files intact — setups checked: [{setup_names}]  |  {n_runs_checked} runs total.")
 
 
-def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str] | None = None) -> pd.DataFrame:
+def build_nc_truth(
+    muon_base_dir: str,
+    verbose: bool = True,
+    omit_runs: set[str] | None = None,
+    include_material: bool = False,
+) -> pd.DataFrame:
     """Load NC truth from Sim 1 across all run_NNN subdirs of muon_base_dir.
 
     Returns a DataFrame with columns:
         run_id, muon_id, nc_id, nc_time_ns, flag_ge77, nc_x, nc_y, nc_z
+
+    When ``include_material`` is True, two extra columns are added:
+        nc_material_id   (int32)  — raw material ID from simulation
+        nc_material_name (str)    — material name resolved via per-run mapping
 
     ``run_id`` is the integer extracted from the run directory name
     (e.g. run_001 → 1).  The unique NC key across runs is
@@ -263,7 +345,7 @@ def build_nc_truth(muon_base_dir: str, verbose: bool = True, omit_runs: set[str]
     for rd in run_dirs:
         run_id = _run_id_from_dir(rd)
         try:
-            frames.append(_load_nc_from_run_dir(rd, run_id))
+            frames.append(_load_nc_from_run_dir(rd, run_id, include_material=include_material))
         except Exception as exc:
             skipped.append((rd, str(exc)))
 

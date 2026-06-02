@@ -3862,6 +3862,134 @@ def _compute_setup_curve_25b(
     return rows
 
 
+# ──────────────────────────────────────────────────────────────────────
+# In-water box filter (for advisor plot 25b comparison)
+# ──────────────────────────────────────────────────────────────────────
+_WATER_BOX_CRYO_R_M  = 3.200   # cryostat inner radius (m)
+_WATER_BOX_Z_LO_M    = -2.280  # cryostat lower straight boundary (m)
+_WATER_BOX_Z_HI_M    =  1.720  # cryostat upper straight boundary (m)
+_WATER_BOX_TANK_R_M  =  6.000  # water tank radius (m)
+_WATER_BOX_MATERIALS: frozenset[str] = frozenset(
+    {"Water", "metal_steel", "tyvek", "my_tyvek"}
+)
+
+
+def _in_water_box_mask(nc_truth: pd.DataFrame) -> np.ndarray:
+    """Boolean mask for NCs inside the water tank but outside the cryostat box.
+
+    Mirrors the advisor's ``in_water`` spatial + material selection:
+      - r < water_tank_radius (inside tank)
+      - r > cryo_inner_radius  OR  z outside cryostat straight part (outside cryo box)
+      - nc_material_name in {Water, metal_steel, tyvek, my_tyvek}
+
+    If nc_material_name is absent, only the spatial filter is applied.
+    """
+    r_xy = np.sqrt(nc_truth["nc_x"].values**2 + nc_truth["nc_y"].values**2)
+    z    = nc_truth["nc_z"].values
+    outside_cryo = (
+        (r_xy >= _WATER_BOX_CRYO_R_M) |
+        (z    <  _WATER_BOX_Z_LO_M)   |
+        (z    >  _WATER_BOX_Z_HI_M)
+    )
+    spatial = (r_xy < _WATER_BOX_TANK_R_M) & outside_cryo
+    if "nc_material_name" in nc_truth.columns:
+        mat_ok = nc_truth["nc_material_name"].isin(_WATER_BOX_MATERIALS).values
+        return spatial & mat_ok
+    return spatial
+
+
+def _compute_nc_truth_stat_limit_in_water(
+    nc_truth_full: pd.DataFrame,
+    W_values: list[int],
+    total_primaries: int,
+) -> list[dict]:
+    """NC-truth stat limit counting only in-water NCs (for advisor plot 25b).
+
+    Applies _in_water_box_mask so the W-threshold counting matches the
+    advisor's spatial + material filter.  Ge77 muon classification uses the
+    FULL nc_truth so that Ge77 muons whose NCs are all outside the water
+    region are still treated as Ge77 (FN when not tagged).
+
+    Parameters
+    ----------
+    nc_truth_full : full NC truth DataFrame (including nc_x, nc_y, nc_z cols).
+    W_values      : W thresholds to sweep (use W up to 50).
+    total_primaries : total simulated muons for TN denominator.
+    """
+    # Step 1: Ge77 muon classification from FULL nc_truth
+    muon_is_ge77 = (
+        nc_truth_full.groupby(["run_id", "muon_id"])["flag_ge77"]
+        .apply(lambda flags: bool((flags == 1).any()))
+    )
+    unique_muon_idx = muon_is_ge77.index
+    ge77_truth      = muon_is_ge77.values.astype(bool)
+
+    # Step 2: Apply in-water filter
+    mask        = _in_water_box_mask(nc_truth_full)
+    nc_filtered = nc_truth_full[mask]
+
+    if nc_filtered.empty:
+        print("  [WARN] _compute_nc_truth_stat_limit_in_water: no in-water NCs found.")
+        return []
+
+    # Step 3: In-window in-water NC counts per muon
+    in_window = (
+        (nc_filtered["nc_time_ns"].values >= MUON_WINDOW_LO_NS) &
+        (nc_filtered["nc_time_ns"].values <= MUON_WINDOW_HI_NS)
+    )
+    nc_w_df = pd.DataFrame({
+        "run_id":    nc_filtered["run_id"].values,
+        "muon_id":   nc_filtered["muon_id"].values,
+        "in_window": in_window.astype(np.int8),
+    })
+    w_per_muon = nc_w_df.groupby(["run_id", "muon_id"])["in_window"].sum()
+    w_counts   = w_per_muon.reindex(unique_muon_idx, fill_value=0).values.astype(np.int32)
+
+    # Step 4: Per-muon in-water Ge77 NC counts (no time cut) for ge_surv
+    ge77_nc_per_muon: np.ndarray = (
+        nc_filtered.groupby(["run_id", "muon_id"])["flag_ge77"]
+        .sum()
+        .reindex(unique_muon_idx, fill_value=0)
+        .values.astype(np.int32)
+    )
+    total_ge77_nc = float(ge77_nc_per_muon[ge77_truth].sum())
+    if total_ge77_nc == 0:
+        print("  [WARN] _compute_nc_truth_stat_limit_in_water: no in-water Ge77 NCs.")
+        return []
+
+    _tp_denom = max(total_primaries, 1)
+    rows: list[dict] = []
+    for W in W_values:
+        classified_ge77 = w_counts >= W
+        tp_mask = ge77_truth  &  classified_ge77
+        fn_mask = ge77_truth  & ~classified_ge77
+        tp = int(tp_mask.sum())
+        fp = int((~ge77_truth &  classified_ge77).sum())
+        fn = int(fn_mask.sum())
+        tn = total_primaries - tp - fp - fn
+
+        deadtime = calc_deadtime_confusion(tp, fp, tn, fn)
+        sig_surv = 1.0 - deadtime
+        if not np.isfinite(sig_surv) or sig_surv < 0.0:
+            continue
+
+        fn_gc_sum = float(ge77_nc_per_muon[fn_mask].sum())
+        ge_surv   = fn_gc_sum / total_ge77_nc
+
+        ge_unc   = np.sqrt(max(fn_gc_sum, 0.0)) / total_ge77_nc
+        n_vetoed = tp + fp
+        sig_unc  = _DT_SCALE * np.sqrt(max(n_vetoed, 0)) / max(_tp_denom, 1)
+
+        rows.append({
+            "x_cut":          float(W),
+            "ge_77_surv":     ge_surv,
+            "ge_77_surv_unc": ge_unc,
+            "sig_surv":       sig_surv,
+            "sig_surv_unc":   sig_unc,
+        })
+    return rows
+
+
 def _compute_nc_truth_stat_limit(
     nc_truth: pd.DataFrame,
     W_values: list[int],
@@ -3987,6 +4115,7 @@ def _draw_advisor_plot(
     heatmap_cmap: str = "YlOrBr",
     heatmap_alpha: float = 0.30,
     label_overrides: "dict[str, str] | None" = None,
+    nc_stat_limit_override: "list[dict] | None" = None,
 ) -> "matplotlib.cm.ScalarMappable | None":
     """Draw all advisor-comparison curves onto *ax*.
 
@@ -3994,11 +4123,13 @@ def _draw_advisor_plot(
       1. L1000 CDR Baseline (advisor CSV data)
       2. L1000 CDR Baseline — stat. limit (from stat-limit CSV, ``stat_limit_rows`` param)
       3. Each setup in results_to_show at M_fixed
-      4. NC-truth statistical limit for each setup (from ``r.stat_limit_rows``,
-         pre-computed by ``_compute_nc_truth_stat_limit`` in main())
+      4. Single shared NC-truth stat limit ('Full Captures - stat. limit')
 
     Note: ``stat_limit_rows`` (parameter) = advisor CSV stat limit (curve 2).
           ``r.stat_limit_rows`` (per-setup field) = NC-truth stat limit (curve 4).
+    ``nc_stat_limit_override`` — when provided, replaces r.stat_limit_rows as the
+          source for curve 4 (used by the advisor plot to apply the in-water box
+          filter so both stat limits are computed over the same NC population).
 
     ``sig_surv_min`` restricts all curves to signal survival >= sig_surv_min.
     ``label_overrides`` maps r.label.lower() → display label for user setups.
@@ -4031,10 +4162,14 @@ def _draw_advisor_plot(
             _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries))
         all_setup_rows.append(sr)
 
-    # Shared NC-truth stat limit (same for all setups): take from first available.
-    _shared_sl_rows_raw = next(
-        (r.stat_limit_rows for r in results_to_show if r.stat_limit_rows), None
-    )
+    # Shared NC-truth stat limit: use in-water override when given (advisor plot),
+    # otherwise fall back to the pre-computed full stat limit from results.
+    if nc_stat_limit_override is not None:
+        _shared_sl_rows_raw = nc_stat_limit_override
+    else:
+        _shared_sl_rows_raw = next(
+            (r.stat_limit_rows for r in results_to_show if r.stat_limit_rows), None
+        )
     shared_sl_filt = _collect_stat_limit(_shared_sl_rows_raw) if _shared_sl_rows_raw else []
 
     # Baseline color for the shared stat limit
@@ -4113,16 +4248,20 @@ def plot_ge_surv_vs_livetime_advisor(
     M_fixed: int = 6,
     statistical_limit_csv: str | None = None,
     baseline_display_label: str | None = None,
+    nc_stat_limit_override: "list[dict] | None" = None,
 ) -> None:
     """Plot 25b: Ge-77 survival vs signal livetime at M_fixed, all setups.
 
     Overlays L1000 CDR Baseline, its stat. limit (from stat-limit CSV),
-    all user setups, and the statistical limit for each user setup.
+    all user setups, and a single shared NC-truth stat limit.
     Every curve carries an inner (statistical) and outer (stat ⊕ 35 % systematic)
     uncertainty band. All W values are included.
 
     ``baseline_display_label`` overrides the display name of the setup identified
     as the baseline (label containing 'baseline', case-insensitive).
+    ``nc_stat_limit_override`` — when set, replaces the per-setup stat limit with
+    this pre-computed in-water box filtered stat limit for a fair comparison with
+    the advisor's stat limit.
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -4144,6 +4283,7 @@ def plot_ge_surv_vs_livetime_advisor(
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
         label_overrides=_label_overrides,
+        nc_stat_limit_override=nc_stat_limit_override,
     )
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
@@ -4178,6 +4318,7 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     M_fixed: int = 6,
     statistical_limit_csv: str | None = None,
     baseline_display_label: str | None = None,
+    nc_stat_limit_override: "list[dict] | None" = None,
 ) -> None:
     """Plot 25b_baseline: same as plot 25b but shows only the baseline setup.
 
@@ -4186,6 +4327,8 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     is found.
 
     ``baseline_display_label`` overrides the baseline's legend label.
+    ``nc_stat_limit_override`` — in-water box filtered stat limit for advisor
+    plot comparison (see plot_ge_surv_vs_livetime_advisor).
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -4208,6 +4351,7 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
         label_overrides=_label_overrides,
+        nc_stat_limit_override=nc_stat_limit_override,
     )
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
@@ -4933,8 +5077,14 @@ def main() -> None:
     print()
 
     # ── 1. Load shared NC truth ───────────────────────────────────────
+    # Load material names when an advisor CSV is provided so the in-water
+    # box filter (needed for a fair stat-limit comparison) is available.
+    _load_material = bool(args.advisor_csv)
     print("Loading NC truth ...")
-    nc_truth = build_nc_truth(args.muon_dir, verbose=True, omit_runs=omit_runs)
+    nc_truth = build_nc_truth(
+        args.muon_dir, verbose=True, omit_runs=omit_runs,
+        include_material=_load_material,
+    )
     print()
 
     # ── 1b. Total primaries (needed for stat limit and FoM) ───────────
@@ -4954,6 +5104,16 @@ def main() -> None:
     print("Computing NC-truth statistical limit ...")
     _stat_limit_rows = _compute_nc_truth_stat_limit(nc_truth, W_values_stat, _total_primaries)
     print(f"  Stat-limit rows computed: {len(_stat_limit_rows)}")
+
+    # In-water box filtered stat limit — only computed when an advisor CSV is
+    # provided, so the two stat limits are comparable (same NC population).
+    _stat_limit_rows_advisor: list[dict] = []
+    if args.advisor_csv:
+        print("Computing in-water box stat limit for advisor plot comparison ...")
+        _stat_limit_rows_advisor = _compute_nc_truth_stat_limit_in_water(
+            nc_truth, W_values_stat, _total_primaries
+        )
+        print(f"  In-water stat-limit rows: {len(_stat_limit_rows_advisor)}")
     print()
 
     # ── 2. Vertex count validation ────────────────────────────────────
@@ -5206,6 +5366,7 @@ def main() -> None:
             M_fixed=args.advisor_M,
             statistical_limit_csv=args.statistical_limit_csv,
             baseline_display_label=args.baseline_display_label,
+            nc_stat_limit_override=_stat_limit_rows_advisor or None,
         )
         plot_ge_surv_vs_livetime_advisor_baseline(
             results, W_values, args.output_dir,
@@ -5215,6 +5376,7 @@ def main() -> None:
             M_fixed=args.advisor_M,
             statistical_limit_csv=args.statistical_limit_csv,
             baseline_display_label=args.baseline_display_label,
+            nc_stat_limit_override=_stat_limit_rows_advisor or None,
         )
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=1,
