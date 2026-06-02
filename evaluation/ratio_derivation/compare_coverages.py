@@ -3762,6 +3762,7 @@ def _plot_curve_with_bands(
     alpha_inner: float = 0.25,
     alpha_outer: float = 0.12,
     point_labels: "np.ndarray | None" = None,
+    point_label_fontsize: int = 8,
 ) -> None:
     """Plot a 2D parametric curve with nested uncertainty bands.
 
@@ -3772,6 +3773,9 @@ def _plot_curve_with_bands(
     ``point_labels`` — optional array of W-value labels (same order as xs
     before sorting).  When provided, discrete markers are drawn at every
     point and the W-value is annotated at the first and last points.
+    The first (leftmost) annotation goes left; the last (rightmost) goes
+    upward to avoid overlap with a right-side colorbar.
+    ``point_label_fontsize`` — font size for W-value endpoint annotations.
     """
     if len(xs) == 0:
         return
@@ -3791,21 +3795,22 @@ def _plot_curve_with_bands(
         # Distinct marker at every data point
         ax.scatter(xs_s, ys_s, color=color, s=22, zorder=zorder + 1,
                    marker="o", linewidths=0)
-        # Annotate first point (smallest x = highest W)
+        # Annotate first point (smallest x = lowest W) — extend left
         ax.annotate(
             f"W = {int(pl_s[0])}",
             xy=(xs_s[0], ys_s[0]),
             xytext=(-5, 0), textcoords="offset points",
-            color=color, fontsize=8, ha="right", va="center",
+            color=color, fontsize=point_label_fontsize, ha="right", va="center",
             fontweight="bold",
         )
-        # Annotate last point (largest x = lowest W)
+        # Annotate last point (largest x = highest W) — extend upward so it
+        # does not overlap with a right-side colorbar.
         if len(xs_s) > 1:
             ax.annotate(
                 f"W = {int(pl_s[-1])}",
                 xy=(xs_s[-1], ys_s[-1]),
-                xytext=(5, 0), textcoords="offset points",
-                color=color, fontsize=8, ha="left", va="center",
+                xytext=(0, 8), textcoords="offset points",
+                color=color, fontsize=point_label_fontsize, ha="center", va="bottom",
                 fontweight="bold",
             )
 
@@ -4116,6 +4121,9 @@ def _draw_advisor_plot(
     heatmap_alpha: float = 0.30,
     label_overrides: "dict[str, str] | None" = None,
     nc_stat_limit_override: "list[dict] | None" = None,
+    point_label_fontsize: int = 8,
+    legend_fontsize: int = 10,
+    legend_bold: bool = False,
 ) -> "matplotlib.cm.ScalarMappable | None":
     """Draw all advisor-comparison curves onto *ax*.
 
@@ -4192,7 +4200,8 @@ def _draw_advisor_plot(
         _plot_curve_with_bands(ax, xs, ys, si, co,
                                color="black", label="L1000 CDR Baseline",
                                linestyle="-", linewidth=2.0, zorder=5,
-                               point_labels=_w_labels_sorted(adv_filt))
+                               point_labels=_w_labels_sorted(adv_filt),
+                               point_label_fontsize=point_label_fontsize)
 
     # ── 2. L1000 CDR Baseline — stat. limit ───────────────────────────
     if sl_filt:
@@ -4200,7 +4209,8 @@ def _draw_advisor_plot(
         _plot_curve_with_bands(ax, xs, ys, si, co,
                                color="dimgray", label="L1000 CDR Baseline — stat. limit",
                                linestyle="--", linewidth=1.8, zorder=4,
-                               point_labels=_w_labels_sorted(sl_filt))
+                               point_labels=_w_labels_sorted(sl_filt),
+                               point_label_fontsize=point_label_fontsize)
 
     # ── 3. User setup curves ──────────────────────────────────────────
     _overrides = label_overrides or {}
@@ -4213,7 +4223,8 @@ def _draw_advisor_plot(
             _plot_curve_with_bands(ax, xs, ys, si, co,
                                    color=c, label=disp_label,
                                    linestyle="-", linewidth=1.5, zorder=3,
-                                   point_labels=_w_labels_sorted(sr))
+                                   point_labels=_w_labels_sorted(sr),
+                                   point_label_fontsize=point_label_fontsize)
 
     # ── 4. Single shared NC-truth stat limit (W up to 50) ────────────
     if shared_sl_filt:
@@ -4223,7 +4234,8 @@ def _draw_advisor_plot(
                                label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.2, zorder=3,
                                alpha_inner=0.15, alpha_outer=0.07,
-                               point_labels=_w_labels_sorted(shared_sl_filt))
+                               point_labels=_w_labels_sorted(shared_sl_filt),
+                               point_label_fontsize=point_label_fontsize)
 
     # ── Legend: add reference patches for band explanation ────────────
     from matplotlib.patches import Patch as _Patch
@@ -4234,7 +4246,10 @@ def _draw_advisor_plot(
         _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
                label="Stat. ⊕ 35 % systematic"),
     ]
-    ax.legend(handles=handles, fontsize=10, loc="upper left")
+    leg = ax.legend(handles=handles, fontsize=legend_fontsize, loc="upper left")
+    if legend_bold and leg is not None:
+        for txt in leg.get_texts():
+            txt.set_fontweight("bold")
     return pcm
 
 
@@ -4277,30 +4292,38 @@ def plot_ge_surv_vs_livetime_advisor(
         _bl = _find_baseline_result(results)
         _label_overrides = {_bl.label.lower(): baseline_display_label}
 
-    fig, ax = plt.subplots(figsize=(12, 9))
+    fig, ax = plt.subplots(figsize=(16, 12))
     pcm = _draw_advisor_plot(
         ax, results, W_range, M_fixed, total_primaries,
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
         label_overrides=_label_overrides,
         nc_stat_limit_override=nc_stat_limit_override,
+        point_label_fontsize=11,
+        legend_fontsize=13,
+        legend_bold=True,
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        cbar.ax.tick_params(labelsize=13)
+        cbar.set_label("FoM (normalised 0–1)", fontsize=14)
 
-    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
-    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=16)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=16)
     ax.set_title(
         f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
         f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.set_xlim(0.80, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontsize(14)
+        tick.set_fontweight("bold")
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
@@ -4345,30 +4368,38 @@ def plot_ge_surv_vs_livetime_advisor_baseline(
     if baseline_display_label:
         _label_overrides = {baseline.label.lower(): baseline_display_label}
 
-    fig, ax = plt.subplots(figsize=(12, 9))
+    fig, ax = plt.subplots(figsize=(16, 12))
     pcm = _draw_advisor_plot(
         ax, [baseline], W_range, M_fixed, total_primaries,
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
         label_overrides=_label_overrides,
         nc_stat_limit_override=nc_stat_limit_override,
+        point_label_fontsize=11,
+        legend_fontsize=13,
+        legend_bold=True,
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        cbar.ax.tick_params(labelsize=13)
+        cbar.set_label("FoM (normalised 0–1)", fontsize=14)
 
-    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
-    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=16)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=16)
     ax.set_title(
         f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — {_bl_disp} only\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
         f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
-        fontsize=12,
+        fontsize=14,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.set_xlim(0.80, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontsize(14)
+        tick.set_fontweight("bold")
     fig.tight_layout()
     fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
