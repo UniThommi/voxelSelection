@@ -3628,6 +3628,8 @@ def plot_ge_surv_vs_livetime(
     output_dir: str,
     total_primaries: int = 0,
     color_map: dict[str, str] | None = None,
+    stat_limit_rows: "list[dict] | None" = None,
+    stat_limit_color: str = "tab:blue",
 ) -> None:
     """Scatter: Ge77-NC-weighted ge_surv (y) vs 1 − deadtime (x) per setup.
 
@@ -3635,6 +3637,9 @@ def plot_ge_surv_vs_livetime(
     Lower ge_surv = fewer Ge77 isotopes survive (better background rejection).
     Higher 1 − deadtime = more signal livetime (better).
     Good operating points sit in the bottom-right corner.
+
+    If ``stat_limit_rows`` is given, the shared NC-truth stat limit is overlaid
+    as 'Full Captures - stat. limit'.
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -3667,6 +3672,12 @@ def plot_ge_surv_vs_livetime(
         all_xs.extend(xs)
         all_ys.extend(ys)
 
+    sl_filt: list[dict] = []
+    if stat_limit_rows:
+        sl_filt = [r for r in stat_limit_rows if np.isfinite(r["sig_surv"])]
+        all_xs.extend(r["sig_surv"]   for r in sl_filt)
+        all_ys.extend(r["ge_77_surv"] for r in sl_filt)
+
     pcm = _fom_colormap_background(ax, all_xs, all_ys)
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
@@ -3674,6 +3685,17 @@ def plot_ge_surv_vs_livetime(
     for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
             ax.scatter(xs, ys, color=c, s=18, alpha=0.7, zorder=3)
+
+    if sl_filt:
+        xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
+        ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
+        si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
+        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+                               color=stat_limit_color,
+                               label="Full Captures - stat. limit",
+                               linestyle=":", linewidth=1.5, zorder=4,
+                               alpha_inner=0.15, alpha_outer=0.07)
 
     ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
     ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
@@ -3684,15 +3706,18 @@ def plot_ge_surv_vs_livetime(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.legend(
-        handles=[
-            plt.Line2D([0], [0], marker="o", color="w",
-                       markerfacecolor=color_map.get(r.label, "gray"),
-                       markersize=8, label=r.label)
-            for r in results
-        ],
-        fontsize=11, loc="upper left",
-    )
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map.get(r.label, "gray"),
+                   markersize=8, label=r.label)
+        for r in results
+    ]
+    if sl_filt:
+        legend_handles.append(
+            plt.Line2D([0], [0], color=stat_limit_color, linestyle=":",
+                       linewidth=1.5, label="Full Captures - stat. limit")
+        )
+    ax.legend(handles=legend_handles, fontsize=11, loc="upper left")
     ax.grid(True, alpha=0.3)
     # Lock axis limits to heatmap extent so no blank background areas appear.
     if all_xs and all_ys:
@@ -3986,6 +4011,10 @@ def _draw_advisor_plot(
         return [r for r in rows
                 if W_lo <= r["x_cut"] <= W_hi and r["sig_surv"] >= sig_surv_min]
 
+    def _collect_stat_limit(rows: list[dict]) -> list[dict]:
+        """Filter stat-limit rows by sig_surv only — no W upper cap."""
+        return [r for r in rows if r["sig_surv"] >= sig_surv_min]
+
     def _w_labels_sorted(rows: list[dict]) -> np.ndarray:
         """Return x_cut (W) values sorted in the same order as _plot_curve_with_bands."""
         xs_tmp = np.array([r["sig_surv"] for r in rows])
@@ -3997,14 +4026,23 @@ def _draw_advisor_plot(
     sl_filt  = _collect_filtered(stat_limit_rows)
 
     all_setup_rows: list[list[dict]] = []
-    all_sl_rows:    list[list[dict]] = []
     for r in results_to_show:
-        sr  = _collect_filtered(
+        sr = _collect_filtered(
             _compute_setup_curve_25b(r, W_range, M_fixed, total_primaries))
-        # Use pre-computed NC-truth stat limit if available; skip otherwise.
-        slr = _collect_filtered(r.stat_limit_rows) if r.stat_limit_rows else []
         all_setup_rows.append(sr)
-        all_sl_rows.append(slr)
+
+    # Shared NC-truth stat limit (same for all setups): take from first available.
+    _shared_sl_rows_raw = next(
+        (r.stat_limit_rows for r in results_to_show if r.stat_limit_rows), None
+    )
+    shared_sl_filt = _collect_stat_limit(_shared_sl_rows_raw) if _shared_sl_rows_raw else []
+
+    # Baseline color for the shared stat limit
+    _bl_result = next(
+        (r for r in results_to_show if "baseline" in r.label.lower()),
+        results_to_show[0] if results_to_show else None,
+    )
+    _stat_limit_color = color_map.get(_bl_result.label, "gray") if _bl_result else "gray"
 
     # ── FoM background heatmap (normalised 0–1, full axes range) ─────
     pcm = _fom_colormap_background(
@@ -4029,9 +4067,9 @@ def _draw_advisor_plot(
                                linestyle="--", linewidth=1.8, zorder=4,
                                point_labels=_w_labels_sorted(sl_filt))
 
-    # ── 3 + 4. User setups and their statistical limits ───────────────
+    # ── 3. User setup curves ──────────────────────────────────────────
     _overrides = label_overrides or {}
-    for r, sr, slr in zip(results_to_show, all_setup_rows, all_sl_rows):
+    for r, sr in zip(results_to_show, all_setup_rows):
         c = color_map.get(r.label, "gray")
         disp_label = _overrides.get(r.label.lower(), r.label)
 
@@ -4042,13 +4080,15 @@ def _draw_advisor_plot(
                                    linestyle="-", linewidth=1.5, zorder=3,
                                    point_labels=_w_labels_sorted(sr))
 
-        if slr:
-            xs, ys, si, co = _rows_to_band_arrays(slr)
-            _plot_curve_with_bands(ax, xs, ys, si, co,
-                                   color=c, label=f"{disp_label} — stat. limit",
-                                   linestyle=":", linewidth=1.2, zorder=3,
-                                   alpha_inner=0.15, alpha_outer=0.07,
-                                   point_labels=_w_labels_sorted(slr))
+    # ── 4. Single shared NC-truth stat limit (W up to 50) ────────────
+    if shared_sl_filt:
+        xs, ys, si, co = _rows_to_band_arrays(shared_sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color=_stat_limit_color,
+                               label="Full Captures - stat. limit",
+                               linestyle=":", linewidth=1.2, zorder=3,
+                               alpha_inner=0.15, alpha_outer=0.07,
+                               point_labels=_w_labels_sorted(shared_sl_filt))
 
     # ── Legend: add reference patches for band explanation ────────────
     from matplotlib.patches import Patch as _Patch
@@ -4228,25 +4268,25 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     setup_rows = _compute_setup_curve_25b(baseline, W_values, M_fixed, _tp)
     sl_rows    = baseline.stat_limit_rows or []
 
-    def _collect(rows: list[dict]) -> list[dict]:
+    def _collect_setup(rows: list[dict]) -> list[dict]:
         return [r for r in rows if r["sig_surv"] >= 0.80]
 
-    setup_filt = _collect(setup_rows)
-    sl_filt    = _collect(sl_rows)
+    def _collect_sl(rows: list[dict]) -> list[dict]:
+        """Stat-limit filter: sig_surv only — no W upper cap."""
+        return [r for r in rows if r["sig_surv"] >= 0.80]
+
+    setup_filt = _collect_setup(setup_rows)
+    sl_filt    = _collect_sl(sl_rows)
 
     disp_label = baseline_display_label if baseline_display_label else baseline.label
 
-    # FoM background heatmap
-    all_xs: list[float] = [r["sig_surv"]   for r in setup_filt + sl_filt]
-    all_ys: list[float] = [r["ge_77_surv"] for r in setup_filt + sl_filt]
-
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    pcm = None
-    if all_xs:
-        pcm = _fom_colormap_background(
-            ax, all_xs, all_ys, normalize=True, cmap="YlOrBr", alpha=0.30,
-        )
+    # FoM background heatmap — always covers full axes range
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
 
@@ -4265,7 +4305,7 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     if sl_filt:
         xs, ys, si, co = _rows_to_band_arrays(sl_filt)
         _plot_curve_with_bands(ax, xs, ys, si, co,
-                               color=c, label=f"{disp_label} — NC truth stat. limit",
+                               color=c, label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=3,
                                alpha_inner=0.15, alpha_outer=0.07,
                                point_labels=_w_labels(sl_filt))
@@ -4290,10 +4330,197 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.set_xlim(0.80, 1.005)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fname = "25_ge_surv_vs_livetime_nc_truth.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 25c — all user setups + shared stat limit, no advisor data
+# ──────────────────────────────────────────────────────────────────────
+def plot_ge_surv_setups_only(
+    results: list[SetupResult],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    M_fixed: int = 6,
+    baseline_display_label: str | None = None,
+) -> None:
+    """Plot 25c: all user setups + single shared stat limit, no advisor data.
+
+    x: 80–100% (signal survival), y: 0–100% (Ge-77 survival).
+    FoM colormap covers the full axes range.
+    All setups are shown; the shared NC-truth stat limit is drawn once as
+    'Full Captures - stat. limit' using the baseline setup's colour.
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+
+    W_range = W_values
+
+    _label_overrides: dict[str, str] | None = None
+    if baseline_display_label:
+        _bl = _find_baseline_result(results)
+        _label_overrides = {_bl.label.lower(): baseline_display_label}
+
+    # Shared stat limit (same for all setups — use first available)
+    _shared_sl_raw = next(
+        (r.stat_limit_rows for r in results if r.stat_limit_rows), None
+    )
+    shared_sl_filt = (
+        [r for r in _shared_sl_raw if r["sig_surv"] >= 0.80]
+        if _shared_sl_raw else []
+    )
+
+    # Baseline color for the stat limit line
+    _bl_r = next(
+        (r for r in results if "baseline" in r.label.lower()),
+        results[0] if results else None,
+    )
+    _sl_color = color_map.get(_bl_r.label, "gray") if _bl_r else "gray"
+
+    def _w_labels_sorted(rows: list[dict]) -> np.ndarray:
+        xs_tmp = np.array([r["sig_surv"] for r in rows])
+        order  = np.argsort(xs_tmp)
+        return np.array([rows[i]["x_cut"] for i in order])
+
+    fig, ax = plt.subplots(figsize=(12, 9))
+
+    # FoM background — full axes
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+
+    _overrides = _label_overrides or {}
+    _tp = total_primaries
+    for r in results:
+        if _tp == 0:
+            _tp = r.muon["muon_stats"]["total"]
+        c = color_map.get(r.label, "gray")
+        disp_label = _overrides.get(r.label.lower(), r.label)
+        sr = [row for row in _compute_setup_curve_25b(r, W_range, M_fixed, _tp)
+              if row["sig_surv"] >= 0.80]
+        if sr:
+            xs, ys, si, co = _rows_to_band_arrays(sr)
+            _plot_curve_with_bands(ax, xs, ys, si, co,
+                                   color=c, label=disp_label,
+                                   linestyle="-", linewidth=1.5, zorder=3,
+                                   point_labels=_w_labels_sorted(sr))
+
+    if shared_sl_filt:
+        xs, ys, si, co = _rows_to_band_arrays(shared_sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, co,
+                               color=_sl_color,
+                               label="Full Captures - stat. limit",
+                               linestyle=":", linewidth=1.5, zorder=4,
+                               alpha_inner=0.15, alpha_outer=0.07,
+                               point_labels=_w_labels_sorted(shared_sl_filt))
+
+    from matplotlib.patches import Patch as _Patch
+    handles, _ = ax.get_legend_handles_labels()
+    handles += [
+        _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
+               label="Statistical uncertainty"),
+        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
+               label="Stat. ⊕ 35 % systematic"),
+    ]
+    ax.legend(handles=handles, fontsize=10, loc="upper left")
+
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_title(
+        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — all setups\n"
+        f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
+        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25c_ge_surv_vs_livetime_setups.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Plot 25_stat_limit_only — only the shared NC-truth stat limit
+# ──────────────────────────────────────────────────────────────────────
+def plot_stat_limit_only(
+    stat_limit_rows: list[dict],
+    output_dir: str,
+    stat_limit_color: str = "tab:blue",
+) -> None:
+    """Plot 25_stat_limit_only: only the NC-truth statistical limit curve.
+
+    Shows the theoretical upper bound (W up to 50) with uncertainty bands.
+    x: 80–100%, y: 0–100%. FoM colormap covers full axes.
+    """
+    sl_filt = [r for r in stat_limit_rows if r["sig_surv"] >= 0.80]
+    if not sl_filt:
+        print("  [SKIP] plot_stat_limit_only: no stat-limit rows with sig_surv ≥ 80 %.")
+        return
+
+    def _w_labels_sorted(rows: list[dict]) -> np.ndarray:
+        xs_tmp = np.array([r["sig_surv"] for r in rows])
+        order  = np.argsort(xs_tmp)
+        return np.array([rows[i]["x_cut"] for i in order])
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+
+    xs, ys, si, co = _rows_to_band_arrays(sl_filt)
+    _plot_curve_with_bands(ax, xs, ys, si, co,
+                           color=stat_limit_color,
+                           label="Full Captures - stat. limit",
+                           linestyle=":", linewidth=2.0, zorder=4,
+                           alpha_inner=0.15, alpha_outer=0.07,
+                           point_labels=_w_labels_sorted(sl_filt))
+
+    from matplotlib.patches import Patch as _Patch
+    handles, _ = ax.get_legend_handles_labels()
+    handles += [
+        _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
+               label="Statistical uncertainty"),
+        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
+               label="Stat. ⊕ 35 % systematic"),
+    ]
+    ax.legend(handles=handles, fontsize=10, loc="upper left")
+
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=13)
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=13)
+    ax.set_title(
+        "NC-Truth Statistical Limit\n"
+        "W = min. detected NCs per muon (truth level, up to W = 50)\n"
+        "(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        fontsize=12,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "25_stat_limit_only.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300)
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -4310,11 +4537,14 @@ def plot_ge_surv_best_fom(
     total_primaries: int = 0,
     color_map: dict[str, str] | None = None,
     m_min: int = 1,
+    stat_limit_rows: "list[dict] | None" = None,
+    stat_limit_color: str = "tab:blue",
 ) -> None:
     """Scatter: one point per setup at the FoM-optimal (M, W).
 
     ``m_min`` restricts the M search space to M >= m_min (use 6 for plot 25e).
     Each point is annotated with its optimal (M, W) pair.
+    If ``stat_limit_rows`` is given, the shared NC-truth stat limit is overlaid.
     """
     if color_map is None:
         _pal = _colors(len(results))
@@ -4354,6 +4584,12 @@ def plot_ge_surv_best_fom(
     all_xs = [x for x in pts_x if np.isfinite(x)]
     all_ys = [y for y in pts_y if np.isfinite(y)]
 
+    sl_filt: list[dict] = []
+    if stat_limit_rows:
+        sl_filt = [r for r in stat_limit_rows if np.isfinite(r["sig_surv"])]
+        all_xs = list(all_xs) + [r["sig_surv"]   for r in sl_filt]
+        all_ys = list(all_ys) + [r["ge_77_surv"] for r in sl_filt]
+
     fig, ax = plt.subplots(figsize=(10, 7))
     pcm = _fom_colormap_background(ax, all_xs, all_ys)
     if pcm is not None:
@@ -4365,6 +4601,17 @@ def plot_ge_surv_best_fom(
             ax.annotate(lbl, xy=(x, y), xytext=(4, 3),
                         textcoords="offset points", fontsize=7, color=c)
 
+    if sl_filt:
+        xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
+        ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
+        si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
+        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+                               color=stat_limit_color,
+                               label="Full Captures - stat. limit",
+                               linestyle=":", linewidth=1.5, zorder=4,
+                               alpha_inner=0.15, alpha_outer=0.07)
+
     m_desc = f"M ≥ {m_min}" if m_min > 1 else "all M"
     ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
     ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
@@ -4375,15 +4622,18 @@ def plot_ge_surv_best_fom(
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.legend(
-        handles=[
-            plt.Line2D([0], [0], marker="o", color="w",
-                       markerfacecolor=color_map.get(r.label, "gray"),
-                       markersize=8, label=r.label)
-            for r in results
-        ],
-        fontsize=11, loc="upper left",
-    )
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map.get(r.label, "gray"),
+                   markersize=8, label=r.label)
+        for r in results
+    ]
+    if sl_filt:
+        legend_handles.append(
+            plt.Line2D([0], [0], color=stat_limit_color, linestyle=":",
+                       linewidth=1.5, label="Full Captures - stat. limit")
+        )
+    ax.legend(handles=legend_handles, fontsize=11, loc="upper left")
     ax.grid(True, alpha=0.3)
     # Lock axis limits to heatmap extent so no blank background areas appear.
     if all_xs and all_ys:
@@ -4628,11 +4878,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--baseline-display-label",
-        default="Homogeneous PMT Distribution",
+        default="Full Captures Homogeneous PMT Distribution",
         metavar="LABEL",
         help=(
             "Display label for the baseline setup in Plot 25/25b comparison plots "
-            "(default: 'Homogeneous PMT Distribution')."
+            "(default: 'Full Captures Homogeneous PMT Distribution')."
         ),
     )
     return parser.parse_args()
@@ -4699,8 +4949,10 @@ def main() -> None:
     print()
 
     # ── 1c. NC-truth statistical limit (shared across all setups) ────
+    # Always computed with W up to 50 regardless of args.W_max.
+    W_values_stat = list(range(1, 51))
     print("Computing NC-truth statistical limit ...")
-    _stat_limit_rows = _compute_nc_truth_stat_limit(nc_truth, W_values, _total_primaries)
+    _stat_limit_rows = _compute_nc_truth_stat_limit(nc_truth, W_values_stat, _total_primaries)
     print(f"  Stat-limit rows computed: {len(_stat_limit_rows)}")
     print()
 
@@ -4919,8 +5171,14 @@ def main() -> None:
     plot_recall_at_best_fom(results, M_values, W_values, args.output_dir,
                             total_primaries=_total_primaries, color_map=color_map,
                             min_m=6)
+    # Stat limit colour: use the baseline setup's colour so it's visually consistent.
+    _bl_for_sl = _find_baseline_result(results)
+    _sl_color  = color_map.get(_bl_for_sl.label, "tab:blue")
+
     plot_ge_surv_vs_livetime(results, M_values, W_values, args.output_dir,
-                             total_primaries=_total_primaries, color_map=color_map)
+                             total_primaries=_total_primaries, color_map=color_map,
+                             stat_limit_rows=_stat_limit_rows,
+                             stat_limit_color=_sl_color)
     # Plot 25: baseline + NC-truth stat limit (always generated, no advisor CSV needed)
     plot_ge_surv_vs_livetime_nc_truth_baseline(
         results, W_values, args.output_dir,
@@ -4929,6 +5187,16 @@ def main() -> None:
         M_fixed=args.advisor_M,
         baseline_display_label=args.baseline_display_label,
     )
+    # Plot 25c: all setups + shared stat limit, no advisor data
+    plot_ge_surv_setups_only(
+        results, W_values, args.output_dir,
+        total_primaries=_total_primaries,
+        color_map=color_map,
+        M_fixed=args.advisor_M,
+        baseline_display_label=args.baseline_display_label,
+    )
+    # Plot 25_stat_limit_only: only the shared stat limit
+    plot_stat_limit_only(_stat_limit_rows, args.output_dir, stat_limit_color=_sl_color)
     if args.advisor_csv:
         plot_ge_surv_vs_livetime_advisor(
             results, W_values, args.output_dir,
@@ -4949,9 +5217,11 @@ def main() -> None:
             baseline_display_label=args.baseline_display_label,
         )
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
-                          total_primaries=_total_primaries, color_map=color_map, m_min=1)
+                          total_primaries=_total_primaries, color_map=color_map, m_min=1,
+                          stat_limit_rows=_stat_limit_rows, stat_limit_color=_sl_color)
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
-                          total_primaries=_total_primaries, color_map=color_map, m_min=6)
+                          total_primaries=_total_primaries, color_map=color_map, m_min=6,
+                          stat_limit_rows=_stat_limit_rows, stat_limit_color=_sl_color)
 
     # ── 7. Write text files ───────────────────────────────────────────
     print("Writing text summaries ...")
