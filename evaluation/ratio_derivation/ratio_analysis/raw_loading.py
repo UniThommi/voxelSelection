@@ -57,8 +57,14 @@ def _load_material_mapping_from_file(fpath: str) -> dict[int, str]:
         return {}
 
 
-def _load_nc_from_file(fpath: str, include_material_id: bool = False) -> pd.DataFrame | None:
-    """Load MyNeutronCaptureOutput from one HDF5 file. Returns None if empty."""
+def _load_nc_from_file(fpath: str, include_material: bool = False) -> pd.DataFrame | None:
+    """Load MyNeutronCaptureOutput from one HDF5 file. Returns None if empty.
+
+    When ``include_material`` is True, loads ``nC_material_id`` and resolves it
+    to ``nc_material_name`` using the material mapping from the *same* file.
+    The mapping is file-local (IDs are re-indexed per file), so resolution must
+    happen before frames from different files are concatenated.
+    """
     with h5py.File(fpath, "r") as f:
         grp = f["hit"]["MyNeutronCaptureOutput"]
         if int(grp["entries"][()]) == 0:
@@ -72,13 +78,15 @@ def _load_nc_from_file(fpath: str, include_material_id: bool = False) -> pd.Data
             "nc_y":       _read_pages(grp, "nC_y_position_in_m"),
             "nc_z":       _read_pages(grp, "nC_z_position_in_m"),
         }
-        if include_material_id:
+        if include_material:
+            mapping = _load_material_mapping_from_file(fpath)
             try:
-                data["nc_material_id"] = _read_pages(grp, "nC_material_id").astype(np.int32)
+                mat_ids = _read_pages(grp, "nC_material_id").astype(np.int32)
             except KeyError:
-                data["nc_material_id"] = np.full(
-                    len(data["muon_id"]), -1, dtype=np.int32
-                )
+                mat_ids = np.full(len(data["muon_id"]), -1, dtype=np.int32)
+            data["nc_material_name"] = np.array(
+                [mapping.get(int(mid), "") for mid in mat_ids], dtype=object
+            )
         return pd.DataFrame(data)
 
 
@@ -144,45 +152,16 @@ def _load_nc_from_run_dir(
     Adds a ``run_id`` column (integer extracted from the directory name) so
     that NCs from different runs can be distinguished after concatenation.
 
-    When ``include_material`` is True, also loads ``nC_material_id`` and maps
-    it to ``nc_material_name`` using a per-run material dictionary built by
-    merging the ``/hit/materials`` groups from *all* files in the run.  New
-    ID→name pairs from each file are added to the mapping; a RuntimeError is
-    raised if any file introduces the same ID with a different name (or the
-    same name with a different ID) than an already-seen entry.
+    When ``include_material`` is True, each file's ``nC_material_id`` is
+    resolved to ``nc_material_name`` using that *same* file's
+    ``/hit/materials`` mapping before concatenation — the IDs are file-local
+    and must not be mixed across files.
     """
     files = sorted(glob.glob(os.path.join(run_dir, "output_t*.hdf5")))
     if not files:
         raise FileNotFoundError(f"No output_t*.hdf5 in {run_dir!r}")
 
-    material_mapping: dict[int, str] = {}
-    if include_material:
-        run_label = os.path.basename(run_dir)
-        for fpath in files:
-            fname = os.path.basename(fpath)
-            file_mapping = _load_material_mapping_from_file(fpath)
-            for mid, name in file_mapping.items():
-                if mid in material_mapping:
-                    if material_mapping[mid] != name:
-                        raise RuntimeError(
-                            f"Material mapping conflict in run {run_label!r} "
-                            f"(file {fname!r}): ID {mid} previously mapped to "
-                            f"{material_mapping[mid]!r} but now maps to {name!r}."
-                        )
-                else:
-                    # Also check the reverse: same name, different ID
-                    existing_id = next(
-                        (k for k, v in material_mapping.items() if v == name), None
-                    )
-                    if existing_id is not None:
-                        raise RuntimeError(
-                            f"Material mapping conflict in run {run_label!r} "
-                            f"(file {fname!r}): name {name!r} previously had "
-                            f"ID {existing_id} but now has ID {mid}."
-                        )
-                    material_mapping[mid] = name
-
-    frames = [_load_nc_from_file(f, include_material_id=include_material) for f in files]
+    frames = [_load_nc_from_file(f, include_material=include_material) for f in files]
     frames = [df for df in frames if df is not None]
     if not frames:
         raise ValueError(f"No NC entries in {run_dir!r}")
@@ -202,12 +181,6 @@ def _load_nc_from_run_dir(
         )
 
     df["run_id"] = run_id
-
-    if include_material and "nc_material_id" in df.columns:
-        df["nc_material_name"] = (
-            df["nc_material_id"].map(material_mapping).fillna("").astype(str)
-        )
-
     return df
 
 
