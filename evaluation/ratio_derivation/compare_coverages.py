@@ -4331,82 +4331,6 @@ def plot_ge_surv_vs_livetime_advisor(
     print(f"  Saved {fname}")
 
 
-def plot_ge_surv_vs_livetime_advisor_baseline(
-    results: list[SetupResult],
-    W_values: list[int],
-    output_dir: str,
-    advisor_csv: str,
-    total_primaries: int = 0,
-    color_map: dict[str, str] | None = None,
-    M_fixed: int = 6,
-    statistical_limit_csv: str | None = None,
-    baseline_display_label: str | None = None,
-    nc_stat_limit_override: "list[dict] | None" = None,
-) -> None:
-    """Plot 25b_baseline: same as plot 25b but shows only the baseline setup.
-
-    The baseline setup is identified by a case-insensitive 'baseline' match
-    in the setup label.  Falls back to the first setup with a warning if none
-    is found.
-
-    ``baseline_display_label`` overrides the baseline's legend label.
-    ``nc_stat_limit_override`` — in-water box filtered stat limit for advisor
-    plot comparison (see plot_ge_surv_vs_livetime_advisor).
-    """
-    if color_map is None:
-        _pal = _colors(len(results))
-        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
-
-    advisor_rows    = _parse_w_cut_csv(advisor_csv)
-    stat_limit_rows = _parse_w_cut_csv(statistical_limit_csv) if statistical_limit_csv else []
-
-    W_range = W_values
-
-    baseline = _find_baseline_result(results)
-    _bl_disp = baseline_display_label if baseline_display_label else baseline.label
-    _label_overrides: dict[str, str] | None = None
-    if baseline_display_label:
-        _label_overrides = {baseline.label.lower(): baseline_display_label}
-
-    fig, ax = plt.subplots(figsize=(16, 12))
-    pcm = _draw_advisor_plot(
-        ax, [baseline], W_range, M_fixed, total_primaries,
-        advisor_rows, stat_limit_rows, color_map,
-        sig_surv_min=0.80,
-        label_overrides=_label_overrides,
-        nc_stat_limit_override=nc_stat_limit_override,
-        point_label_fontsize=11,
-        legend_fontsize=13,
-        legend_bold=True,
-    )
-    if pcm is not None:
-        cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
-        cbar.ax.tick_params(labelsize=13)
-        cbar.set_label("FoM (normalised 0–1)", fontsize=14)
-
-    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=16)
-    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=16)
-    ax.set_title(
-        f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — {_bl_disp} only\n"
-        f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
-        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
-        fontsize=14,
-    )
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
-    ax.set_xlim(0.80, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.grid(True, alpha=0.3)
-    for tick in ax.get_xticklabels() + ax.get_yticklabels():
-        tick.set_fontsize(14)
-        tick.set_fontweight("bold")
-    fig.tight_layout()
-    fname = "25b_baseline_ge_surv_vs_livetime_advisor.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300)
-    plt.close(fig)
-    print(f"  Saved {fname}")
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Plot 25 — NC-truth baseline: setup curve + NC-truth stat limit only
 # ──────────────────────────────────────────────────────────────────────
@@ -5399,16 +5323,7 @@ def main() -> None:
             baseline_display_label=args.baseline_display_label,
             nc_stat_limit_override=_stat_limit_rows_advisor or None,
         )
-        plot_ge_surv_vs_livetime_advisor_baseline(
-            results, W_values, args.output_dir,
-            advisor_csv=args.advisor_csv,
-            total_primaries=_total_primaries,
-            color_map=color_map,
-            M_fixed=args.advisor_M,
-            statistical_limit_csv=args.statistical_limit_csv,
-            baseline_display_label=args.baseline_display_label,
-            nc_stat_limit_override=_stat_limit_rows_advisor or None,
-        )
+
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=1,
                           stat_limit_rows=_stat_limit_rows, stat_limit_color=_sl_color)
