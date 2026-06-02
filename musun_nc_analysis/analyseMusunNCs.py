@@ -3189,14 +3189,6 @@ def parse_args() -> argparse.Namespace:
             "(3) learning curve vs sub-sampled data in 1e4/…/1e7/ subdirectories."
         ),
     )
-    p.add_argument( # Not really needed
-        "--eps-target",
-        type=float,
-        default=1e-3,
-        metavar="EPS",
-        help="Level-1 DKW target: flag if Δ_max < EPS (default: 1e-3).",
-    )
-    return p.parse_args()
 
 
 def main() -> None:
