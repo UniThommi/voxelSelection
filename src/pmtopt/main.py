@@ -740,9 +740,16 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     if args.per_area:
         title_extra += ", per-area"
 
+    _plot_w2: "float | None" = None
+    if len(plot_centers) >= 2:
+        from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
+        _plot_w2 = compute_wasserstein_homogeneity(
+            plot_centers, reference=get_w2_ref()
+        )["w2"]
+
     plot_selected_voxels(
         plot_centers, plot_layers, plot_ids,
-        output_path=plot_path, title_extra=title_extra,
+        output_path=plot_path, title_extra=title_extra, w2=_plot_w2,
     )
 
     # Free B before sensitivity
@@ -847,9 +854,17 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
                 parts.append(f"eff={eff:.4%}")
             title_extra = "  ".join(parts)
 
+        _plot_w2: "float | None" = None
+        if len(centers) >= 2:
+            from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
+            _plot_w2 = compute_wasserstein_homogeneity(
+                centers, reference=get_w2_ref()
+            )["w2"]
+
         png_path = json_path.with_suffix(".png")
         plot_selected_voxels(centers, layers, ids_list,
-                             output_path=png_path, title_extra=title_extra)
+                             output_path=png_path, title_extra=title_extra,
+                             w2=_plot_w2)
         print(f"  -> {png_path}")
 
 

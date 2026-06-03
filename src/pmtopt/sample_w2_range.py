@@ -1012,10 +1012,8 @@ def sample_w2_range(
             all_layers[sel_arr],
             [str(voxel_ids[c]) for c in sel_cols],
             output_path=output_dir / f"config_{cfg_idx:03d}.png",
-            title_extra=(
-                f"W2={w2_s} mm  eff={eff:.4%}  α_avg={alpha_avg:.2f}"
-                f"  [{alg_tag}]"
-            ),
+            title_extra=f"eff={eff:.4%}  α_avg={alpha_avg:.2f}  [{alg_tag}]",
+            w2=w2_val,
         )
 
         elapsed = time.time() - t0
