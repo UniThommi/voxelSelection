@@ -3679,11 +3679,11 @@ def plot_ge_surv_vs_livetime(
         all_ys.extend(r["ge_77_surv"] for r in sl_filt)
 
     pcm = _fom_colormap_background(
-        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
     for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
@@ -3802,14 +3802,14 @@ def _plot_curve_with_bands(
             color=color, fontsize=point_label_fontsize, ha="right", va="center",
             fontweight="bold",
         )
-        # Annotate last point (largest x = highest W) — extend upward so it
+        # Annotate last point (largest x = highest W) — extend left so it
         # does not overlap with a right-side colorbar.
         if len(xs_s) > 1:
             ax.annotate(
                 f"W = {int(pl_s[-1])}",
                 xy=(xs_s[-1], ys_s[-1]),
-                xytext=(0, 8), textcoords="offset points",
-                color=color, fontsize=point_label_fontsize, ha="center", va="bottom",
+                xytext=(-5, 0), textcoords="offset points",
+                color=color, fontsize=point_label_fontsize, ha="right", va="center",
                 fontweight="bold",
             )
 
@@ -4304,16 +4304,16 @@ def plot_ge_surv_vs_livetime_advisor(
     )
     if pcm is not None:
         cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
-        cbar.ax.tick_params(labelsize=13)
-        cbar.set_label("FoM (normalised 0–1)", fontsize=14)
+        cbar.ax.tick_params(labelsize=16)
+        cbar.set_label("FoM (normalised 0–1)", fontsize=16, fontweight="bold")
 
-    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=16)
-    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=16)
+    ax.set_xlabel("Signal survival  (1 − deadtime)", fontsize=20, fontweight="bold")
+    ax.set_ylabel("Ge-77 survival  (Σ FN NCs / Σ all Ge-77 NCs)", fontsize=20, fontweight="bold")
     ax.set_title(
         f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
         f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
-        fontsize=14,
+        fontsize=18, fontweight="bold",
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -4321,7 +4321,7 @@ def plot_ge_surv_vs_livetime_advisor(
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
     for tick in ax.get_xticklabels() + ax.get_yticklabels():
-        tick.set_fontsize(14)
+        tick.set_fontsize(16)
         tick.set_fontweight("bold")
     fig.tight_layout()
     fname = "25b_ge_surv_vs_livetime_advisor.png"
@@ -4382,11 +4382,11 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
 
     # FoM background heatmap — always covers full axes range
     pcm = _fom_colormap_background(
-        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
     def _w_labels(rows: list[dict]) -> np.ndarray:
         xs_tmp = np.array([r["sig_surv"] for r in rows])
@@ -4493,11 +4493,11 @@ def plot_ge_surv_setups_only(
 
     # FoM background — full axes
     pcm = _fom_colormap_background(
-        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
     _overrides = _label_overrides or {}
     _tp = total_primaries
@@ -4580,11 +4580,11 @@ def plot_stat_limit_only(
     fig, ax = plt.subplots(figsize=(10, 8))
 
     pcm = _fom_colormap_background(
-        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
     xs, ys, si, co = _rows_to_band_arrays(sl_filt)
     _plot_curve_with_bands(ax, xs, ys, si, co,
@@ -4690,11 +4690,11 @@ def plot_ge_surv_best_fom(
 
     fig, ax = plt.subplots(figsize=(10, 7))
     pcm = _fom_colormap_background(
-        ax, [], [], normalize=True, cmap="YlOrBr", alpha=0.30,
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
 
     for r, c, x, y, lbl in zip(results, colors, pts_x, pts_y, pt_labels):
         if np.isfinite(x):
