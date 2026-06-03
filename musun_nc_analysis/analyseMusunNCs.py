@@ -1630,26 +1630,48 @@ def convergence_analysis(
     def _compute_metrics(
         sorted_runs_local: list[np.ndarray],
     ) -> tuple[list[float], np.ndarray]:
-        """W1 vs k for given pre-sorted per-run arrays."""
+        """W1 vs k for given pre-sorted per-run arrays.
+
+        k == n_runs is short-circuited to W1 = 0: the full merged dataset
+        compared to itself is trivially zero, and skipping the merge avoids
+        the largest allocation (n+m ≈ 2×total_N elements).
+        """
+        _t0_cm = time.perf_counter()
+        total_pts = sum(a.size for a in sorted_runs_local)
         sorted_ref = _merge_sorted_runs(sorted_runs_local, run_indices)
         if sorted_ref.size == 0:
             del sorted_ref
             return [], np.zeros((n_runs, N_PERMUTATIONS))
+        _log_resources(f"  _compute_metrics merge ref  N={total_pts:.3e}")
         det_w1: list[float] = []
         for k in k_vals:
-            sk = _merge_sorted_runs(sorted_runs_local, list(range(k)))
-            w1 = _w1_sorted(sk, sorted_ref)
-            del sk
-            det_w1.append(w1 if not np.isnan(w1) else 0.0)
+            if k == n_runs:
+                det_w1.append(0.0)  # full dataset vs itself: W1 = 0 by definition
+            else:
+                sk = _merge_sorted_runs(sorted_runs_local, list(range(k)))
+                w1 = _w1_sorted(sk, sorted_ref)
+                del sk
+                det_w1.append(w1 if not np.isnan(w1) else 0.0)
+        _log_resources(
+            f"  _compute_metrics det loop ({n_runs - 1} W1 calls)",
+            _t0_cm,
+        )
         rand_w1_m = np.zeros((n_runs, N_PERMUTATIONS))
         for perm_i in range(N_PERMUTATIONS):
             shuffled = run_indices.copy()
             rng.shuffle(shuffled)
             for k in k_vals:
-                sk = _merge_sorted_runs(sorted_runs_local, shuffled[:k])
-                w1 = _w1_sorted(sk, sorted_ref)
-                del sk
-                rand_w1_m[k - 1, perm_i] = w1 if not np.isnan(w1) else 0.0
+                if k == n_runs:
+                    pass  # shuffled[:n_runs] == all runs → W1 = 0; matrix already 0
+                else:
+                    sk = _merge_sorted_runs(sorted_runs_local, shuffled[:k])
+                    w1 = _w1_sorted(sk, sorted_ref)
+                    del sk
+                    rand_w1_m[k - 1, perm_i] = w1 if not np.isnan(w1) else 0.0
+        _log_resources(
+            f"  _compute_metrics perm loop ({N_PERMUTATIONS}×{n_runs - 1} W1 calls)",
+            _t0_cm,
+        )
         del sorted_ref
         return det_w1, rand_w1_m
 
@@ -1772,6 +1794,10 @@ def convergence_analysis(
         plt.tight_layout()
         _save(fig, out_dir / "convergence_nc_count_cuts.png")
 
+    # Free the NC-count W1 arrays; they are no longer needed.
+    del dw1_fr, rw1_fr, dw1_c100r, rw1_c100r, dw1_cr, rw1_cr
+    gc.collect()
+
     if not full_convergence:
         return recommendations
 
@@ -1792,12 +1818,14 @@ def convergence_analysis(
 
     for obs_key, obs_xlabel, obs_title in other_observables:
         print(f"\n  Convergence: {obs_title} ...", flush=True)
+        gc.collect()  # release any memory from the previous observable before allocating
         t_obs = _log_resources(f"{obs_key}: begin")
 
         sorted_runs: list[np.ndarray] = []
         for rd in run_list:
             raw = _transform(get_raw_obs(rd, obs_key), obs_key)
             sorted_runs.append(np.sort(raw))
+            del raw  # free the (possibly transformed) intermediate immediately
         t_obs = _log_resources(f"{obs_key}: sorted {n_runs} runs", t_obs)
 
         det_w1, rand_w1 = _compute_metrics(sorted_runs)
@@ -1878,6 +1906,7 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
     ]
 
     for obs_key, obs_title, obs_xlabel, getter in observables:
+        _t0_pw = _log_resources(f"  pairwise_w1: start {obs_title}")
         print(f"\n  Pairwise W1: {obs_title} ...", flush=True)
 
         arrays = [getter(rd) for rd in run_list]
@@ -1885,6 +1914,7 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
             print(f"    WARNING: empty array for at least one run; skipping {obs_title}.")
             continue
         sorted_arrays = [np.sort(a) for a in arrays]
+        _log_resources(f"  pairwise_w1: {obs_title} sorted", _t0_pw)
 
         # Compute all C(n_runs, 2) pairwise W1 distances
         pw_w1 = np.zeros((n_runs, n_runs))
@@ -1894,6 +1924,13 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
             pw_w1[i, j] = w1
             pw_w1[j, i] = w1
             pair_vals.append(w1)
+        # Free sorted arrays as soon as W1 distances are in hand.
+        # data_range can be read from the sorted extremes without concatenation.
+        data_range = float(
+            max(s[-1] for s in sorted_arrays) - min(s[0] for s in sorted_arrays)
+        )
+        del sorted_arrays
+        _log_resources(f"  pairwise_w1: {obs_title} {n_pairs} W1 calls done", _t0_pw)
         pv = np.array(pair_vals, dtype=np.float64)
 
         # Summary statistics
@@ -1904,11 +1941,6 @@ def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
         max_w  = float(pv.max())
         p95_w  = float(np.percentile(pv, 95))
         p99_w  = float(np.percentile(pv, 99))
-
-        # Normalizations
-        all_data   = np.concatenate(arrays)
-        data_range = float(all_data.max() - all_data.min())
-        del all_data
 
         z_scores   = (pv - mean_w) / std_w  if std_w > 0.0  else np.zeros_like(pv)
         norm_range = pv / data_range         if data_range > 0.0 else np.zeros_like(pv)
@@ -2226,12 +2258,15 @@ def level2_pairwise_fluctuations(
     print(f"  Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}")
 
     fluctuations: dict[str, tuple[float, float]] = {}
+    _t0_l2 = time.perf_counter()
 
     for field_key, field_label in NC_FIELDS_FOR_CONV.items():
+        _t0_field = time.perf_counter()
         arrays = [extractor(rd)[field_key] for rd in run_list]
         if any(a.size == 0 for a in arrays):
             print(f"  SKIP {field_key}: empty array in ≥1 run")
             continue
+        n_total = sum(a.size for a in arrays)
         sorted_arrs = [np.sort(a) for a in arrays]
 
         w1_vals: list[float] = []
@@ -2242,6 +2277,7 @@ def level2_pairwise_fluctuations(
                 w1 = _w1_sorted(sorted_arrs[i], sorted_arrs[j])
             if not np.isnan(w1):
                 w1_vals.append(w1)
+        del sorted_arrs
 
         if not w1_vals:
             continue
@@ -2249,8 +2285,12 @@ def level2_pairwise_fluctuations(
         mean_w1 = float(arr.mean())
         std_w1  = float(arr.std())
         fluctuations[field_key] = (mean_w1, std_w1)
-        print(f"  {field_key:20s}: mean W1 = {mean_w1:.6g}  std = {std_w1:.6g}")
+        _log_resources(
+            f"  L2 {field_key:20s} N={n_total:.2e}  mean={mean_w1:.4g}  std={std_w1:.4g}",
+            _t0_field,
+        )
 
+    _log_resources(f"  L2 all {len(fluctuations)} fields done", _t0_l2)
     return fluctuations
 
 
@@ -3124,14 +3164,21 @@ def run_statistical_convergence_test(
           f"|  total ~{total_muons:.2e} muons")
     print(f"{'='*60}")
 
+    _t0_sct = _log_resources("convergence_test: start L2 all muons")
     fluctuations = level2_pairwise_fluctuations(
         run_list, extractor=_extract_nc_fields_run, label="all muons"
     )
+    _log_resources("convergence_test: L2 all muons done", _t0_sct)
+
+    _log_resources("convergence_test: start L2 Ge77 muons")
     fluctuations_ge77 = level2_pairwise_fluctuations(
         run_list, extractor=_extract_nc_fields_run_ge77, label="Ge77 muons"
     )
+    _log_resources("convergence_test: L2 Ge77 muons done", _t0_sct)
 
+    _log_resources("convergence_test: start L3 learning curve")
     level3_learning_curve(data_path, run_list, fluctuations, fluctuations_ge77, out_dir)
+    _log_resources("convergence_test: L3 learning curve done", _t0_sct)
 
     print(f"\n{'='*60}")
     print("Convergence test complete.")
@@ -3230,9 +3277,17 @@ def run_all_w1_convergence_analysis(
 
     Returns the k-recommendations dict from convergence_analysis.
     """
+    _t0_w1 = _log_resources("run_all_w1: start convergence_analysis (full)")
     recommendations = convergence_analysis(run_list, out_dir, full_convergence=True)
+    _log_resources("run_all_w1: convergence_analysis done", _t0_w1)
+
+    _log_resources("run_all_w1: start pairwise_w1_analysis")
     pairwise_w1_analysis(run_list, out_dir)
+    _log_resources("run_all_w1: pairwise_w1_analysis done", _t0_w1)
+
+    _log_resources("run_all_w1: start run_statistical_convergence_test (L2+L3)")
     run_statistical_convergence_test(data_path, run_list, out_dir)
+    _log_resources("run_all_w1: run_statistical_convergence_test done", _t0_w1)
     return recommendations
 
 
@@ -3315,36 +3370,65 @@ def main() -> None:
     # ---- Plots ----
     print("\n--- Standard muon distributions ---")
     plot_muon_distributions(agg, out_dir)
+    _log_resources("plot_muon_distributions", t_main)
     plot_ge77_fraction_bar(agg, out_dir)
-    _log_resources("muon distribution plots done", t_main)
+    _log_resources("plot_ge77_fraction_bar", t_main)
 
     print("\n--- NC distributions ---")
     plot_nc_count_per_muon(agg, out_dir)
+    _log_resources("plot_nc_count_per_muon", t_main)
     plot_ge77_per_ge77muon(agg, out_dir)
+    _log_resources("plot_ge77_per_ge77muon", t_main)
     plot_nc_times(agg, out_dir)
+    _log_resources("plot_nc_times", t_main)
     plot_nc_positions(agg, out_dir)
+    _log_resources("plot_nc_positions", t_main)
     plot_nc_material_distribution(run_list, out_dir)
+    _log_resources("plot_nc_material_distribution", t_main)
     plot_nc_gamma_count(agg, out_dir)
-    _log_resources("NC distribution plots done", t_main)
+    _log_resources("plot_nc_gamma_count", t_main)
 
     print("\n--- Outlier analysis ---")
     outlier_info = analyze_outliers(agg, out_dir)
-    _log_resources("outlier analysis done", t_main)
+    _log_resources("analyze_outliers", t_main)
 
     print("\n--- Outlier muon fingerprint analysis ---")
     analyze_repeated_outlier_muons(run_list, out_dir)
-    _log_resources("fingerprint analysis done", t_main)
+    _log_resources("analyze_repeated_outlier_muons", t_main)
 
     print("\n--- Cut NC material ---")
     plot_cut_nc_material(run_list, out_dir)
-    _log_resources("cut NC material done", t_main)
+    _log_resources("plot_cut_nc_material", t_main)
+
+    # Free memory no longer needed before the W1 convergence analysis.
+    # write_statistics only needs 5 scalar counts from agg; extract them first.
+    agg_stats = {k: agg[k] for k in ("n_muons_total", "n_nc_total", "n_nc_ge77",
+                                      "n_muons_ge77", "n_muons_with_nc")}
+    del agg
+    # Strip RunData fields used only by earlier plot stages:
+    #   muon kinematics (px/py/pz used by fingerprint; x/y/z by 3-D scatter/fingerprint)
+    #   muon_evtid not used by any convergence function
+    #   nc_material_name / nc_is_water / ge77_nc_per_ge77muon not used by convergence
+    for _rd in run_list:
+        _rd.muon_evtid           = np.array([], dtype=np.int64)
+        _rd.muon_px_mev          = np.array([], dtype=np.float64)
+        _rd.muon_py_mev          = np.array([], dtype=np.float64)
+        _rd.muon_pz_mev          = np.array([], dtype=np.float64)
+        _rd.muon_x_m             = np.array([], dtype=np.float64)
+        _rd.muon_y_m             = np.array([], dtype=np.float64)
+        _rd.muon_z_m             = np.array([], dtype=np.float64)
+        _rd.nc_material_name     = np.array([], dtype=object)
+        _rd.nc_is_water          = np.array([], dtype=bool)
+        _rd.ge77_nc_per_ge77muon = np.array([], dtype=np.int64)
+    gc.collect()
+    _log_resources("freed agg + unused RunData fields before W1 analysis", t_main)
 
     print("\n--- W1 Convergence Analysis ---")
     recommendations = run_all_w1_convergence_analysis(data_path, run_list, out_dir)
     _log_resources("W1 convergence analysis done", t_main)
 
     print("\n--- Statistics ---")
-    write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
+    write_statistics(agg_stats, outlier_info, recommendations, run_list, out_dir)
     _log_resources("total runtime", t_main)
 
     print("\nDone.")
