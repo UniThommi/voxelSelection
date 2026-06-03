@@ -424,7 +424,8 @@ def sample_efficiency_range(
             layers[sel_arr],
             [str(voxel_ids[c]) for c in final_selected],
             output_path=plot_path,
-            title_extra=f"eff={achieved:.4%}  W2={w2_str} mm  [{info}]",
+            title_extra=f"eff={achieved:.4%}  [{info}]",
+            w2=w2,
         )
 
     # setup_00: best (greedy, deterministic)

@@ -27,6 +27,7 @@ def plot_selected_voxels(
     selected_ids: list[str],
     output_path: Path,
     title_extra: str = "",
+    w2: "float | None" = None,
 ) -> None:
     """3D scatter plot of selected voxel positions."""
     Z_BASE = Z_BASE_GLOBAL
@@ -47,10 +48,10 @@ def plot_selected_voxels(
                 [Z_BASE, Z_TOP], color="gray", alpha=0.3, linewidth=0.5)
 
     ax.plot(R_PIT * np.cos(theta), R_PIT * np.sin(theta), Z_BASE,
-            color="blue", alpha=0.7, linewidth=1.2, label=f"Pit (r={R_PIT})")
+            color="blue", alpha=0.7, linewidth=1.2, label=f"Pit boundary (r = {R_PIT} mm)")
     ax.plot(R_ZYL_BOT * np.cos(theta), R_ZYL_BOT * np.sin(theta), Z_BASE,
             color="green", alpha=0.7, linewidth=1.2,
-            label=f"Bot ring inner (r={R_ZYL_BOT})")
+            label=f"Bot inner boundary (r = {R_ZYL_BOT} mm)")
 
     layer_markers = {"pit": "o", "bot": "s", "top": "^", "wall": "D"}
     layer_colors = {"pit": "#1f77b4", "bot": "#2ca02c", "top": "#ff7f0e", "wall": "#d62728"}
@@ -66,8 +67,8 @@ def plot_selected_voxels(
         ax.scatter(
             pts[:, 0], pts[:, 1], pts[:, 2],
             c=color, marker=layer_markers.get(layer, "o"),
-            s=30, alpha=0.8, edgecolors=edge_color, linewidths=0.5,
-            label=f"Selected ({layer}: {mask.sum()})",
+            s=40, alpha=0.85, edgecolors=edge_color, linewidths=0.5,
+            label=f"{layer.capitalize()}  (N = {mask.sum()})",
         )
 
     boundary_failures = []
@@ -90,7 +91,7 @@ def plot_selected_voxels(
         fail_pts = selected_centers[boundary_failures]
         ax.scatter(
             fail_pts[:, 0], fail_pts[:, 1], fail_pts[:, 2],
-            c="yellow", marker="x", s=100, linewidths=2,
+            c="red", marker="x", s=120, linewidths=2,
             label=f"Boundary violations ({len(boundary_failures)})",
         )
 
@@ -99,30 +100,26 @@ def plot_selected_voxels(
             p1, p2 = selected_centers[i], selected_centers[j]
             ax.plot(
                 [p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
-                color="yellow", linewidth=2, alpha=0.8,
+                color="red", linewidth=2, alpha=0.8,
             )
 
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
-    ax.set_zlabel("Z (mm)")
-    ax.set_title(
-        f"Selected Voxels (N={len(selected_centers)}, "
-        f"boundary fails={len(boundary_failures)}, "
-        f"dist violations={len(distance_violations)})"
-        + (f"\n{title_extra}" if title_extra else "")
-    )
-    ax.legend(loc="upper left", fontsize=8)
+    ax.set_xlabel("x (mm)", fontsize=13, labelpad=8)
+    ax.set_ylabel("y (mm)", fontsize=13, labelpad=8)
+    ax.set_zlabel("z (mm)", fontsize=13, labelpad=8)
+    ax.tick_params(axis="both", labelsize=10)
 
-    area_counts = {area: int(np.sum(selected_layers == area))
-                   for area in ["pit", "bot", "top", "wall"]}
-    count_str = "\n".join(f"{a.upper():>4}: {cnt:>3} PMTs"
-                          for a, cnt in area_counts.items())
-    count_str += f"\n{'Total':>4}: {len(selected_centers):>3} PMTs"
-    ax.text2D(0.98, 0.50, count_str, transform=ax.transAxes, fontsize=9,
-              verticalalignment="center", horizontalalignment="right",
-              fontfamily="monospace",
-              bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow",
-                        edgecolor="gray", alpha=0.85))
+    title_parts = [f"Selected PMT Positions  (N = {len(selected_centers)})"]
+    if w2 is not None:
+        title_parts.append(f"W₂ = {w2:.1f} mm")
+    if boundary_failures:
+        title_parts.append(f"boundary fails = {len(boundary_failures)}")
+    if distance_violations:
+        title_parts.append(f"dist violations = {len(distance_violations)}")
+    title_line1 = "   |   ".join(title_parts)
+    title_str = title_line1 + (f"\n{title_extra}" if title_extra else "")
+    ax.set_title(title_str, fontsize=13, pad=12)
+
+    ax.legend(loc="upper left", fontsize=10, framealpha=0.85)
 
     max_range = max(R_ZYLINDER, (Z_TOP - Z_BASE) / 2)
     mid_z = (Z_BASE + Z_TOP) / 2
