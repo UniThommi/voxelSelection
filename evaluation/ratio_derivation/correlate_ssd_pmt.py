@@ -727,8 +727,21 @@ def _scatter_panel(
     labels: list[str],
     x_label: str,
     y_label: str,
+    force_origin: bool = False,
 ) -> None:
-    """Scatter + y=x reference + OLS regression + CI + Pearson/Spearman stats box."""
+    """Scatter + y=x reference + OLS regression + CI + Pearson/Spearman stats box.
+
+    When *force_origin* is True the OLS fit is constrained to pass through the
+    origin (zero intercept).  This is appropriate for same-metric SSD-vs-PMT
+    comparisons where perfect agreement implies PMT = 1·SSD, i.e. a proportional
+    relationship through the origin.  Introducing a free intercept in that context
+    can confound a pure scale bias with a spurious offset and distort the
+    interpretation of the fit slope.
+
+    For cross-type comparisons (e.g. W2 vs NC fraction, or SSD NC vs PMT Recall)
+    the metric range does not include the origin in any physically meaningful way,
+    so *force_origin* should be False (the default).
+    """
     n = len(x_arr)
     for x, y, c, lbl in zip(x_arr, y_arr, color_pts, labels):
         ax.scatter([x], [y], color=c, s=55, zorder=3)
@@ -743,15 +756,28 @@ def _scatter_panel(
         ref  = np.array([vmin - pad, vmax + pad])
         ax.plot(ref, ref, color="gray", linewidth=0.8, linestyle="--", alpha=0.5, zorder=1)
 
+    # Pre-compute zero-intercept slope once so it can appear in both the
+    # annotation box and the regression overlay without duplicating effort.
+    _fit_slope: float | None = None
+    if force_origin and n >= 3 and np.std(x_arr) > 0 and np.std(y_arr) > 0:
+        xx = float(np.dot(x_arr, x_arr))
+        _fit_slope = float(np.dot(x_arr, y_arr) / xx) if xx > 0 else None
+
     if n >= 3 and np.std(x_arr) > 0 and np.std(y_arr) > 0:
         try:
             r_v, p_r   = scipy_stats.pearsonr(x_arr, y_arr)
             rho, p_rho = scipy_stats.spearmanr(x_arr, y_arr)
             r_crit     = _pearson_rcrit(n, sigma=3.0)
             sig_mark   = "*" if abs(r_v) >= r_crit else ""
-            ann = (f"Pearson  r = {r_v:+.3f}{sig_mark}  (p={p_r:.3g})\n"
-                   f"Spearman ρ = {rho:+.3f}  (p={p_rho:.3g})\n"
-                   f"3σ threshold: |r|≥{r_crit:.2f}")
+            if force_origin and _fit_slope is not None:
+                ann = (f"Pearson  r = {r_v:+.3f}{sig_mark}  (p={p_r:.3g})\n"
+                       f"Spearman ρ = {rho:+.3f}  (p={p_rho:.3g})\n"
+                       f"3σ threshold: |r|≥{r_crit:.2f}\n"
+                       f"OLS slope={_fit_slope:.3f}  (origin-forced)")
+            else:
+                ann = (f"Pearson  r = {r_v:+.3f}{sig_mark}  (p={p_r:.3g})\n"
+                       f"Spearman ρ = {rho:+.3f}  (p={p_rho:.3g})\n"
+                       f"3σ threshold: |r|≥{r_crit:.2f}")
         except ValueError:
             ann = "constant data — no stats"
     elif n < 3:
@@ -764,18 +790,31 @@ def _scatter_panel(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="gray", alpha=0.85))
 
     if n >= 3 and np.std(x_arr) > 0 and np.std(y_arr) > 0:
-        slope, intercept, *_ = scipy_stats.linregress(x_arr, y_arr)
-        x_fit  = np.linspace(x_arr.min(), x_arr.max(), 200)
-        y_fit  = slope * x_fit + intercept
-        ax.plot(x_fit, y_fit, color="black", linewidth=1.2, linestyle="--", zorder=2)
-        y_pred    = slope * x_arr + intercept
-        residuals = y_arr - y_pred
-        se        = np.sqrt(np.sum(residuals ** 2) / max(n - 2, 1))
-        x_mean    = x_arr.mean()
-        t_crit    = scipy_stats.t.ppf(0.975, df=max(n - 2, 1))
-        ci = t_crit * se * np.sqrt(1 / n + (x_fit - x_mean) ** 2
-                                   / np.sum((x_arr - x_mean) ** 2))
-        ax.fill_between(x_fit, y_fit - ci, y_fit + ci, color="black", alpha=0.08)
+        x_fit = np.linspace(x_arr.min(), x_arr.max(), 200)
+        if force_origin and _fit_slope is not None:
+            # Zero-intercept OLS: slope = Σ(x·y) / Σ(x²)
+            # SE of predicted value at x_fit: |x_fit| · sqrt(MSE / Σ(x²))
+            # where MSE = Σ(residuals²) / (n−1)  [one free parameter: slope]
+            y_fit = _fit_slope * x_fit
+            ax.plot(x_fit, y_fit, color="black", linewidth=1.2, linestyle="--", zorder=2)
+            residuals = y_arr - _fit_slope * x_arr
+            dof    = max(n - 1, 1)
+            mse    = np.sum(residuals ** 2) / dof
+            t_crit = scipy_stats.t.ppf(0.975, df=dof)
+            ci = t_crit * np.abs(x_fit) * np.sqrt(mse / np.dot(x_arr, x_arr))
+            ax.fill_between(x_fit, y_fit - ci, y_fit + ci, color="black", alpha=0.08)
+        else:
+            slope, intercept, *_ = scipy_stats.linregress(x_arr, y_arr)
+            y_fit  = slope * x_fit + intercept
+            ax.plot(x_fit, y_fit, color="black", linewidth=1.2, linestyle="--", zorder=2)
+            y_pred    = slope * x_arr + intercept
+            residuals = y_arr - y_pred
+            se        = np.sqrt(np.sum(residuals ** 2) / max(n - 2, 1))
+            x_mean    = x_arr.mean()
+            t_crit    = scipy_stats.t.ppf(0.975, df=max(n - 2, 1))
+            ci = t_crit * se * np.sqrt(1 / n + (x_fit - x_mean) ** 2
+                                       / np.sum((x_arr - x_mean) ** 2))
+            ax.fill_between(x_fit, y_fit - ci, y_fit + ci, color="black", alpha=0.08)
 
     ax.set_xlabel(x_label, fontsize=11)
     ax.set_ylabel(y_label, fontsize=11)
@@ -887,7 +926,8 @@ def plot_scatter_ssd_pmt(
             x_arr = np.array([_ssd_recall(s.ssd_results[ratio_factor], M, W_default) for s in valid])
             y_arr = np.array([_pmt_recall(s, M, W_default) for s in valid])
         _scatter_panel(ax, x_arr, y_arr, c_valid, l_valid,
-                       f"{x_base} (M={M})", f"{y_base} (M={M})")
+                       f"{x_base} (M={M})", f"{y_base} (M={M})",
+                       force_origin=True)
         ax.set_title(f"M={M}", fontsize=9)
 
     for idx in range(len(M_values), n_rows * n_cols):
@@ -996,7 +1036,8 @@ def plot_scatter_ssd_pmt_fom(
 
     fig, ax = plt.subplots(figsize=(7, 6))
     _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM")
+                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   force_origin=True)
     for x, y, mw in zip(x_arr, y_arr, mw_labels):
         if np.isfinite(x) and np.isfinite(y):
             ax.annotate(mw, xy=(x, y), xytext=(4, -9),
@@ -1459,7 +1500,8 @@ def plot_fom_bars_pmt_vs_ssd(
 
     # ── Right: scatter with diagonal ─────────────────────────────────
     _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM")
+                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   force_origin=True)
     ax_sc.set_title("SSD vs PMT FoM", fontsize=12)
 
     fig.suptitle(
@@ -1613,7 +1655,8 @@ def plot_fom_mge_comparison(
 
     # Panel A
     _scatter_panel(ax_a, ssd_a, pmt_a, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM")
+                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   force_origin=True)
     for x, y, mw in zip(ssd_a, pmt_a, mw_a):
         if np.isfinite(x) and np.isfinite(y):
             ax_a.annotate(mw, xy=(x, y), xytext=(4, -9),
@@ -1709,7 +1752,8 @@ def plot_recall_comparison(
 
     # ── Right: scatter ────────────────────────────────────────────────
     _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD Recall  (ratio={ratio_factor:.2f})", "PMT Recall")
+                   f"SSD Recall  (ratio={ratio_factor:.2f})", "PMT Recall",
+                   force_origin=True)
     ax_sc.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
     ax_sc.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
     ax_sc.set_title("SSD vs PMT Recall", fontsize=12)
