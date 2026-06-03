@@ -2608,6 +2608,76 @@ def _convergence_summary(
     tex_rows.append(r"\end{tabular}")
     tex_rows.append(r"\end{table}")
 
+    # ---------------------------------------------------------------------- #
+    # Overall verdict: is N=1e7 sufficient across ALL parameters × populations?
+    # ---------------------------------------------------------------------- #
+    verdict_results: dict[tuple[str, str], tuple[bool, int, int]] = {}
+
+    for f in F_VALS:
+        key = ("A", f"{f:.2f}")
+        passes: list[bool] = []
+        for w1_data in [w1_all, w1_ge77]:
+            for field_key in NC_FIELDS_FOR_CONV:
+                mn = _min_n_criterion_a(w1_data[field_key], f)
+                passes.append(_passes_at_1e7(w1_data[field_key], mn))
+        verdict_results[key] = (all(passes), sum(passes), len(passes))
+
+    for eps in EPS_VALS:
+        key = ("B", f"{eps:.0f}%")
+        passes = []
+        for w1_data in [w1_all, w1_ge77]:
+            for field_key in NC_FIELDS_FOR_CONV:
+                mn = _min_n_criterion_b(w1_data[field_key], eps)
+                passes.append(_passes_at_1e7(w1_data[field_key], mn))
+        verdict_results[key] = (all(passes), sum(passes), len(passes))
+
+    print(f"\n{'='*80}")
+    print("OVERALL VERDICT: Is N = 1×10⁷ sufficient?")
+    print(f"{'='*80}")
+    print(f"  (checking {len(NC_FIELDS_FOR_CONV)} parameters × 2 populations = "
+          f"{len(NC_FIELDS_FOR_CONV) * 2} parameter×population combinations)")
+    print()
+    for (crit, thr), (all_pass, n_pass, n_total) in verdict_results.items():
+        sym = "✓  SUFFICIENT" if all_pass else "✗  NEED 1e8 "
+        print(f"  Criterion {crit}  threshold={thr:<5s}  "
+              f"{n_pass:2d}/{n_total} combinations pass  →  {sym}")
+
+    any_all_pass = any(v[0] for v in verdict_results.values())
+    print()
+    if any_all_pass:
+        # Find the strictest criterion that still passes
+        passing_keys = [(c, t) for (c, t), (ok, _, _) in verdict_results.items() if ok]
+        print("  CONCLUSION: N = 1×10⁷ is SUFFICIENT under at least one tested criterion.")
+        print(f"  Passing criterion(s): {', '.join(f'Crit {c} thr={t}' for c, t in passing_keys)}")
+    else:
+        print("  CONCLUSION: N = 1×10⁷ is INSUFFICIENT — N = 1×10⁸ is REQUIRED")
+        print("              under all tested criteria for at least one parameter.")
+    print(f"{'='*80}\n")
+
+    # Add verdict to LaTeX output
+    tex_rows.append("")
+    tex_rows.append(r"\begin{table}[htbp]")
+    tex_rows.append(r"\centering")
+    tex_rows.append(r"\caption{Overall verdict: is $N=10^7$ sufficient?}")
+    tex_rows.append(r"\begin{tabular}{llcc}")
+    tex_rows.append(r"\toprule")
+    tex_rows.append(r"Criterion & Threshold & Combinations passing & Verdict \\")
+    tex_rows.append(r"\midrule")
+    for (crit, thr), (all_pass, n_pass, n_total) in verdict_results.items():
+        verdict_str = r"\checkmark\ Sufficient" if all_pass else r"$\times$\ Need $10^8$"
+        tex_rows.append(
+            f"{crit} & {thr} & ${n_pass}/{n_total}$ & {verdict_str} \\\\"
+        )
+    tex_rows.append(r"\midrule")
+    overall_str = (
+        r"\textbf{Sufficient}" if any_all_pass
+        else r"\textbf{Need $10^8$}"
+    )
+    tex_rows.append(rf"\multicolumn{{4}}{{l}}{{Overall: {overall_str}}} \\")
+    tex_rows.append(r"\bottomrule")
+    tex_rows.append(r"\end{tabular}")
+    tex_rows.append(r"\end{table}")
+
     tex_path = out_dir / "convergence_summary_table.tex"
     tex_path.write_text("\n".join(tex_rows) + "\n", encoding="utf-8")
     print(f"\n  Saved LaTeX table: {tex_path.name}")
@@ -2929,14 +2999,18 @@ def level3_learning_curve(
     for size_dir, n_expected in _SUBSAMPLE_DIRS:
         subdir = data_path / size_dir
         if not subdir.exists():
-            print(f"  WARNING: {subdir} not found; skipping n={n_expected:.0e}")
-            continue
+            raise RuntimeError(
+                f"Level 3: required sub-directory not found: {subdir}\n"
+                f"Expected sub-directories under {data_path}: "
+                f"{[d for d, _ in _SUBSAMPLE_DIRS]}"
+            )
         hdf5_files = sorted(subdir.glob("output_t*.hdf5"))
         if not hdf5_files:
             hdf5_files = sorted(subdir.glob("*.hdf5"))
         if not hdf5_files:
-            print(f"  WARNING: no HDF5 files in {subdir}; skipping")
-            continue
+            raise RuntimeError(
+                f"Level 3: no HDF5 files found in required sub-directory: {subdir}"
+            )
 
         # --- Vertex cross-check: actual muon count must match directory name ---
         print(f"  Verifying {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
@@ -3137,6 +3211,32 @@ def write_statistics(
 
 
 # ---------------------------------------------------------------------------
+# Unified W1 convergence entry point
+# ---------------------------------------------------------------------------
+def run_all_w1_convergence_analysis(
+    data_path: Path,
+    run_list: list[RunData],
+    out_dir: Path,
+) -> dict[str, int]:
+    """Run all W1-based convergence analyses in one call.
+
+    Order:
+      1. W1 vs cumulative runs k  (convergence_analysis, full mode)
+      2. Pairwise W1 for muon parameters  (pairwise_w1_analysis)
+      3. Pairwise W1 fluctuation scale for NC fields  (level2_pairwise_fluctuations)
+      4. Learning curve W1(N) vs 1e8 reference for NC fields  (level3_learning_curve)
+         — requires sub-directories {data_path}/1e4/, 1e5/, 1e6/, 1e7/ to exist;
+           raises RuntimeError if any are missing.
+
+    Returns the k-recommendations dict from convergence_analysis.
+    """
+    recommendations = convergence_analysis(run_list, out_dir, full_convergence=True)
+    pairwise_w1_analysis(run_list, out_dir)
+    run_statistical_convergence_test(data_path, run_list, out_dir)
+    return recommendations
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
@@ -3159,12 +3259,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=NUM_RUNS_DEFAULT,
         help=f"Number of runs to load (default: {NUM_RUNS_DEFAULT}).",
-    )
-    p.add_argument(
-        "--full-convergence",
-        action="store_true",
-        default=False,
-        help="Also compute convergence for zenith, azimuth, and energy (slow).",
     )
     return p.parse_args()
 
@@ -3245,22 +3339,9 @@ def main() -> None:
     plot_cut_nc_material(run_list, out_dir)
     _log_resources("cut NC material done", t_main)
 
-    print("\n--- Convergence analysis ---")
-    recommendations = convergence_analysis(run_list, out_dir,
-                                           full_convergence=args.full_convergence)
-    _log_resources("convergence analysis done", t_main)
-
-    print("\n--- Pairwise W1 analysis ---")
-    pairwise_w1_analysis(run_list, out_dir)
-    _log_resources("pairwise W1 analysis done", t_main)
-
-    print("\n--- W1 Statistical Convergence Test ---")
-    run_statistical_convergence_test(
-        data_path=data_path,
-        run_list=run_list,
-        out_dir=out_dir,
-    )
-    _log_resources("convergence test done", t_main)
+    print("\n--- W1 Convergence Analysis ---")
+    recommendations = run_all_w1_convergence_analysis(data_path, run_list, out_dir)
+    _log_resources("W1 convergence analysis done", t_main)
 
     print("\n--- Statistics ---")
     write_statistics(agg, outlier_info, recommendations, run_list, out_dir)
