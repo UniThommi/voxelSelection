@@ -3683,7 +3683,7 @@ def plot_ge_surv_vs_livetime(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
     for r, c, (xs, ys) in zip(results, colors, per_setup):
         if xs:
@@ -4286,14 +4286,17 @@ def plot_ge_surv_vs_livetime_advisor(
 
     W_range = W_values
 
+    # Only show the baseline setup (+ the two CDR curves + stat limit)
+    _baseline = _find_baseline_result(results)
+    results_25b = [_baseline]
+
     _label_overrides: dict[str, str] | None = None
     if baseline_display_label:
-        _bl = _find_baseline_result(results)
-        _label_overrides = {_bl.label.lower(): baseline_display_label}
+        _label_overrides = {_baseline.label.lower(): baseline_display_label}
 
     fig, ax = plt.subplots(figsize=(16, 12))
     pcm = _draw_advisor_plot(
-        ax, results, W_range, M_fixed, total_primaries,
+        ax, results_25b, W_range, M_fixed, total_primaries,
         advisor_rows, stat_limit_rows, color_map,
         sig_surv_min=0.80,
         label_overrides=_label_overrides,
@@ -4303,7 +4306,7 @@ def plot_ge_surv_vs_livetime_advisor(
         legend_bold=True,
     )
     if pcm is not None:
-        cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.01)
+        cbar = fig.colorbar(pcm, ax=ax, label="FoM (normalised 0–1)", pad=0.04)
         cbar.ax.tick_params(labelsize=16)
         cbar.set_label("FoM (normalised 0–1)", fontsize=16, fontweight="bold")
 
@@ -4386,7 +4389,7 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
     def _w_labels(rows: list[dict]) -> np.ndarray:
         xs_tmp = np.array([r["sig_surv"] for r in rows])
@@ -4497,7 +4500,7 @@ def plot_ge_surv_setups_only(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
     _overrides = _label_overrides or {}
     _tp = total_primaries
@@ -4584,7 +4587,7 @@ def plot_stat_limit_only(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
     xs, ys, si, co = _rows_to_band_arrays(sl_filt)
     _plot_curve_with_bands(ax, xs, ys, si, co,
@@ -4694,7 +4697,7 @@ def plot_ge_surv_best_fom(
         x_range=(0.80, 1.0), y_range=(0.0, 1.0),
     )
     if pcm is not None:
-        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.01)
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
     for r, c, x, y, lbl in zip(results, colors, pts_x, pts_y, pt_labels):
         if np.isfinite(x):
