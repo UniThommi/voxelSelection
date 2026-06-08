@@ -1127,7 +1127,7 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_r_1d_comparison_panel.png",
     )
 
-    # ---- 2-D φ vs z AND r vs z (shared colorbar scale per subset) ----
+    # ---- 2-D φ vs z AND r vs z (separate colorbars, r-density correction) ----
     for mask, tag, title_base in [
         (np.ones(phi.size, dtype=bool), "all", "NC positions — all NCs"),
         (is_ge77mu, "ge77muons", "NC positions — NCs of Ge77-producing muons"),
@@ -1138,27 +1138,33 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         if ph.size == 0:
             continue
 
-        H_phi, _, _ = np.histogram2d(ph, zm, bins=[72, 100])
-        H_r,   _, _ = np.histogram2d(rm, zm, bins=[72, 100])
-        vmax = max(float(H_phi.max()), float(H_r.max()))
+        # r vs z: divide by bin-centre r to correct for cylindrical area growth (dA ∝ r·dr·dz)
+        r_bins_2d = np.linspace(0.0, float(rm.max()) * 1.02, 73)
+        z_bins_2d = np.linspace(float(zm.min()), float(zm.max()), 101)
+        H_r, r_edges, z_edges = np.histogram2d(rm, zm, bins=[r_bins_2d, z_bins_2d])
+        r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            H_r_density = H_r / r_centers[:, None]
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        fig, axes = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
         fig.suptitle(f"{title_base}  (N = {ph.size:,})", fontsize=14)
 
-        hh1 = axes[0].hist2d(ph, zm, bins=[72, 100], cmap="viridis", vmin=0, vmax=vmax)
+        # φ vs z: raw counts, colorbar placed directly right of this subplot
+        hh1 = axes[0].hist2d(ph, zm, bins=[72, 100], cmap="viridis", vmin=0)
         axes[0].set_xlabel("NC azimuth φ [°]", fontsize=13)
         axes[0].set_ylabel("NC z position [mm]", fontsize=13)
         axes[0].set_title("φ vs z", fontsize=12)
         axes[0].tick_params(labelsize=11)
+        fig.colorbar(hh1[3], ax=axes[0], label="Number of NCs")
 
-        axes[1].hist2d(rm, zm, bins=[72, 100], cmap="viridis", vmin=0, vmax=vmax)
+        # r vs z: NCs / r to correct for cylindrical volume element
+        pc = axes[1].pcolormesh(r_edges, z_edges, H_r_density.T, cmap="viridis", vmin=0)
         axes[1].set_xlabel("NC radial position r [mm]", fontsize=13)
         axes[1].set_ylabel("NC z position [mm]", fontsize=13)
-        axes[1].set_title("r vs z", fontsize=12)
+        axes[1].set_title("r vs z  (NCs / r)", fontsize=12)
         axes[1].tick_params(labelsize=11)
+        fig.colorbar(pc, ax=axes[1], label="NCs / r  [mm⁻¹]")
 
-        fig.colorbar(hh1[3], ax=axes, label="Number of NCs")
-        plt.tight_layout()
         _save(fig, out_dir / f"nc_phi_r_z_2d_{tag}.png")
 
 
