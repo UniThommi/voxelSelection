@@ -1538,7 +1538,7 @@ def _mc_sem_scalar(
     """Monte Carlo standard error curve for a scalar observable f(x).
 
     For each N in a log-spaced grid [n_min, N_full], draws n_draws random
-    subsamples (without replacement) and computes ΔE_N = S/√N per draw.
+    subsamples (with replacement) and computes ΔE_N = S/√N per draw.
     Returns mean and std of ΔE_N across draws as a function of N.
 
     Returns: (n_arr, sem_mean, sem_std)
@@ -1561,7 +1561,7 @@ def _mc_sem_scalar(
     for i, n in enumerate(n_vals):
         sems: list[float] = []
         for _ in range(n_draws):
-            idx = rng.choice(N_full, size=int(n), replace=False)
+            idx = rng.choice(N_full, size=int(n), replace=True)
             s = float(np.std(data[idx], ddof=1))
             sems.append(s / np.sqrt(n))
         sem_means[i] = float(np.mean(sems))
@@ -1602,7 +1602,7 @@ def _mc_sem_vector(
     for i, n in enumerate(n_vals):
         norms: list[float] = []
         for _ in range(n_draws):
-            idx    = rng.choice(N_full, size=int(n), replace=False)
+            idx    = rng.choice(N_full, size=int(n), replace=True)
             sample = data[idx]                         # (n, 3)
             std_c  = np.std(sample, axis=0, ddof=1)   # (3,)
             sem_c  = std_c / np.sqrt(n)               # (3,)
@@ -1627,7 +1627,7 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
       • All   — all NCs / all NC-producing muons
       • Ge77  — NCs of Ge77-producing muons / Ge77 muons
 
-    For each N in a log-spaced grid, MC_N_DRAWS subsamples (without replacement)
+    For each N in a log-spaced grid, MC_N_DRAWS subsamples (with replacement)
     are drawn; mean ΔE_N and ±1σ band are plotted.  A 1/√N reference anchored
     at the smallest N confirms the expected Monte Carlo convergence rate.
 
