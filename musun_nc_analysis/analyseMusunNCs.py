@@ -7,14 +7,13 @@ Outputs (all to <output_path>/musun_nc_analysis/):
   - Standard distributions: all muons + Ge77 only + Ge77 vs non-Ge77 + NC vs non-NC
   - NC spatial / time distributions
   - Outlier analysis (muons above 99th-percentile NC count on log scale)
-  - Convergence analysis: W1 distance vs number of runs (k) and vs sample size (N)
+  - Monte Carlo uncertainty analysis: standard error ΔE_N = S/√N vs sample size N
   - statistics.txt
 """
 from __future__ import annotations
 
 import argparse
 import gc
-import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -27,8 +26,6 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
-from itertools import combinations as _combinations
-from scipy.stats import wasserstein_distance
 
 try:
     import psutil as _psutil
@@ -46,29 +43,14 @@ PARTICLES_GROUP = "/hit/particles"
 
 NC_CUT_100 = 100
 
-# NC-level fields used for the 3-level statistical convergence test
-NC_FIELDS_FOR_CONV: dict[str, str] = {
-    "nc_time_ns":  "NC time [ns]",
-    "nc_x_m":      "NC x position [m]",
-    "nc_y_m":      "NC y position [m]",
-    "nc_z_m":      "NC z position [m]",
-    "nc_r_m":      "NC r position [m]",
-    "nc_phi_rad":  "NC φ [rad]",
-    "nc_ge77":     "Ge77 flag",
-    "nc_n_gammas": "N capture gammas",
-    "nc_counts":   "NC count per muon",
-}
-# nc_phi_rad uses circular W1 (see _w1_circular_phi); all others use linear W1.
-_CIRCULAR_FIELDS: frozenset[str] = frozenset({"nc_phi_rad"})
-
 DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
 NUM_RUNS_DEFAULT = 10
-N_PERMUTATIONS = 100  # random subsets per k in convergence analysis
 RANDOM_SEED = 42
-W1_THRESHOLD_FRAC = 0.05   # convergence threshold = 5% of W1 at k=1
 MAX_SCATTER_PTS = 5_000    # max points for 3-D scatter / arrow plots
+MC_N_DRAWS = 20            # random subsamples drawn per N grid point
+MC_N_SIZES = 20            # number of log-spaced N grid points
 
 COLORS = {
     "blue": "#4C72B0",
@@ -1544,1645 +1526,258 @@ def plot_cut_nc_material(run_list: list[RunData], out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Convergence analysis
-# ---------------------------------------------------------------------------
-def _transform(data: np.ndarray, obs: str) -> np.ndarray:
-    """Apply observable-specific transform before computing distances."""
-    if obs in ("nc_count", "energy"):
-        return np.log(data + 1.0)
-    return data   # zenith and azimuth: raw degrees
-
-
-def _w1_sorted(sorted_p: np.ndarray, sorted_q: np.ndarray) -> float:
-    """Wasserstein-1 distance between two *pre-sorted* empirical distributions.
-
-    Memory layout (peak = 3 × (n+m) × 8 bytes):
-      1. all_vals  — merged sorted union, freed after np.diff
-      2. deltas    — interval widths (nm-1,)
-      3. cdf_diff  — |F_p - F_q| at each breakpoint (nm-1,)
-
-    Returns np.nan if either array is empty.
-    """
-    n, m = len(sorted_p), len(sorted_q)
-    if n == 0 or m == 0:
-        return float("nan")
-
-    nm = n + m
-    all_vals = np.empty(nm, dtype=np.float64)
-    all_vals[:n] = sorted_p
-    all_vals[n:] = sorted_q
-    all_vals.sort(kind="mergesort")   # O(nm): fast for two sorted halves
-
-    deltas = np.diff(all_vals)        # (nm-1,) — new allocation
-    bpts = all_vals[:-1]              # view, no copy
-
-    cdf_diff = (np.searchsorted(sorted_p, bpts, side="right") / n
-                - np.searchsorted(sorted_q, bpts, side="right") / m)
-    del all_vals
-    np.abs(cdf_diff, out=cdf_diff)
-
-    w1 = float(np.dot(cdf_diff, deltas))
-    del cdf_diff, deltas
-    return w1
-
-
-def _merge_sorted_runs(sorted_runs: list[np.ndarray],
-                       indices: list[int]) -> np.ndarray:
-    """Concatenate pre-sorted per-run arrays and mergesort the result.
-
-    Using numpy's 'mergesort' on k pre-sorted blocks of total size N is
-    O(N log k), much faster than O(N log N) for unsorted data.
-    """
-    total = sum(len(sorted_runs[i]) for i in indices)
-    buf = np.empty(total, dtype=np.float64)
-    off = 0
-    for i in indices:
-        n_i = len(sorted_runs[i])
-        buf[off:off + n_i] = sorted_runs[i]
-        off += n_i
-    buf.sort(kind="mergesort")
-    return buf
-
-
-def convergence_analysis(
-    run_list: list[RunData], out_dir: Path, full_convergence: bool = False
-) -> dict[str, int]:
-    """
-    Compute W1 convergence metrics vs number of runs k.
-
-    For NC count per muon: produces W1 figures for the full distribution
-    and cut distributions (cuts at NC_CUT_100 and NC_MUON_CUT).
-
-    If full_convergence=True, also produces W1 figures for zenith,
-    azimuth, and energy.
-
-    Returns recommended minimum k per observable (threshold = 5% of W1(k=1)).
-    """
-    n_runs = len(run_list)
-    if n_runs < 2:
-        print("  Convergence analysis requires >= 2 runs; skipping.")
-        return {}
-
-    rng = random.Random(RANDOM_SEED)
-    run_indices = list(range(n_runs))
-    k_vals = list(range(1, n_runs + 1))
-
-    def _compute_metrics(
-        sorted_runs_local: list[np.ndarray],
-    ) -> tuple[list[float], np.ndarray]:
-        """W1 vs k for given pre-sorted per-run arrays.
-
-        k == n_runs is short-circuited to W1 = 0: the full merged dataset
-        compared to itself is trivially zero, and skipping the merge avoids
-        the largest allocation (n+m ≈ 2×total_N elements).
-        """
-        _t0_cm = time.perf_counter()
-        total_pts = sum(a.size for a in sorted_runs_local)
-        sorted_ref = _merge_sorted_runs(sorted_runs_local, run_indices)
-        if sorted_ref.size == 0:
-            del sorted_ref
-            return [], np.zeros((n_runs, N_PERMUTATIONS))
-        _log_resources(f"  _compute_metrics merge ref  N={total_pts:.3e}")
-        det_w1: list[float] = []
-        for k in k_vals:
-            if k == n_runs:
-                det_w1.append(0.0)  # full dataset vs itself: W1 = 0 by definition
-            else:
-                sk = _merge_sorted_runs(sorted_runs_local, list(range(k)))
-                w1 = _w1_sorted(sk, sorted_ref)
-                del sk
-                det_w1.append(w1 if not np.isnan(w1) else 0.0)
-        _log_resources(
-            f"  _compute_metrics det loop ({n_runs - 1} W1 calls)",
-            _t0_cm,
-        )
-        rand_w1_m = np.zeros((n_runs, N_PERMUTATIONS))
-        for perm_i in range(N_PERMUTATIONS):
-            shuffled = run_indices.copy()
-            rng.shuffle(shuffled)
-            for k in k_vals:
-                if k == n_runs:
-                    pass  # shuffled[:n_runs] == all runs → W1 = 0; matrix already 0
-                else:
-                    sk = _merge_sorted_runs(sorted_runs_local, shuffled[:k])
-                    w1 = _w1_sorted(sk, sorted_ref)
-                    del sk
-                    rand_w1_m[k - 1, perm_i] = w1 if not np.isnan(w1) else 0.0
-        _log_resources(
-            f"  _compute_metrics perm loop ({N_PERMUTATIONS}×{n_runs - 1} W1 calls)",
-            _t0_cm,
-        )
-        del sorted_ref
-        return det_w1, rand_w1_m
-
-    def _rec_k_from_w1(det_w1: list[float]) -> tuple[int, float]:
-        if not det_w1 or det_w1[0] <= 0:
-            return n_runs, 0.0
-        thr = W1_THRESHOLD_FRAC * det_w1[0]
-        rec = next((k for k, w in enumerate(det_w1, 1) if w <= thr), n_runs)
-        return rec, thr
-
-    def _draw_w1_panel(
-        ax: "plt.Axes",
-        title: str,
-        det_vals: list[float],
-        r_mean: np.ndarray,
-        r_std: np.ndarray,
-        ylabel: str,
-        threshold: float | None,
-        rec_k: int | None,
-        w1_at_k1: float | None = None,
-        show_deterministic: bool = True,
-    ) -> None:
-        if show_deterministic:
-            ax.plot(k_vals, det_vals, "o-", color=COLORS["blue"],
-                    linewidth=1.8, markersize=5, label="Deterministic (cumulative)")
-        ax.plot(k_vals, r_mean, "s--", color=COLORS["orange"],
-                linewidth=1.5, markersize=5, label="Random subsets (mean)")
-        ax.fill_between(k_vals, r_mean - r_std, r_mean + r_std,
-                        color=COLORS["orange"], alpha=0.25,
-                        label=f"±1σ  ({N_PERMUTATIONS} permutations)")
-        ax.axhline(0, color="gray", linestyle=":", linewidth=1.0,
-                   label="Reference")
-        if threshold and threshold > 0 and rec_k is not None:
-            ax.axhline(threshold, color="red", linestyle="--", linewidth=1.2,
-                       label=f"5% threshold = {threshold:.4f}")
-            ax.axvline(rec_k, color="red", linestyle=":", linewidth=1.2,
-                       label=f"Rec. k = {rec_k}")
-        ax.set_xlabel("Number of runs k", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=10)
-        ax.set_title(title, fontsize=11)
-        ax.set_xticks(k_vals)
-        ax.legend(fontsize=8)
-        ax.tick_params(labelsize=9)
-        if w1_at_k1 is not None and w1_at_k1 > 0:
-            ax2 = ax.twinx()
-            y_lo, y_hi = ax.get_ylim()
-            ax2.set_ylim(y_lo / w1_at_k1 * 100.0, y_hi / w1_at_k1 * 100.0)
-            ax2.set_ylabel("% of W₁(k=1)", fontsize=10)
-            ax2.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-            ax2.tick_params(labelsize=9)
-
-    recommendations: dict[str, int] = {}
-    t_conv = _log_resources("convergence start")
-
-    print("\n  Convergence: NC count per muon ...", flush=True)
-
-    nc_full_raw:   list[np.ndarray] = []
-    nc_cut100_raw: list[np.ndarray] = []
-    nc_cut_raw:    list[np.ndarray] = []
-    for rd in run_list:
-        full   = rd.nc_counts.astype(np.float64)
-        cut100 = full[full <= NC_CUT_100]
-        cut    = full[full <= NC_MUON_CUT]
-        nc_full_raw.append(np.sort(full))
-        nc_cut100_raw.append(np.sort(cut100) if cut100.size > 0
-                             else np.array([], dtype=np.float64))
-        nc_cut_raw.append(np.sort(cut) if cut.size > 0
-                          else np.array([], dtype=np.float64))
-
-    dw1_fr,    rw1_fr    = _compute_metrics(nc_full_raw)
-    dw1_c100r, rw1_c100r = _compute_metrics(nc_cut100_raw)
-    dw1_cr,    rw1_cr    = _compute_metrics(nc_cut_raw)
-    del nc_full_raw, nc_cut100_raw, nc_cut_raw
-    gc.collect()
-    _log_resources("nc_count: all metrics computed", t_conv)
-
-    rec_full,   thr_fr    = _rec_k_from_w1(dw1_fr)
-    rec_cut100, thr_c100r = _rec_k_from_w1(dw1_c100r)
-    rec_cut,    thr_cr    = _rec_k_from_w1(dw1_cr)
-    recommendations["nc_count"]         = rec_full
-    recommendations["nc_count_cut_100"] = rec_cut100
-    recommendations["nc_count_cut"]     = rec_cut
-    print(f"    Full dist       — W1 thr = {thr_fr:.4f}    →  rec k = {rec_full}")
-    print(f"    Cut ≤{NC_CUT_100} dist  — W1 thr = {thr_c100r:.4f}  →  rec k = {rec_cut100}")
-    print(f"    Cut ≤{NC_MUON_CUT:,} dist — W1 thr = {thr_cr:.4f}    →  rec k = {rec_cut}")
-
-    # Full distribution: 1×1 W1 figure
-    if dw1_fr:
-        rw1_mean = rw1_fr.mean(axis=1)
-        rw1_std  = rw1_fr.std(axis=1)
-        fig, ax = plt.subplots(figsize=(9, 6))
-        fig.suptitle("Convergence: NC count per muon — full distribution", fontsize=14)
-        _draw_w1_panel(ax, "W₁  —  Full (all muons)",
-                       dw1_fr, rw1_mean, rw1_std,
-                       "W₁ (NC count)", None, None,
-                       w1_at_k1=dw1_fr[0] if dw1_fr[0] > 0 else None,
-                       show_deterministic=False)
-        plt.tight_layout()
-        _save(fig, out_dir / "convergence_nc_count_full.png")
-
-    # Cut distributions: 2×1 W1 figure
-    rows_data = [
-        (f"Cut ≤ {NC_CUT_100}",     dw1_c100r, rw1_c100r, "NC count", None, None),
-        (f"Cut ≤ {NC_MUON_CUT:,}", dw1_cr,    rw1_cr,    "NC count", None, None),
-    ]
-    if any(d for d, *_ in rows_data):
-        fig, axes = plt.subplots(2, 1, figsize=(9, 10))
-        fig.suptitle("Convergence: NC count per muon — cut distributions", fontsize=14)
-        for row, (row_title, d_w1, r_w1, xlabel, thr, rec) in enumerate(rows_data):
-            if not d_w1:
-                continue
-            rw1_mean = r_w1.mean(axis=1)
-            rw1_std  = r_w1.std(axis=1)
-            _draw_w1_panel(axes[row], f"W₁  —  {row_title}",
-                           d_w1, rw1_mean, rw1_std,
-                           f"W₁ ({xlabel})", thr, rec,
-                           w1_at_k1=d_w1[0] if d_w1[0] > 0 else None,
-                           show_deterministic=False)
-        plt.tight_layout()
-        _save(fig, out_dir / "convergence_nc_count_cuts.png")
-
-    # Free the NC-count W1 arrays; they are no longer needed.
-    del dw1_fr, rw1_fr, dw1_c100r, rw1_c100r, dw1_cr, rw1_cr
-    gc.collect()
-
-    if not full_convergence:
-        return recommendations
-
-    def get_raw_obs(rd: RunData, obs: str) -> np.ndarray:
-        if obs == "zenith":
-            return rd.muon_zenith_deg
-        if obs == "azimuth":
-            return rd.muon_azimuth_deg
-        if obs == "energy":
-            return rd.muon_ekin_mev[rd.muon_ekin_mev > 0]
-        raise ValueError(obs)
-
-    other_observables = [
-        ("zenith",  "Zenith [°]",          "Muon zenith"),
-        ("azimuth", "Azimuth [°]",         "Muon azimuth"),
-        ("energy",  "log(E_kin [MeV]+1)",  "Muon energy"),
-    ]
-
-    for obs_key, obs_xlabel, obs_title in other_observables:
-        print(f"\n  Convergence: {obs_title} ...", flush=True)
-        gc.collect()  # release any memory from the previous observable before allocating
-        t_obs = _log_resources(f"{obs_key}: begin")
-
-        sorted_runs: list[np.ndarray] = []
-        for rd in run_list:
-            raw = _transform(get_raw_obs(rd, obs_key), obs_key)
-            sorted_runs.append(np.sort(raw))
-            del raw  # free the (possibly transformed) intermediate immediately
-        t_obs = _log_resources(f"{obs_key}: sorted {n_runs} runs", t_obs)
-
-        det_w1, rand_w1 = _compute_metrics(sorted_runs)
-        del sorted_runs
-        gc.collect()
-        _log_resources(f"{obs_key}: metrics done", t_obs)
-
-        if not det_w1:
-            continue
-
-        rec_k, threshold = _rec_k_from_w1(det_w1)
-        recommendations[obs_key] = rec_k
-        print(f"    W1 threshold = {threshold:.4f}  →  recommended k = {rec_k}")
-
-        rand_w1_mean = rand_w1.mean(axis=1)
-        rand_w1_std  = rand_w1.std(axis=1)
-
-        fig, ax = plt.subplots(figsize=(9, 6))
-        fig.suptitle(f"Convergence analysis: {obs_title}", fontsize=14)
-        _draw_w1_panel(ax, "W₁ distance", det_w1, rand_w1_mean, rand_w1_std,
-                       f"W₁ ({obs_xlabel})", threshold, rec_k,
-                       w1_at_k1=det_w1[0] if det_w1[0] > 0 else None)
-        _save(fig, out_dir / f"convergence_{obs_key}.png")
-        _log_resources(f"{obs_key}: saved — total conv elapsed", t_conv)
-
-    return recommendations
-
-
-# ---------------------------------------------------------------------------
-# Pairwise Wasserstein distance analysis
-# ---------------------------------------------------------------------------
-def pairwise_w1_analysis(run_list: list[RunData], out_dir: Path) -> None:
-    """Empirical null distribution of W1 distances from all C(n,2) run pairs.
-
-    For each observable (zenith, azimuth, energy, NC count per muon) computes
-    all unique pairwise W1 distances, derives summary statistics, z-scores,
-    and range-normalised distances, and saves a report + two plots per
-    observable (histogram/boxplot and heatmap).
-    """
-    n_runs = len(run_list)
-    if n_runs < 2:
-        print("  Pairwise W1: need ≥ 2 runs; skipping.")
-        return
-
-    run_labels = [rd.run_name for rd in run_list]
-    pair_indices = list(_combinations(range(n_runs), 2))
-    n_pairs = len(pair_indices)
-
-    def _get_zenith(rd: RunData) -> np.ndarray:
-        return rd.muon_zenith_deg
-
-    def _get_azimuth(rd: RunData) -> np.ndarray:
-        return rd.muon_azimuth_deg
-
-    def _get_energy(rd: RunData) -> np.ndarray:
-        e = rd.muon_ekin_mev
-        return np.log(e[e > 0] + 1.0)
-
-    def _get_nc_count(rd: RunData) -> np.ndarray:
-        return rd.nc_counts.astype(np.float64)
-
-    observables = [
-        ("zenith",   "Muon zenith",       "Zenith [°]",           _get_zenith),
-        ("azimuth",  "Muon azimuth",      "Azimuth [°]",          _get_azimuth),
-        ("energy",   "Muon energy",       "log(E_kin [MeV] + 1)", _get_energy),
-        ("nc_count", "NC count per muon", "NC count (raw)",       _get_nc_count),
-    ]
-
-    report_lines: list[str] = [
-        "=== Pairwise Wasserstein Distance Analysis ===",
-        f"Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}",
-        "",
-        "Purpose: estimate the null distribution of W1 distances expected from",
-        "finite-sample fluctuations when all runs share the same underlying",
-        "physical process.  The 95th and 99th percentiles define empirical",
-        "acceptance thresholds for future simulation runs.",
-        "",
-    ]
-
-    for obs_key, obs_title, obs_xlabel, getter in observables:
-        _t0_pw = _log_resources(f"  pairwise_w1: start {obs_title}")
-        print(f"\n  Pairwise W1: {obs_title} ...", flush=True)
-
-        arrays = [getter(rd) for rd in run_list]
-        if any(a.size == 0 for a in arrays):
-            print(f"    WARNING: empty array for at least one run; skipping {obs_title}.")
-            continue
-        sorted_arrays = [np.sort(a) for a in arrays]
-        _log_resources(f"  pairwise_w1: {obs_title} sorted", _t0_pw)
-
-        # Compute all C(n_runs, 2) pairwise W1 distances
-        pw_w1 = np.zeros((n_runs, n_runs))
-        pair_vals: list[float] = []
-        for i, j in pair_indices:
-            w1 = _w1_sorted(sorted_arrays[i], sorted_arrays[j])
-            pw_w1[i, j] = w1
-            pw_w1[j, i] = w1
-            pair_vals.append(w1)
-        # Free sorted arrays as soon as W1 distances are in hand.
-        # data_range can be read from the sorted extremes without concatenation.
-        data_range = float(
-            max(s[-1] for s in sorted_arrays) - min(s[0] for s in sorted_arrays)
-        )
-        del sorted_arrays
-        _log_resources(f"  pairwise_w1: {obs_title} {n_pairs} W1 calls done", _t0_pw)
-        pv = np.array(pair_vals, dtype=np.float64)
-
-        # Summary statistics
-        mean_w = float(pv.mean())
-        med_w  = float(np.median(pv))
-        std_w  = float(pv.std(ddof=0))
-        min_w  = float(pv.min())
-        max_w  = float(pv.max())
-        p95_w  = float(np.percentile(pv, 95))
-        p99_w  = float(np.percentile(pv, 99))
-
-        z_scores   = (pv - mean_w) / std_w  if std_w > 0.0  else np.zeros_like(pv)
-        norm_range = pv / data_range         if data_range > 0.0 else np.zeros_like(pv)
-
-        # Build symmetric matrices
-        z_mat   = np.zeros((n_runs, n_runs))
-        rng_mat = np.zeros((n_runs, n_runs))
-        for idx, (i, j) in enumerate(pair_indices):
-            z_mat[i, j]   = z_mat[j, i]   = z_scores[idx]
-            rng_mat[i, j] = rng_mat[j, i] = norm_range[idx]
-
-        n_exceed_p99 = int(np.sum(pv > p99_w))
-        consistent   = n_exceed_p99 == 0
-
-        # ---- Text report ----
-        sep   = "=" * 62
-        hdr   = "           " + "".join(f"  {lb:>8s}" for lb in run_labels)
-
-        def _mat_block(mat: np.ndarray, fmt: str) -> list[str]:
-            rows = [hdr]
-            for i in range(n_runs):
-                row = f"  {run_labels[i]:>8s}" + "".join(
-                    "     --  " if i == j else f"  {mat[i, j]:{fmt}}"
-                    for j in range(n_runs)
-                )
-                rows.append(row)
-            return rows
-
-        report_lines += [
-            sep,
-            f"Observable: {obs_title}",
-            sep,
-            "",
-            "  Summary statistics (absolute W1):",
-            f"    Mean:                  {mean_w:>14.6f}",
-            f"    Median:                {med_w:>14.6f}",
-            f"    Std (ddof=0):          {std_w:>14.6f}",
-            f"    Min:                   {min_w:>14.6f}",
-            f"    Max:                   {max_w:>14.6f}",
-            f"    95th percentile:       {p95_w:>14.6f}  [empirical threshold]",
-            f"    99th percentile:       {p99_w:>14.6f}  [strict threshold]",
-            f"    Data range:            {data_range:>14.6f}",
-            (f"    W1_mean / data range:  {mean_w/data_range:>14.6f}"
-             if data_range > 0 else "    W1_mean / data range:       (range = 0)"),
-            "",
-            "  Pairwise W1 matrix (absolute):",
-        ] + _mat_block(pw_w1, "8.4f") + [
-            "",
-            "  Pairwise W1 matrix (z-score = (W − mean) / std):",
-        ] + _mat_block(z_mat, "8.3f") + [
-            "",
-            "  Pairwise W1 matrix (W / data range):",
-        ] + _mat_block(rng_mat, "8.6f") + [
-            "",
-            "  Interpretation:",
-            f"    Intrinsic fluctuation (1σ):   {std_w:.6f}"
-            + (f"  ({std_w / data_range * 100:.4f}% of data range)"
-               if data_range > 0 else ""),
-            f"    'Normal' W1 range:            [{mean_w - std_w:.4f}, {mean_w + std_w:.4f}]  (mean ± 1σ)",
-            f"    Empirical threshold (95th):   {p95_w:.6f}",
-            f"    Strict threshold (99th):      {p99_w:.6f}",
-            f"    Pairs exceeding 99th pct:     {n_exceed_p99}/{n_pairs}",
-            f"    Runs mutually consistent:     {'YES' if consistent else 'NO — inspect heatmap'}",
-            "",
-            "  Acceptance criterion for future runs:",
-            f"    W1(new run, combined reference) ≤ {p95_w:.6f}  (95th pct, recommended)",
-            f"    W1(new run, combined reference) ≤ {p99_w:.6f}  (99th pct, strict)",
-            "",
-        ]
-
-        # ---- Plot 1: Histogram + Boxplot ----
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle(
-            f"Pairwise W₁ — {obs_title}  ({n_pairs} pairs, {n_runs} runs)",
-            fontsize=13,
-        )
-
-        ax = axes[0]
-        n_bins = max(7, min(20, n_pairs // 3))
-        ax.hist(pv, bins=n_bins, color=COLORS["blue"], edgecolor="black",
-                linewidth=0.6, alpha=0.8)
-        ax.axvline(mean_w, color=COLORS["orange"], linewidth=1.8,
-                   linestyle="--", label=f"Mean = {mean_w:.4f}")
-        ax.axvline(mean_w - std_w, color=COLORS["orange"], linewidth=1.0,
-                   linestyle=":", alpha=0.7, label=f"±1σ = {std_w:.4f}")
-        ax.axvline(mean_w + std_w, color=COLORS["orange"], linewidth=1.0,
-                   linestyle=":", alpha=0.7)
-        ax.axvline(p95_w, color=COLORS["red"], linewidth=1.5,
-                   linestyle="--", label=f"95th pct = {p95_w:.4f}")
-        ax.axvline(p99_w, color=COLORS["purple"], linewidth=1.5,
-                   linestyle=":", label=f"99th pct = {p99_w:.4f}")
-        ax.set_xlabel(f"W₁ ({obs_xlabel})", fontsize=11)
-        ax.set_ylabel("Count", fontsize=11)
-        ax.set_title("Distribution of pairwise W₁", fontsize=11)
-        ax.legend(fontsize=9)
-        ax.tick_params(labelsize=9)
-
-        ax = axes[1]
-        ax.boxplot(
-            pv, vert=True, patch_artist=True,
-            boxprops=dict(facecolor=COLORS["blue"], alpha=0.5),
-            medianprops=dict(color="black", linewidth=2),
-            whiskerprops=dict(linewidth=1.5),
-            capprops=dict(linewidth=1.5),
-            flierprops=dict(marker="o", markersize=5, alpha=0.6,
-                            markerfacecolor=COLORS["blue"]),
-        )
-        ax.axhline(p95_w, color=COLORS["red"], linewidth=1.5,
-                   linestyle="--", label=f"95th pct = {p95_w:.4f}")
-        ax.axhline(p99_w, color=COLORS["purple"], linewidth=1.5,
-                   linestyle=":", label=f"99th pct = {p99_w:.4f}")
-        ax.set_ylabel(f"W₁ ({obs_xlabel})", fontsize=11)
-        ax.set_title("Boxplot of pairwise W₁", fontsize=11)
-        ax.legend(fontsize=9)
-        ax.tick_params(labelsize=9)
-        ax.set_xticks([])
-
-        plt.tight_layout()
-        _save(fig, out_dir / f"pairwise_w1_{obs_key}_dist.png")
-
-        # ---- Plot 2: Heatmap ----
-        off_diag = pw_w1[~np.eye(n_runs, dtype=bool)]
-        vmax = float(off_diag.max()) if off_diag.size > 0 else 1.0
-
-        fig, ax = plt.subplots(figsize=(9, 8))
-        im = ax.imshow(pw_w1, cmap="viridis", aspect="equal",
-                       vmin=0.0, vmax=vmax)
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label(f"W₁ ({obs_xlabel})", fontsize=11)
-        ax.set_xticks(range(n_runs))
-        ax.set_yticks(range(n_runs))
-        ax.set_xticklabels(run_labels, rotation=45, ha="right", fontsize=9)
-        ax.set_yticklabels(run_labels, fontsize=9)
-        for i in range(n_runs):
-            for j in range(n_runs):
-                val = pw_w1[i, j]
-                txt = "—" if i == j else f"{val:.3f}"
-                brightness = val / vmax if (vmax > 0 and i != j) else 0.0
-                txt_color  = "white" if brightness < 0.6 else "black"
-                ax.text(j, i, txt, ha="center", va="center",
-                        fontsize=7, color=txt_color)
-        ax.set_title(f"Pairwise W₁ matrix — {obs_title}", fontsize=12)
-        plt.tight_layout()
-        _save(fig, out_dir / f"pairwise_w1_{obs_key}_heatmap.png")
-
-    # Write report
-    out_path = out_dir / "pairwise_w1_statistics.txt"
-    out_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
-    print(f"\n  Saved: {out_path.name}")
-
-
-# ---------------------------------------------------------------------------
-# Statistical convergence test (3 levels)
+# Monte Carlo uncertainty analysis
 # ---------------------------------------------------------------------------
 
-def _extract_nc_fields_run(rd: RunData) -> dict[str, np.ndarray]:
-    """Extract NC-level fields from a RunData for convergence analysis."""
-    return {
-        "nc_time_ns":  rd.nc_time_ns.astype(np.float64),
-        "nc_x_m":      rd.nc_x_m.astype(np.float64),
-        "nc_y_m":      rd.nc_y_m.astype(np.float64),
-        "nc_z_m":      rd.nc_z_m.astype(np.float64),
-        "nc_r_m":      rd.nc_r_m.astype(np.float64),
-        "nc_phi_rad":  rd.nc_phi_rad.astype(np.float64),
-        "nc_ge77":     rd.nc_ge77.astype(np.float64),
-        "nc_n_gammas": rd.nc_n_gammas.astype(np.float64),
-        "nc_counts":   rd.nc_counts.astype(np.float64),  # per-muon count
-    }
+def _mc_sem_scalar(
+    data: np.ndarray,
+    n_sizes: int = MC_N_SIZES,
+    n_draws: int = MC_N_DRAWS,
+    seed: int = RANDOM_SEED,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Monte Carlo standard error curve for a scalar observable f(x).
 
+    For each N in a log-spaced grid [n_min, N_full], draws n_draws random
+    subsamples (without replacement) and computes ΔE_N = S/√N per draw.
+    Returns mean and std of ΔE_N across draws as a function of N.
 
-def _extract_nc_fields_run_ge77(rd: RunData) -> dict[str, np.ndarray]:
-    """Like _extract_nc_fields_run but restricted to Ge77-producing muons."""
-    nc_ge77_mu_mask   = np.isin(rd.nc_evtid, rd.ge77_evtids)
-    counts_ge77_mask  = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
-    return {
-        "nc_time_ns":  rd.nc_time_ns[nc_ge77_mu_mask].astype(np.float64),
-        "nc_x_m":      rd.nc_x_m[nc_ge77_mu_mask].astype(np.float64),
-        "nc_y_m":      rd.nc_y_m[nc_ge77_mu_mask].astype(np.float64),
-        "nc_z_m":      rd.nc_z_m[nc_ge77_mu_mask].astype(np.float64),
-        "nc_r_m":      rd.nc_r_m[nc_ge77_mu_mask].astype(np.float64),
-        "nc_phi_rad":  rd.nc_phi_rad[nc_ge77_mu_mask].astype(np.float64),
-        "nc_ge77":     rd.nc_ge77[nc_ge77_mu_mask].astype(np.float64),
-        "nc_n_gammas": rd.nc_n_gammas[nc_ge77_mu_mask].astype(np.float64),
-        "nc_counts":   rd.nc_counts[counts_ge77_mask].astype(np.float64),
-    }
-
-
-def load_nc_fields_flat(
-    hdf5_files: list[Path],
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Load and deduplicate NC fields from a flat list of HDF5 files.
-
-    Deduplication is on (evtid, nC_track_id), same logic as load_run.
-    Returns (all_fields, ge77_fields) where ge77_fields is restricted to
-    NCs belonging to Ge77-producing muons.
+    Returns: (n_arr, sem_mean, sem_std)
     """
-    parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
-    }
-    gamma_evtid_l: list[np.ndarray] = []
-    gamma_nc_id_l: list[np.ndarray] = []
+    N_full = len(data)
+    if N_full < 2:
+        return np.array([float(N_full)]), np.array([np.nan]), np.array([np.nan])
 
-    for fp in hdf5_files:
-        nc = read_nc_data_file(fp)
-        if nc["evtid"].size > 0:
-            for k in parts:
-                parts[k].append(nc[k])
-        ge, gn = read_gamma_count_file(fp)
-        if ge.size > 0:
-            gamma_evtid_l.append(ge)
-            gamma_nc_id_l.append(gn)
-
-    empty = {k: np.array([], dtype=np.float64) for k in NC_FIELDS_FOR_CONV}
-    if not parts["evtid"]:
-        return empty, empty
-
-    evtid_arr = np.concatenate(parts["evtid"])
-    track_arr = np.concatenate(parts["track_id"])
-    ge77_arr  = np.concatenate(parts["ge77"])
-    time_arr  = np.concatenate(parts["time_ns"])
-    x_arr     = np.concatenate(parts["x_m"])
-    y_arr     = np.concatenate(parts["y_m"])
-    z_arr     = np.concatenate(parts["z_m"])
-
-    pair_keys = np.stack([evtid_arr, track_arr], axis=1)
-    _, unique_idx, inverse = np.unique(
-        pair_keys, axis=0, return_index=True, return_inverse=True
+    n_min = max(10, N_full // 1000)
+    n_vals = np.unique(
+        np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
+        .astype(int)
+        .clip(2, N_full)
     )
-    unique_ge77 = np.zeros(len(unique_idx), dtype=np.int32)
-    np.maximum.at(unique_ge77, inverse, ge77_arr)
-    unique_evtids = evtid_arr[unique_idx]
-    unique_tracks = track_arr[unique_idx]
-
-    if gamma_evtid_l:
-        all_ge = np.concatenate(gamma_evtid_l)
-        all_gn = np.concatenate(gamma_nc_id_l)
-        gamma_pairs = np.stack([all_ge, all_gn], axis=1)
-        upairs, gcounts = np.unique(gamma_pairs, axis=0, return_counts=True)
-        gamma_lookup = {
-            (int(p[0]), int(p[1])): int(c) for p, c in zip(upairs, gcounts)
-        }
-        del all_ge, all_gn, gamma_pairs, upairs, gcounts
-    else:
-        gamma_lookup = {}
-
-    nc_n_gammas = np.array(
-        [gamma_lookup.get((int(e), int(t)), 0)
-         for e, t in zip(unique_evtids, unique_tracks)],
-        dtype=np.float64,
-    )
-
-    sorted_mu_evtids, nc_counts_per_mu = np.unique(unique_evtids, return_counts=True)
-
-    nc_time   = time_arr[unique_idx].astype(np.float64)
-    nc_z      = z_arr[unique_idx].astype(np.float64)
-    nc_r      = np.sqrt(x_arr[unique_idx] ** 2 + y_arr[unique_idx] ** 2)
-    nc_phi    = np.arctan2(y_arr[unique_idx], x_arr[unique_idx])
-    nc_ge77f  = unique_ge77.astype(np.float64)
-    nc_counts = nc_counts_per_mu.astype(np.float64)
-
-    nc_x = x_arr[unique_idx].astype(np.float64)
-    nc_y = y_arr[unique_idx].astype(np.float64)
-
-    all_fields: dict[str, np.ndarray] = {
-        "nc_time_ns":  nc_time,
-        "nc_x_m":      nc_x,
-        "nc_y_m":      nc_y,
-        "nc_z_m":      nc_z,
-        "nc_r_m":      nc_r,
-        "nc_phi_rad":  nc_phi,
-        "nc_ge77":     nc_ge77f,
-        "nc_n_gammas": nc_n_gammas,
-        "nc_counts":   nc_counts,
-    }
-
-    # Ge77-only: restrict to NCs from muons that produced ≥1 Ge77 NC
-    ge77_muon_evtids = np.unique(unique_evtids[unique_ge77 == 1])
-    nc_ge77_mu_mask  = np.isin(unique_evtids, ge77_muon_evtids)
-    mu_ge77_mask     = np.isin(sorted_mu_evtids, ge77_muon_evtids)
-
-    ge77_fields: dict[str, np.ndarray] = {
-        "nc_time_ns":  nc_time[nc_ge77_mu_mask],
-        "nc_x_m":      nc_x[nc_ge77_mu_mask],
-        "nc_y_m":      nc_y[nc_ge77_mu_mask],
-        "nc_z_m":      nc_z[nc_ge77_mu_mask],
-        "nc_r_m":      nc_r[nc_ge77_mu_mask],
-        "nc_phi_rad":  nc_phi[nc_ge77_mu_mask],
-        "nc_ge77":     nc_ge77f[nc_ge77_mu_mask],
-        "nc_n_gammas": nc_n_gammas[nc_ge77_mu_mask],
-        "nc_counts":   nc_counts[mu_ge77_mask],
-    }
-
-    return all_fields, ge77_fields
-
-
-def level2_pairwise_fluctuations(
-    run_list: list[RunData],
-    extractor=None,
-    label: str = "all muons",
-) -> dict[str, tuple[float, float]]:
-    """Compute all C(n,2) pairwise W1 distances between runs per NC field.
-
-    extractor: callable(RunData) -> dict[str, np.ndarray]; defaults to
-               _extract_nc_fields_run (all muons).
-    Returns {field_key: (mean_w1, std_w1)}.
-    """
-    if extractor is None:
-        extractor = _extract_nc_fields_run
-    n_runs = len(run_list)
-    pair_indices = list(_combinations(range(n_runs), 2))
-    n_pairs = len(pair_indices)
-
-    print(f"\n{'='*60}")
-    print(f"Level 2 — Leave-One-Out Pairwise W1 Fluctuations ({label})")
-    print(f"  Runs: {n_runs}  |  Pairs: C({n_runs},2) = {n_pairs}")
-
-    fluctuations: dict[str, tuple[float, float]] = {}
-    _t0_l2 = time.perf_counter()
-
-    for field_key, field_label in NC_FIELDS_FOR_CONV.items():
-        _t0_field = time.perf_counter()
-        arrays = [extractor(rd)[field_key] for rd in run_list]
-        if any(a.size == 0 for a in arrays):
-            print(f"  SKIP {field_key}: empty array in ≥1 run")
-            continue
-        n_total = sum(a.size for a in arrays)
-        sorted_arrs = [np.sort(a) for a in arrays]
-
-        w1_vals: list[float] = []
-        for i, j in pair_indices:
-            if field_key in _CIRCULAR_FIELDS:
-                w1 = _w1_circular_phi(sorted_arrs[i], sorted_arrs[j])
-            else:
-                w1 = _w1_sorted(sorted_arrs[i], sorted_arrs[j])
-            if not np.isnan(w1):
-                w1_vals.append(w1)
-        del sorted_arrs
-
-        if not w1_vals:
-            continue
-        arr = np.array(w1_vals)
-        mean_w1 = float(arr.mean())
-        std_w1  = float(arr.std())
-        fluctuations[field_key] = (mean_w1, std_w1)
-        _log_resources(
-            f"  L2 {field_key:20s} N={n_total:.2e}  mean={mean_w1:.4g}  std={std_w1:.4g}",
-            _t0_field,
-        )
-
-    _log_resources(f"  L2 all {len(fluctuations)} fields done", _t0_l2)
-    return fluctuations
-
-
-# Sub-directory names and their expected muon counts for Level-3 learning curve.
-# Each tuple is (directory_name, expected_total_muons).  The vertex cross-check
-# verifies the actual count via //hit/vertices/evtid/pages.
-_SUBSAMPLE_DIRS: list[tuple[str, int]] = [
-    ("1e4", 10_000),
-    ("1e5", 100_000),
-    ("1e6", 1_000_000),
-    ("1e7", 10_000_000),
-]
-
-
-def _w1_circular_phi(a: np.ndarray, b: np.ndarray, K: int = 200) -> float:
-    """Wasserstein-1 for angles in [-π, π] under the circular arc metric
-    d(θ₁, θ₂) = min(|θ₁−θ₂|, 2π−|θ₁−θ₂|).
-
-    Algorithm
-    ---------
-    The standard linear W1 on [-π, π] treats the wrap-around at ±π as a
-    large cost, which is incorrect for angular data.  The true circular W1
-    is the minimum linear W1 achievable by cyclically shifting one
-    distribution along the circle.
-
-    1. Map both arrays to [0, 2π) via ``% (2π)``.
-    2. Try K uniformly-spaced cyclic shifts c_k = k·(2π/K) for k=0,...,K-1.
-    3. For each shift c, the sorted shifted array (b + c) % 2π is obtained
-       in O(1) by splitting at the wrap-around index via np.searchsorted
-       and concatenating the two halves (no full re-sort required).
-    4. Evaluate the linear W1 against a via _w1_sorted  [O(n+m) per
-       call since both inputs are sorted].
-    5. Return the minimum W1 over all K candidates.
-
-    Approximation
-    -------------
-    The approximation error in the optimal shift is ≤ 2π/K radians.
-    For a near-uniform distribution (azimuthal symmetry in the water tank)
-    the resulting W1 error is bounded by (2π/K) × max_density ≈ 2π/K ÷ 2π
-    = 1/K.  With K=200 this gives < 0.5 % relative error in W1, well below
-    the statistical noise at any subsample size used here.
-
-    Complexity: O(K · (n + m)).  With K=200 and n=m=1e7, roughly 4×10⁹
-    elementary operations (~2–4 s on a modern node).
-
-    References
-    ----------
-    Rabin J. & Peyré G. (2011), "Wasserstein regularization of imaging
-    problem", IEEE ICIP — circular optimal transport on the 1-torus.
-    Delon J. et al. (2010), "Fast Earth Mover's Distance", SIAM IS — exact
-    O(n log n) algorithm for equal-size empirical measures on the circle.
-    """
-    TWO_PI = 2.0 * np.pi
-    a_s = np.sort(a % TWO_PI)
-    b_s = np.sort(b % TWO_PI)
-    best = np.inf
-    for k in range(K):
-        c = k * TWO_PI / K
-        # Find index where b_s[idx:] + c wraps past 2π
-        idx = int(np.searchsorted(b_s, TWO_PI - c, side="left"))
-        if idx == len(b_s):
-            # All values shift without wrapping
-            b_c = b_s + c
-        elif idx == 0:
-            # All values wrap: subtract 2π after adding c
-            b_c = b_s + c - TWO_PI
-        else:
-            b_c = np.concatenate([b_s[idx:] + c - TWO_PI, b_s[:idx] + c])
-        w1 = _w1_sorted(a_s, b_c)
-        if w1 < best:
-            best = w1
-    return best
-
-
-def _count_muons_in_dir(hdf5_files: list[Path]) -> int:
-    """Count unique muon evtids across all HDF5 files via //hit/vertices/evtid/pages.
-
-    Each muon appears exactly once in the vertices group, so the number of
-    unique evtids equals the number of simulated muons.  This is the ground-
-    truth count used to validate that a sub-directory contains the expected N.
-    """
-    all_evtids: list[np.ndarray] = []
-    for fp in hdf5_files:
-        try:
-            with h5py.File(fp, "r") as f:
-                if VERTICES_GROUP not in f:
-                    continue
-                vgrp = f[VERTICES_GROUP]
-                if int(vgrp["entries"][()]) == 0:
-                    continue
-                all_evtids.append(_pages(vgrp, "evtid").astype(np.int64))
-        except Exception as exc:
-            print(f"  WARNING: could not read vertices from {fp.name}: {exc}")
-    if not all_evtids:
-        return 0
-    return int(np.unique(np.concatenate(all_evtids)).size)
-
-
-def _compute_swd_all_params(
-    sub_fields: dict[str, np.ndarray],
-    ref_fields: dict[str, np.ndarray],
-    n_projections: int = 500,
-    seed: int = 42,
-) -> float:
-    """Sliced Wasserstein Distance (SWD) across all NC parameters at once.
-
-    Feature matrix (D=10 columns per NC event)
-    -------------------------------------------
-    nc_time_ns, nc_x_m, nc_y_m, nc_z_m, nc_r_m, nc_ge77, nc_n_gammas,
-    nc_counts   →  8 columns used directly.
-    nc_phi_rad  →  (cos φ, sin φ)  — 2 columns preserving circular topology
-                   so that angles near ±π are treated as neighbours.
-
-    Normalization
-    -------------
-    Each column is z-scored using the reference mean and std to put all
-    parameters on a comparable scale.  Columns with zero std are dropped.
-
-    SWD computation
-    ---------------
-    The SWD is the average W1 along K=n_projections random unit directions
-    in R^D, computed via ot.sliced_wasserstein_distance (POT library).
-    SWD → W₁ as K → ∞  (Rabin et al. 2012, "Wasserstein Barycenter and
-    its Application to Texture Mixing").  At N=1e8 (sub == ref) SWD = 0.
-
-    Returns np.nan if any required field is empty.
-    """
-    import ot  # POT — already in project dependencies
-
-    SCALAR_KEYS = [
-        "nc_time_ns", "nc_x_m", "nc_y_m", "nc_z_m", "nc_r_m",
-        "nc_ge77", "nc_n_gammas", "nc_counts",
-    ]
-
-    def _build_matrix(fields: dict[str, np.ndarray]) -> np.ndarray | None:
-        cols: list[np.ndarray] = []
-        for k in SCALAR_KEYS:
-            arr = fields.get(k, np.array([]))
-            if arr.size == 0:
-                return None
-            cols.append(arr.astype(np.float32))
-        phi = fields.get("nc_phi_rad", np.array([]))
-        if phi.size == 0:
-            return None
-        cols.append(np.cos(phi).astype(np.float32))
-        cols.append(np.sin(phi).astype(np.float32))
-        return np.stack(cols, axis=1)  # shape (N, D)
-
-    X_ref = _build_matrix(ref_fields)
-    X_sub = _build_matrix(sub_fields)
-    if X_ref is None or X_sub is None:
-        return float("nan")
-
-    # Z-score normalise using reference statistics
-    ref_mean = X_ref.mean(axis=0)
-    ref_std  = X_ref.std(axis=0)
-    keep = ref_std > 0
-    if not keep.any():
-        return float("nan")
-    X_ref = ((X_ref - ref_mean) / np.where(keep, ref_std, 1.0))[:, keep]
-    X_sub = ((X_sub - ref_mean) / np.where(keep, ref_std, 1.0))[:, keep]
 
     rng = np.random.default_rng(seed)
-    return float(ot.sliced_wasserstein_distance(
-        X_sub, X_ref, n_projections=n_projections, seed=int(rng.integers(2**31))
-    ))
+    sem_means = np.zeros(len(n_vals), dtype=np.float64)
+    sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
+
+    for i, n in enumerate(n_vals):
+        sems: list[float] = []
+        for _ in range(n_draws):
+            idx = rng.choice(N_full, size=int(n), replace=False)
+            s = float(np.std(data[idx], ddof=1))
+            sems.append(s / np.sqrt(n))
+        sem_means[i] = float(np.mean(sems))
+        sem_stds[i]  = float(np.std(sems))
+
+    return n_vals.astype(np.float64), sem_means, sem_stds
 
 
-def _plot_relative_improvement(
-    n_arr: np.ndarray,
-    w1_data: dict[str, list[float]],
-    out_dir: Path,
-    title_suffix: str = "All muons",
-    fname_suffix: str = "",
-) -> None:
-    """Plot B: relative W1 improvement per decade.
+def _mc_sem_vector(
+    data: np.ndarray,
+    n_sizes: int = MC_N_SIZES,
+    n_draws: int = MC_N_DRAWS,
+    seed: int = RANDOM_SEED,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """MC standard error for a 3-D vector observable: L2 norm of SEM vector.
 
-    ΔW1_rel(N) = [W1(N/10) − W1(N)] / W1(N/10) × 100 %
+    For each component c ∈ {0, 1, 2}: SEM_c = std_c / √N.
+    Scalar metric: ‖ΔE‖ = √(SEM_0² + SEM_1² + SEM_2²).
 
-    Shows how much each additional decade of statistics reduces the W1
-    distance to the 1e8 reference.  The N=1e7 point is annotated
-    explicitly.  N=1e8 (W1=0) is excluded — division by W1(N/10)=W1(1e7)
-    would give 100 % and the point is trivial.
+    data: shape (N, 3).
+    Returns: (n_arr, sem_norm_mean, sem_norm_std)
     """
-    n_fields = len(NC_FIELDS_FOR_CONV)
-    ncols = 3
-    nrows = (n_fields + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
+    N_full = len(data)
+    if N_full < 2:
+        return np.array([float(N_full)]), np.array([np.nan]), np.array([np.nan])
+
+    n_min = max(10, N_full // 1000)
+    n_vals = np.unique(
+        np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
+        .astype(int)
+        .clip(2, N_full)
+    )
+
+    rng = np.random.default_rng(seed)
+    sem_means = np.zeros(len(n_vals), dtype=np.float64)
+    sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
+
+    for i, n in enumerate(n_vals):
+        norms: list[float] = []
+        for _ in range(n_draws):
+            idx    = rng.choice(N_full, size=int(n), replace=False)
+            sample = data[idx]                         # (n, 3)
+            std_c  = np.std(sample, axis=0, ddof=1)   # (3,)
+            sem_c  = std_c / np.sqrt(n)               # (3,)
+            norms.append(float(np.linalg.norm(sem_c)))
+        sem_means[i] = float(np.mean(norms))
+        sem_stds[i]  = float(np.std(norms))
+
+    return n_vals.astype(np.float64), sem_means, sem_stds
+
+
+def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
+    """Monte Carlo standard error scaling ΔE_N = S/√N vs sample size N.
+
+    Observables (each treated as f(x) for MC variance estimation):
+      NC count per muon       — per NC-producing / Ge77 muon  [scalar]
+      NC position (x, y, z)  — per NC / Ge77-muon NC         [3-D vector → ‖ΔE‖]
+      Capture gammas per NC  — per NC / Ge77-muon NC         [scalar]
+      Normalized momentum     — per NC-producing / Ge77 muon  [3-D vector → ‖ΔE‖]
+      NC capture time        — per NC / Ge77-muon NC         [scalar]
+
+    Two populations per observable:
+      • All   — all NCs / all NC-producing muons
+      • Ge77  — NCs of Ge77-producing muons / Ge77 muons
+
+    For each N in a log-spaced grid, MC_N_DRAWS subsamples (without replacement)
+    are drawn; mean ΔE_N and ±1σ band are plotted.  A 1/√N reference anchored
+    at the smallest N confirms the expected Monte Carlo convergence rate.
+
+    Outputs: mc_uncertainty_scaling.png
+    """
+    print("\n--- Monte Carlo uncertainty analysis ---", flush=True)
+    _t0 = time.perf_counter()
+
+    is_ge77mu  = agg["nc_is_ge77mu"]
+    mu_has_nc  = agg["mu_has_nc"]
+    mu_is_ge77 = agg["mu_is_ge77"]
+
+    # Reconstruct NC x, y from stored cylindrical coordinates
+    nc_x = agg["nc_r_m"] * np.cos(agg["nc_phi_rad"])
+    nc_y = agg["nc_r_m"] * np.sin(agg["nc_phi_rad"])
+    nc_z = agg["nc_z_m"]
+    nc_pos_all  = np.stack([nc_x, nc_y, nc_z], axis=1).astype(np.float64)
+    nc_pos_ge77 = nc_pos_all[is_ge77mu]
+
+    # Normalized muon momentum for NC-producing and Ge77-producing muons
+    def _norm_p(px: np.ndarray, py: np.ndarray, pz: np.ndarray) -> np.ndarray:
+        p_mag = np.sqrt(px**2 + py**2 + pz**2)
+        p_mag = np.where(p_mag > 0, p_mag, 1.0)
+        return np.stack([px / p_mag, py / p_mag, pz / p_mag], axis=1).astype(np.float64)
+
+    mu_p_all  = _norm_p(agg["mu_px_mev"][mu_has_nc],
+                        agg["mu_py_mev"][mu_has_nc],
+                        agg["mu_pz_mev"][mu_has_nc])
+    mu_p_ge77 = _norm_p(agg["mu_px_mev"][mu_is_ge77],
+                        agg["mu_py_mev"][mu_is_ge77],
+                        agg["mu_pz_mev"][mu_is_ge77])
+
+    observables: list[dict] = [
+        {
+            "key":            "nc_count",
+            "label":          "NC count per muon",
+            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [NCs]",
+            "pop_all_label":  "NC-producing muons",
+            "pop_ge77_label": "Ge77-producing muons",
+            "scalar":         True,
+            "data_all":       agg["nc_counts"].astype(np.float64),
+            "data_ge77":      agg["nc_counts_ge77mu"].astype(np.float64),
+        },
+        {
+            "key":            "nc_position",
+            "label":          "NC position (x, y, z)",
+            "ylabel":         r"$\|\Delta E\| = \|S/\sqrt{N}\|$  [m]",
+            "pop_all_label":  "All NCs",
+            "pop_ge77_label": "Ge77-muon NCs",
+            "scalar":         False,
+            "data_all":       nc_pos_all,
+            "data_ge77":      nc_pos_ge77,
+        },
+        {
+            "key":            "nc_n_gammas",
+            "label":          "Capture gammas per NC",
+            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [gammas]",
+            "pop_all_label":  "All NCs",
+            "pop_ge77_label": "Ge77-muon NCs",
+            "scalar":         True,
+            "data_all":       agg["nc_n_gammas"].astype(np.float64),
+            "data_ge77":      agg["nc_n_gammas"][is_ge77mu].astype(np.float64),
+        },
+        {
+            "key":            "mu_momentum",
+            "label":          r"Normalized muon momentum $\hat{p}$",
+            "ylabel":         r"$\|\Delta E\| = \|S/\sqrt{N}\|$  [dimensionless]",
+            "pop_all_label":  "NC-producing muons",
+            "pop_ge77_label": "Ge77-producing muons",
+            "scalar":         False,
+            "data_all":       mu_p_all,
+            "data_ge77":      mu_p_ge77,
+        },
+        {
+            "key":            "nc_time",
+            "label":          "NC capture time",
+            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [ns]",
+            "pop_all_label":  "All NCs",
+            "pop_ge77_label": "Ge77-muon NCs",
+            "scalar":         True,
+            "data_all":       agg["nc_time_ns"].astype(np.float64),
+            "data_ge77":      agg["nc_time_ns"][is_ge77mu].astype(np.float64),
+        },
+    ]
+
+    n_obs = len(observables)
+    ncols = 2
+    nrows = (n_obs + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 5 * nrows))
     axes_flat = np.array(axes).flatten()
 
-    # Exclude the N=1e8 anchor (W1=0) from relative improvement
-    mask_excl = n_arr < 1e8 - 1
-    n_plot = n_arr[mask_excl]
-
-    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
+    for idx, obs in enumerate(observables):
         ax = axes_flat[idx]
-        w1_arr = np.array(w1_data[field_key])[mask_excl]
+        fn = _mc_sem_vector if not obs["scalar"] else _mc_sem_scalar
 
-        # ΔW1_rel(N) = [W1(N/10) - W1(N)] / W1(N/10) * 100
-        # Computed at each consecutive pair; result assigned to the larger N.
-        delta_vals: list[float] = []
-        delta_n:    list[float] = []
-        for k in range(1, len(n_plot)):
-            w_prev = w1_arr[k - 1]
-            w_curr = w1_arr[k]
-            if w_prev > 0 and not np.isnan(w_prev) and not np.isnan(w_curr):
-                delta_vals.append((w_prev - w_curr) / w_prev * 100.0)
-                delta_n.append(n_plot[k])
+        ref_n0:   float | None = None
+        ref_sem0: float | None = None
 
-        if not delta_n:
-            ax.text(0.5, 0.5, "Insufficient data", ha="center", va="center",
-                    transform=ax.transAxes)
-            ax.set_title(field_label, fontsize=12)
-            continue
+        for data, color, marker, pop_label in [
+            (obs["data_all"],  COLORS["blue"],   "o", obs["pop_all_label"]),
+            (obs["data_ge77"], COLORS["orange"], "s", obs["pop_ge77_label"]),
+        ]:
+            if len(data) == 0:
+                continue
+            n_arr, sem_mean, sem_std = fn(data, seed=RANDOM_SEED + idx)
+            ax.plot(n_arr, sem_mean, "-", color=color, marker=marker,
+                    markersize=4, linewidth=1.5,
+                    label=f"{pop_label}  (N = {len(data):,})")
+            ax.fill_between(
+                n_arr,
+                np.maximum(sem_mean - sem_std, 1e-30),
+                sem_mean + sem_std,
+                color=color, alpha=0.2,
+            )
+            # Anchor 1/√N reference at the first valid point of the all-population curve
+            if ref_n0 is None:
+                valid = np.isfinite(sem_mean) & (sem_mean > 0)
+                if valid.any():
+                    i0       = int(np.argmax(valid))
+                    ref_n0   = float(n_arr[i0])
+                    ref_sem0 = float(sem_mean[i0])
 
-        ax.bar(range(len(delta_n)), delta_vals, color=COLORS["blue"], alpha=0.8)
-        ax.set_xticks(range(len(delta_n)))
-        ax.set_xticklabels([f"1e{int(np.log10(n))}" for n in delta_n], fontsize=9)
+        if ref_n0 is not None and ref_sem0 is not None and ref_n0 > 0:
+            n_ref = np.logspace(np.log10(ref_n0), np.log10(float(n_arr[-1])), 100)
+            ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
+                    ":", color="gray", linewidth=1.2, alpha=0.7,
+                    label=r"$1/\sqrt{N}$ reference")
 
-        # Mark N=1e7 bar
-        for ki, n_val in enumerate(delta_n):
-            if abs(n_val - 1e7) < 1:
-                ax.bar(ki, delta_vals[ki], color=COLORS["red"], alpha=0.9,
-                       label=f"N=1e7: {delta_vals[ki]:.1f}%")
-                break
-
-        ax.axhline(0, color="black", linewidth=0.8)
-        ax.set_xlabel("N (larger end of decade)", fontsize=10)
-        ax.set_ylabel("ΔW1_rel [%]", fontsize=10)
-        ax.set_title(field_label, fontsize=12)
-        ax.legend(fontsize=8)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Sample size $N$", fontsize=11)
+        ax.set_ylabel(obs["ylabel"], fontsize=11)
+        ax.set_title(obs["label"], fontsize=12)
+        ax.legend(fontsize=9)
         ax.tick_params(labelsize=9)
 
-    for extra in axes_flat[n_fields:]:
+    for extra in axes_flat[n_obs:]:
         extra.set_visible(False)
 
     fig.suptitle(
-        f"Relative W1 Improvement per Decade — {title_suffix}\n"
-        r"$\Delta W1_\mathrm{rel}(N) = [W1(N/10)-W1(N)]\,/\,W1(N/10)\times100\%$",
+        r"Monte Carlo Uncertainty Scaling: $\Delta E_N = S/\sqrt{N}$ vs Sample Size $N$"
+        "\n"
+        r"$S^2 = \frac{1}{N-1}\sum_{n=1}^{N}(f(x_n)-E_N)^2$"
+        rf"   (shaded band = $\pm 1\sigma$ across {MC_N_DRAWS} draws)",
         fontsize=13,
     )
     plt.tight_layout()
-    fname = f"convergence_relative_improvement{fname_suffix}.png"
-    _save(fig, out_dir / fname)
+    _save(fig, out_dir / "mc_uncertainty_scaling.png")
+    _log_resources("mc_uncertainty_analysis done", _t0)
 
-
-def _convergence_summary(
-    n_arr: np.ndarray,
-    w1_all: dict[str, list[float]],
-    w1_ge77: dict[str, list[float]],
-    out_dir: Path,
-) -> None:
-    """Print and save convergence criteria table for both populations.
-
-    Criterion A — absolute threshold:
-        W1(N) < f × W1(N=1e4)   for f ∈ {0.01, 0.05, 0.10}
-
-    Criterion B — relative improvement threshold:
-        ΔW1_rel(N→10N) < ε_rel  for ε_rel ∈ {1%, 2%, 5%}
-
-    Outputs:
-    - Console: one line per parameter × criterion, ✓/✗ at N=1e7.
-    - LaTeX: booktabs-style table saved to out_dir/convergence_summary_table.tex.
-    """
-    F_VALS   = [0.01, 0.05, 0.10]
-    EPS_VALS = [1.0,  2.0,  5.0]
-
-    def _min_n_criterion_a(w1_vals: list[float], f: float) -> float | None:
-        """Return smallest N where W1(N) < f * W1(1e4), or None."""
-        arr = np.array(w1_vals)
-        # First value corresponds to 1e4 (first subsample dir)
-        valid = ~np.isnan(arr) & (arr > 0)
-        if not valid.any():
-            return None
-        w1_ref = arr[valid][0]
-        threshold = f * w1_ref
-        for n_val, w in zip(n_arr, arr):
-            if n_val >= 1e8 - 1:
-                break  # skip the 0-anchor
-            if not np.isnan(w) and w < threshold:
-                return float(n_val)
-        return None
-
-    def _min_n_criterion_b(w1_vals: list[float], eps: float) -> float | None:
-        """Return smallest N (larger end) where ΔW1_rel < eps [%], or None."""
-        arr = np.array(w1_vals)
-        mask_excl = n_arr < 1e8 - 1
-        arr_ex = arr[mask_excl]
-        n_ex   = n_arr[mask_excl]
-        for k in range(1, len(n_ex)):
-            w_prev, w_curr = arr_ex[k - 1], arr_ex[k]
-            if w_prev > 0 and not np.isnan(w_prev) and not np.isnan(w_curr):
-                rel = (w_prev - w_curr) / w_prev * 100.0
-                if rel < eps:
-                    return float(n_ex[k])
-        return None
-
-    def _passes_at_1e7(w1_vals: list[float], threshold_n: float | None) -> bool:
-        if threshold_n is None:
-            return False
-        return threshold_n <= 1e7 + 1
-
-    header = (
-        f"\n{'='*80}\n"
-        "Convergence Summary\n"
-        f"{'='*80}"
-    )
-    print(header)
-
-    tex_rows: list[str] = []
-    tex_rows.append(r"\begin{table}[htbp]")
-    tex_rows.append(r"\centering")
-    tex_rows.append(r"\caption{Convergence criteria for NC parameters (all muons / Ge77 muons).}")
-    tex_rows.append(r"\begin{tabular}{llccc}")
-    tex_rows.append(r"\toprule")
-    tex_rows.append(
-        r"Parameter & Criterion & Threshold & Min.\ sufficient $N$ (all) "
-        r"& $N=10^7$ sufficient? \\"
-    )
-    tex_rows.append(r"\midrule")
-
-    for pop_label, w1_data in [("all muons", w1_all), ("Ge77 muons", w1_ge77)]:
-        print(f"\n  Population: {pop_label}")
-        print(f"  {'Parameter':<22} {'Crit':<4} {'Thr':<6} {'Min N':>10}  {'✓/✗ at 1e7'}")
-        print(f"  {'-'*60}")
-
-        for field_key, field_label in NC_FIELDS_FOR_CONV.items():
-            w1_vals = w1_data[field_key]
-
-            for f in F_VALS:
-                mn = _min_n_criterion_a(w1_vals, f)
-                ok = _passes_at_1e7(w1_vals, mn)
-                mn_str = f"{mn:.0e}" if mn is not None else "never"
-                sym = "✓" if ok else "✗"
-                tex_sym = r"\checkmark" if ok else r"$\times$"
-                print(f"  {field_label:<22} A    {f:<6.2f} {mn_str:>10}  {sym}")
-                tex_rows.append(
-                    f"{field_label} & A & $f={f:.2f}$ & {mn_str} & {tex_sym} \\\\"
-                )
-
-            for eps in EPS_VALS:
-                mn = _min_n_criterion_b(w1_vals, eps)
-                ok = _passes_at_1e7(w1_vals, mn)
-                mn_str = f"{mn:.0e}" if mn is not None else "never"
-                sym = "✓" if ok else "✗"
-                tex_sym = r"\checkmark" if ok else r"$\times$"
-                print(f"  {field_label:<22} B    {eps:<6.1f}% {mn_str:>10}  {sym}")
-                tex_rows.append(
-                    f"{field_label} & B & $\\varepsilon={eps:.0f}\\%$ & {mn_str} & {tex_sym} \\\\"
-                )
-
-        tex_rows.append(r"\midrule")
-
-    tex_rows.append(r"\bottomrule")
-    tex_rows.append(r"\end{tabular}")
-    tex_rows.append(r"\end{table}")
-
-    # ---------------------------------------------------------------------- #
-    # Overall verdict: is N=1e7 sufficient across ALL parameters × populations?
-    # ---------------------------------------------------------------------- #
-    verdict_results: dict[tuple[str, str], tuple[bool, int, int]] = {}
-
-    for f in F_VALS:
-        key = ("A", f"{f:.2f}")
-        passes: list[bool] = []
-        for w1_data in [w1_all, w1_ge77]:
-            for field_key in NC_FIELDS_FOR_CONV:
-                mn = _min_n_criterion_a(w1_data[field_key], f)
-                passes.append(_passes_at_1e7(w1_data[field_key], mn))
-        verdict_results[key] = (all(passes), sum(passes), len(passes))
-
-    for eps in EPS_VALS:
-        key = ("B", f"{eps:.0f}%")
-        passes = []
-        for w1_data in [w1_all, w1_ge77]:
-            for field_key in NC_FIELDS_FOR_CONV:
-                mn = _min_n_criterion_b(w1_data[field_key], eps)
-                passes.append(_passes_at_1e7(w1_data[field_key], mn))
-        verdict_results[key] = (all(passes), sum(passes), len(passes))
-
-    print(f"\n{'='*80}")
-    print("OVERALL VERDICT: Is N = 1×10⁷ sufficient?")
-    print(f"{'='*80}")
-    print(f"  (checking {len(NC_FIELDS_FOR_CONV)} parameters × 2 populations = "
-          f"{len(NC_FIELDS_FOR_CONV) * 2} parameter×population combinations)")
-    print()
-    for (crit, thr), (all_pass, n_pass, n_total) in verdict_results.items():
-        sym = "✓  SUFFICIENT" if all_pass else "✗  NEED 1e8 "
-        print(f"  Criterion {crit}  threshold={thr:<5s}  "
-              f"{n_pass:2d}/{n_total} combinations pass  →  {sym}")
-
-    any_all_pass = any(v[0] for v in verdict_results.values())
-    print()
-    if any_all_pass:
-        # Find the strictest criterion that still passes
-        passing_keys = [(c, t) for (c, t), (ok, _, _) in verdict_results.items() if ok]
-        print("  CONCLUSION: N = 1×10⁷ is SUFFICIENT under at least one tested criterion.")
-        print(f"  Passing criterion(s): {', '.join(f'Crit {c} thr={t}' for c, t in passing_keys)}")
-    else:
-        print("  CONCLUSION: N = 1×10⁷ is INSUFFICIENT — N = 1×10⁸ is REQUIRED")
-        print("              under all tested criteria for at least one parameter.")
-    print(f"{'='*80}\n")
-
-    # Add verdict to LaTeX output
-    tex_rows.append("")
-    tex_rows.append(r"\begin{table}[htbp]")
-    tex_rows.append(r"\centering")
-    tex_rows.append(r"\caption{Overall verdict: is $N=10^7$ sufficient?}")
-    tex_rows.append(r"\begin{tabular}{llcc}")
-    tex_rows.append(r"\toprule")
-    tex_rows.append(r"Criterion & Threshold & Combinations passing & Verdict \\")
-    tex_rows.append(r"\midrule")
-    for (crit, thr), (all_pass, n_pass, n_total) in verdict_results.items():
-        verdict_str = r"\checkmark\ Sufficient" if all_pass else r"$\times$\ Need $10^8$"
-        tex_rows.append(
-            f"{crit} & {thr} & ${n_pass}/{n_total}$ & {verdict_str} \\\\"
-        )
-    tex_rows.append(r"\midrule")
-    overall_str = (
-        r"\textbf{Sufficient}" if any_all_pass
-        else r"\textbf{Need $10^8$}"
-    )
-    tex_rows.append(rf"\multicolumn{{4}}{{l}}{{Overall: {overall_str}}} \\")
-    tex_rows.append(r"\bottomrule")
-    tex_rows.append(r"\end{tabular}")
-    tex_rows.append(r"\end{table}")
-
-    tex_path = out_dir / "convergence_summary_table.tex"
-    tex_path.write_text("\n".join(tex_rows) + "\n", encoding="utf-8")
-    print(f"\n  Saved LaTeX table: {tex_path.name}")
-
-
-def _fit_power_law(
-    n_arr: np.ndarray, w1_arr: np.ndarray
-) -> tuple[float, float, float] | None:
-    """Fit W1(N) = a · N^{-α} via log-log OLS on valid (N, W1) pairs.
-
-    Returns (a, alpha, alpha_se) or None if fewer than 3 valid points.
-    alpha_se is the OLS standard error of the exponent from the polyfit
-    covariance matrix.  The theoretical i.i.d. value is alpha = 0.5
-    (Fournier & Guillin 2015, Ann. Probab. 43(6)).
-    """
-    valid = ~np.isnan(w1_arr) & (w1_arr > 0) & (n_arr > 0)
-    if valid.sum() < 3:
-        return None
-    coeffs, cov = np.polyfit(
-        np.log10(n_arr[valid]), np.log10(w1_arr[valid]), 1, cov=True
-    )
-    alpha_se = float(np.sqrt(cov[0, 0]))
-    return float(10 ** coeffs[1]), float(-coeffs[0]), alpha_se
-
-
-def _plot_learning_curve(
-    n_arr: np.ndarray,
-    w1_data: dict[str, list[float]],
-    fluctuations: dict[str, tuple[float, float]],
-    out_dir: Path,
-    title_suffix: str = "All muons",
-    fname_suffix: str = "",
-) -> None:
-    n_fields = len(NC_FIELDS_FOR_CONV)
-    ncols = 3
-    nrows = (n_fields + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
-    axes_flat = np.array(axes).flatten()
-
-    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
-        ax = axes_flat[idx]
-        w1_arr = np.array(w1_data[field_key])
-        # valid: subsample points with positive W1 (excludes the N=1e8 zero anchor)
-        valid = ~np.isnan(w1_arr) & (w1_arr > 0)
-
-        ax.scatter(n_arr[valid], w1_arr[valid],
-                   color=COLORS["blue"], zorder=5, s=60, label="W1 to 1e8 ref")
-
-        anchor_mask = (n_arr >= 1e8 - 1) & (w1_arr == 0.0)
-        if anchor_mask.any():
-            ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8,
-                       label="N=1e8 (W1=0, ref=self)")
-
-        fit = _fit_power_law(n_arr, w1_arr)
-        if fit is not None:
-            a_f, b_f, b_se = fit
-            n_min = float(n_arr[valid].min()) if valid.any() else 1e4
-            n_plot = np.logspace(np.log10(n_min), 8.5, 300)
-            ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
-                    color=COLORS["red"], linewidth=1.5,
-                    label=f"α={b_f:.3f}±{b_se:.3f} (fit, F&G 2015)")
-            w1_1e8 = a_f * 1e8 ** (-b_f)
-            ax.scatter([1e8], [w1_1e8], marker="*", s=120,
-                       color=COLORS["red"], zorder=6,
-                       label=f"D(1e8)≈{w1_1e8:.4g}")
-            # Theoretical α=0.5 reference anchored at first valid data point
-            n0 = float(n_arr[valid][0])
-            w0 = float(w1_arr[valid][0])
-            ax.plot(n_plot, w0 * (n_plot / n0) ** (-0.5), ":",
-                    color="gray", linewidth=1.2, alpha=0.7,
-                    label="α=0.5 (i.i.d. CLT theory)")
-
-        if field_key in fluctuations:
-            m_fl, s_fl = fluctuations[field_key]
-            ax.axhline(m_fl, color=COLORS["green"], linestyle="--",
-                       linewidth=1.0, label=f"L2 mean={m_fl:.4g}")
-            lo = max(m_fl - s_fl, 1e-30)
-            ax.axhspan(lo, m_fl + s_fl, alpha=0.15, color=COLORS["green"])
-
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("N muon samples", fontsize=11)
-        ax.set_ylabel("W1 distance", fontsize=11)
-        ax.set_title(field_label, fontsize=12)
-        ax.legend(fontsize=8)
-        ax.tick_params(labelsize=9)
-
-    for extra in axes_flat[n_fields:]:
-        extra.set_visible(False)
-
-    fig.suptitle(f"Convergence Learning Curve: W1 vs Sample Size — {title_suffix}",
-                 fontsize=14)
-    plt.tight_layout()
-    fname = f"convergence_learning_curve{fname_suffix}.png"
-    _save(fig, out_dir / fname)
-
-
-def _plot_learning_curve_normalized(
-    n_arr: np.ndarray,
-    w1_data: dict[str, list[float]],
-    fluctuations: dict[str, tuple[float, float]],
-    out_dir: Path,
-    title_suffix: str = "All muons",
-    fname_suffix: str = "",
-) -> None:
-    n_fields = len(NC_FIELDS_FOR_CONV)
-    ncols = 3
-    nrows = (n_fields + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
-    axes_flat = np.array(axes).flatten()
-
-    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
-        ax = axes_flat[idx]
-
-        if field_key not in fluctuations or fluctuations[field_key][0] == 0:
-            ax.text(0.5, 0.5, "No L2 baseline", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=11)
-            ax.set_title(field_label, fontsize=12)
-            continue
-
-        m_fl, s_fl = fluctuations[field_key]
-        w1_arr  = np.array(w1_data[field_key])
-        w1_norm = w1_arr / m_fl
-        valid = ~np.isnan(w1_norm) & (w1_norm > 0)
-
-        ax.scatter(n_arr[valid], w1_norm[valid],
-                   color=COLORS["blue"], zorder=5, s=60, label="W1/mean(L2)")
-
-        fit = _fit_power_law(n_arr, w1_norm)
-        if fit is not None:
-            a_f, b_f, _ = fit
-            n_min = float(n_arr[valid].min()) if valid.any() else 1e4
-            n_plot = np.logspace(np.log10(n_min), 8.5, 300)
-            ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
-                    color=COLORS["red"], linewidth=1.5,
-                    label=f"{a_f:.3g}·n^(−{b_f:.3f})")
-            val_1e8 = a_f * 1e8 ** (-b_f)
-            ax.scatter([1e8], [val_1e8], marker="*", s=120,
-                       color=COLORS["red"], zorder=6,
-                       label=f"at 1e8: {val_1e8:.4g}")
-            ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8)
-
-        ax.axhline(1.0, color=COLORS["green"], linestyle="--",
-                   linewidth=1.0, label="= L2 mean fluctuation")
-        rel_std = s_fl / m_fl if m_fl > 0 else 0.0
-        ax.axhspan(max(1.0 - rel_std, 1e-30), 1.0 + rel_std,
-                   alpha=0.15, color=COLORS["green"])
-
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("N muon samples", fontsize=11)
-        ax.set_ylabel("W1 / mean(W1_L2)", fontsize=11)
-        ax.set_title(field_label, fontsize=12)
-        ax.legend(fontsize=8)
-        ax.tick_params(labelsize=9)
-
-    for extra in axes_flat[n_fields:]:
-        extra.set_visible(False)
-
-    fig.suptitle(
-        f"Normalized Convergence: W1 / L2 Mean Fluctuation — {title_suffix}",
-        fontsize=14,
-    )
-    plt.tight_layout()
-    fname = f"convergence_learning_curve_normalized{fname_suffix}.png"
-    _save(fig, out_dir / fname)
-
-
-def _plot_learning_curve_comparison(
-    n_arr: np.ndarray,
-    w1_all: dict[str, list[float]],
-    w1_ge77: dict[str, list[float]],
-    out_dir: Path,
-) -> None:
-    """One subplot per field: both all-muon and Ge77-only W1 curves on the same axes."""
-    n_fields = len(NC_FIELDS_FOR_CONV)
-    ncols = 3
-    nrows = (n_fields + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
-    axes_flat = np.array(axes).flatten()
-
-    for idx, (field_key, field_label) in enumerate(NC_FIELDS_FOR_CONV.items()):
-        ax = axes_flat[idx]
-        w1_a = np.array(w1_all[field_key])
-        w1_g = np.array(w1_ge77[field_key])
-
-        for w1_arr, color, marker, subset_label in [
-            (w1_a, COLORS["blue"],   "o", "All muons"),
-            (w1_g, COLORS["orange"], "s", "Ge77 muons"),
-        ]:
-            valid = ~np.isnan(w1_arr) & (w1_arr > 0)
-            if not valid.any():
-                continue
-            ax.scatter(n_arr[valid], w1_arr[valid],
-                       color=color, marker=marker, zorder=5, s=60,
-                       label=subset_label)
-            fit = _fit_power_law(n_arr, w1_arr)
-            if fit is not None:
-                a_f, b_f, _ = fit
-                n_min = float(n_arr[valid].min())
-                n_plot = np.logspace(np.log10(n_min), 8.5, 300)
-                ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
-                        color=color, linewidth=1.5, alpha=0.8,
-                        label=f"n^(−{b_f:.2f})")
-
-        ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("N muon samples", fontsize=11)
-        ax.set_ylabel("W1 distance", fontsize=11)
-        ax.set_title(field_label, fontsize=12)
-        ax.legend(fontsize=8)
-        ax.tick_params(labelsize=9)
-
-    for extra in axes_flat[n_fields:]:
-        extra.set_visible(False)
-
-    fig.suptitle("W1 Convergence: All muons vs Ge77 muons", fontsize=14)
-    plt.tight_layout()
-    _save(fig, out_dir / "convergence_learning_curve_comparison.png")
-
-
-def _plot_swd_learning_curve(
-    n_arr: np.ndarray,
-    swd_all: list[float],
-    swd_ge77: list[float],
-    out_dir: Path,
-) -> None:
-    """Single plot: Sliced Wasserstein Distance (all params combined) vs N."""
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for swd_vals, color, marker, label in [
-        (swd_all,  COLORS["blue"],   "o", "All muons"),
-        (swd_ge77, COLORS["orange"], "s", "Ge77 muons"),
-    ]:
-        arr = np.array(swd_vals)
-        valid = ~np.isnan(arr) & (arr > 0)
-        if valid.any():
-            ax.scatter(n_arr[valid], arr[valid],
-                       color=color, marker=marker, s=60, zorder=5, label=label)
-            fit = _fit_power_law(n_arr, arr)
-            if fit is not None:
-                a_f, b_f, _ = fit
-                n_min = float(n_arr[valid].min())
-                n_plot = np.logspace(np.log10(n_min), 8.5, 300)
-                ax.plot(n_plot, a_f * n_plot ** (-b_f), "--",
-                        color=color, linewidth=1.5, alpha=0.8,
-                        label=f"{label}: n^(−{b_f:.2f})")
-        # Plot the N=1e8 zero anchor explicitly on the x-axis
-        ax.scatter([1e8], [1e-10], marker="*", s=150, color=color,
-                   zorder=6, alpha=0.6)
-
-    ax.axvline(1e8, color="gray", linestyle=":", linewidth=0.8,
-               label="N=1e8 ref (SWD=0)")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("N muon samples", fontsize=12)
-    ax.set_ylabel("Sliced Wasserstein Distance", fontsize=12)
-    ax.set_title("SWD (all NC parameters combined) vs Sample Size", fontsize=13)
-    ax.legend(fontsize=9)
-    ax.tick_params(labelsize=10)
-    plt.tight_layout()
-    _save(fig, out_dir / "convergence_swd_combined.png")
-
-
-def level3_learning_curve(
-    data_path: Path,
-    run_list: list[RunData],
-    fluctuations: dict[str, tuple[float, float]],
-    fluctuations_ge77: dict[str, tuple[float, float]],
-    out_dir: Path,
-) -> None:
-    """Load sub-directory data; compute W1 vs 1e8 reference; fit power law; save plots.
-
-    For each entry in _SUBSAMPLE_DIRS the directory data_path/<dir>/ is loaded
-    in full (no subsampling).  Before loading, _count_muons_in_dir verifies that
-    the number of unique muon evtids in //hit/vertices/evtid/pages exactly matches
-    the expected count from the directory name.  A mismatch raises RuntimeError.
-
-    Circular W1 is used for nc_phi_rad (see _w1_circular_phi).
-    An anchor at N=1e8 with W1=0 is appended; the power-law fit excludes it via
-    the (w1 > 0) mask.
-    A Sliced Wasserstein Distance (SWD) across all parameters is computed as a
-    combined multivariate convergence metric.
-    """
-    print(f"\n{'='*60}")
-    print("Level 3 — Learning Curve & Power Law Extrapolation")
-
-    # Build reference arrays from all 10 runs (= full 1e8 dataset).
-    ref_all:  dict[str, np.ndarray] = {}
-    ref_ge77: dict[str, np.ndarray] = {}
-    for field_key in NC_FIELDS_FOR_CONV:
-        all_parts  = [_extract_nc_fields_run(rd)[field_key]      for rd in run_list]
-        ge77_parts = [_extract_nc_fields_run_ge77(rd)[field_key] for rd in run_list]
-        ref_all[field_key]  = np.sort(np.concatenate([a for a in all_parts  if a.size > 0]))
-        ref_ge77[field_key] = np.sort(np.concatenate([a for a in ge77_parts if a.size > 0]))
-
-    # Raw (unsorted) reference dicts for SWD feature-matrix construction
-    ref_all_raw:  dict[str, np.ndarray] = {
-        k: np.concatenate([_extract_nc_fields_run(rd)[k] for rd in run_list])
-        for k in NC_FIELDS_FOR_CONV
-    }
-    ref_ge77_raw: dict[str, np.ndarray] = {
-        k: np.concatenate([_extract_nc_fields_run_ge77(rd)[k] for rd in run_list])
-        for k in NC_FIELDS_FOR_CONV
-    }
-
-    total_nc      = sum(rd.nc_evtid.size for rd in run_list)
-    total_ge77_nc = sum(int((rd.nc_ge77 == 1).sum()) for rd in run_list)
-    print(f"  Reference (all):  {total_nc:,} NCs | "
-          f"Ge77-muon subset: {total_ge77_nc:,} Ge77-flagged NCs")
-
-    w1_all:  dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
-    w1_ge77: dict[str, list[float]] = {k: [] for k in NC_FIELDS_FOR_CONV}
-    swd_all:  list[float] = []
-    swd_ge77: list[float] = []
-    n_vals: list[float] = []
-
-    for size_dir, n_expected in _SUBSAMPLE_DIRS:
-        subdir = data_path / size_dir
-        if not subdir.exists():
-            raise RuntimeError(
-                f"Level 3: required sub-directory not found: {subdir}\n"
-                f"Expected sub-directories under {data_path}: "
-                f"{[d for d, _ in _SUBSAMPLE_DIRS]}"
-            )
-        hdf5_files = sorted(subdir.glob("output_t*.hdf5"))
-        if not hdf5_files:
-            hdf5_files = sorted(subdir.glob("*.hdf5"))
-        if not hdf5_files:
-            raise RuntimeError(
-                f"Level 3: no HDF5 files found in required sub-directory: {subdir}"
-            )
-
-        # --- Vertex cross-check: actual muon count must match directory name ---
-        print(f"  Verifying {size_dir}/  ({len(hdf5_files)} files) ...", flush=True)
-        n_actual = _count_muons_in_dir(hdf5_files)
-        if n_actual != n_expected:
-            raise RuntimeError(
-                f"Level 3 vertex cross-check FAILED for {subdir}:\n"
-                f"  Expected {n_expected:,} unique muon evtids (from directory name '{size_dir}'),\n"
-                f"  but //hit/vertices/evtid/pages contains {n_actual:,} unique evtids.\n"
-                f"  Ensure each sub-directory is a simulation of exactly the stated "
-                f"number of muons."
-            )
-        print(f"    OK: {n_actual:,} unique muon evtids == expected {n_expected:,}.")
-
-        print(f"  Loading {size_dir}/  (N={n_expected:.0e}) ...", flush=True)
-        sub_all_fields, sub_ge77_fields = load_nc_fields_flat(hdf5_files)
-        n_vals.append(float(n_expected))
-
-        for field_key in NC_FIELDS_FOR_CONV:
-            for sub_fields, w1_dict, ref_sorted in [
-                (sub_all_fields,  w1_all,  ref_all),
-                (sub_ge77_fields, w1_ge77, ref_ge77),
-            ]:
-                sub_arr = sub_fields[field_key]
-                ref_s   = ref_sorted[field_key]
-                if sub_arr.size == 0 or ref_s.size == 0:
-                    w1_dict[field_key].append(float("nan"))
-                    continue
-                if field_key in _CIRCULAR_FIELDS:
-                    w1 = _w1_circular_phi(sub_arr, ref_s)
-                else:
-                    sub_s = np.sort(sub_arr)
-                    w1 = _w1_sorted(sub_s, ref_s)
-                w1_dict[field_key].append(float(w1))
-            print(f"    {field_key:20s}: W1(all)={w1_all[field_key][-1]:.6g}"
-                  f"  W1(ge77)={w1_ge77[field_key][-1]:.6g}")
-
-        # Sliced Wasserstein Distance over all parameters combined
-        swd_a = _compute_swd_all_params(sub_all_fields,  ref_all_raw)
-        swd_g = _compute_swd_all_params(sub_ge77_fields, ref_ge77_raw)
-        swd_all.append(swd_a)
-        swd_ge77.append(swd_g)
-        print(f"    {'SWD (all params)':20s}: SWD(all)={swd_a:.6g}  SWD(ge77)={swd_g:.6g}")
-
-    if len(n_vals) == 0:
-        raise RuntimeError(
-            "Level 3: none of the expected sub-directories were found or passed "
-            f"the vertex cross-check under {data_path}.\n"
-            f"Expected: {[d for d, _ in _SUBSAMPLE_DIRS]}"
-        )
-    if len(n_vals) < 2:
-        print("  Only 1 sample size available; power-law fit requires ≥ 2. "
-              "Add more sub-directories.")
-        return
-
-    # Append N=1e8 anchor: comparing the full reference to itself gives W1=0.
-    # The power-law fit excludes this point via the (w1 > 0) mask.
-    n_vals.append(1e8)
-    for fk in NC_FIELDS_FOR_CONV:
-        w1_all[fk].append(0.0)
-        w1_ge77[fk].append(0.0)
-    swd_all.append(0.0)
-    swd_ge77.append(0.0)
-    print("  Added N=1e8 anchor (W1=0, SWD=0) — reference vs itself.")
-
-    n_arr = np.array(n_vals, dtype=np.float64)
-
-    _plot_learning_curve(n_arr, w1_all,  fluctuations,      out_dir,
-                         title_suffix="All muons")
-    _plot_learning_curve(n_arr, w1_ge77, fluctuations_ge77, out_dir,
-                         title_suffix="Ge77 muons", fname_suffix="_ge77")
-    _plot_learning_curve_normalized(n_arr, w1_all,  fluctuations,      out_dir,
-                                    title_suffix="All muons")
-    _plot_learning_curve_normalized(n_arr, w1_ge77, fluctuations_ge77, out_dir,
-                                    title_suffix="Ge77 muons", fname_suffix="_ge77")
-    _plot_learning_curve_comparison(n_arr, w1_all, w1_ge77, out_dir)
-
-    _plot_relative_improvement(n_arr, w1_all,  out_dir, title_suffix="All muons")
-    _plot_relative_improvement(n_arr, w1_ge77, out_dir,
-                               title_suffix="Ge77 muons", fname_suffix="_ge77")
-
-    # SWD combined plot (one subplot, both populations)
-    _plot_swd_learning_curve(n_arr, swd_all, swd_ge77, out_dir)
-
-    _convergence_summary(n_arr, w1_all, w1_ge77, out_dir)
-
-
-def run_statistical_convergence_test(
-    data_path: Path,
-    run_list: list[RunData],
-    out_dir: Path,
-) -> None:
-    """Orchestrate the W1-based statistical convergence test.
-
-    Level 2: Pairwise W1 fluctuation scale from all C(R,2) run pairs,
-             for all muons and Ge77 muons separately.
-    Level 3: W1 learning curve for subsamples N ∈ {1e4,1e5,1e6,1e7} vs the
-             full 1e8 reference distribution, with power-law fit W1(N) = a·N^{-α}.
-             Raises RuntimeError if no sub-sampled data directories exist.
-
-    The scientific basis for the convergence limits (global absolute threshold
-    and relative improvement threshold) is printed and saved to
-    convergence_theory.txt.
-    """
-    n_muons_per_run = int(np.mean([rd.n_muons_total for rd in run_list]))
-    total_muons     = sum(rd.n_muons_total for rd in run_list)
-
-    print(f"\n{'='*60}")
-    print("W1 Statistical Convergence Test")
-    print(f"  {len(run_list)} runs  |  ~{n_muons_per_run:.2e} muons/run  "
-          f"|  total ~{total_muons:.2e} muons")
-    print(f"{'='*60}")
-
-    _t0_sct = _log_resources("convergence_test: start L2 all muons")
-    fluctuations = level2_pairwise_fluctuations(
-        run_list, extractor=_extract_nc_fields_run, label="all muons"
-    )
-    _log_resources("convergence_test: L2 all muons done", _t0_sct)
-
-    _log_resources("convergence_test: start L2 Ge77 muons")
-    fluctuations_ge77 = level2_pairwise_fluctuations(
-        run_list, extractor=_extract_nc_fields_run_ge77, label="Ge77 muons"
-    )
-    _log_resources("convergence_test: L2 Ge77 muons done", _t0_sct)
-
-    _log_resources("convergence_test: start L3 learning curve")
-    level3_learning_curve(data_path, run_list, fluctuations, fluctuations_ge77, out_dir)
-    _log_resources("convergence_test: L3 learning curve done", _t0_sct)
-
-    print(f"\n{'='*60}")
-    print("Convergence test complete.")
-    print(f"{'='*60}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -3191,7 +1786,6 @@ def run_statistical_convergence_test(
 def write_statistics(
     agg: dict,
     outlier_info: dict,
-    recommendations: dict[str, int],
     run_list: list[RunData],
     out_dir: Path,
 ) -> None:
@@ -3226,19 +1820,6 @@ def write_statistics(
     else:
         lines.append("  (no outlier data)")
 
-    lines += ["", "--- Convergence: recommended minimum number of runs ---"]
-    obs_labels = {
-        "nc_count":         "NC count per muon (full)",
-        "nc_count_cut_100": f"NC count per muon (cut ≤{NC_CUT_100})",
-        "nc_count_cut":     f"NC count per muon (cut ≤{NC_MUON_CUT:,})",
-        "zenith":           "Muon zenith",
-        "azimuth":          "Muon azimuth",
-        "energy":           "Muon energy",
-    }
-    for key, label in obs_labels.items():
-        k = recommendations.get(key, "n/a")
-        lines.append(f"  {label:<25} k = {k}")
-
     lines += ["", "--- Per-run summary ---",
               f"{'Run':<12} {'Files':>6} {'NCs':>10} {'Ge77 NCs':>10} "
               f"{'NC muons':>10} {'Ge77 muons':>11}"]
@@ -3255,40 +1836,6 @@ def write_statistics(
     out_path.write_text(txt)
     print(f"  saved: {out_path.name}")
     print(txt)
-
-
-# ---------------------------------------------------------------------------
-# Unified W1 convergence entry point
-# ---------------------------------------------------------------------------
-def run_all_w1_convergence_analysis(
-    data_path: Path,
-    run_list: list[RunData],
-    out_dir: Path,
-) -> dict[str, int]:
-    """Run all W1-based convergence analyses in one call.
-
-    Order:
-      1. W1 vs cumulative runs k  (convergence_analysis, full mode)
-      2. Pairwise W1 for muon parameters  (pairwise_w1_analysis)
-      3. Pairwise W1 fluctuation scale for NC fields  (level2_pairwise_fluctuations)
-      4. Learning curve W1(N) vs 1e8 reference for NC fields  (level3_learning_curve)
-         — requires sub-directories {data_path}/1e4/, 1e5/, 1e6/, 1e7/ to exist;
-           raises RuntimeError if any are missing.
-
-    Returns the k-recommendations dict from convergence_analysis.
-    """
-    _t0_w1 = _log_resources("run_all_w1: start convergence_analysis (full)")
-    recommendations = convergence_analysis(run_list, out_dir, full_convergence=True)
-    _log_resources("run_all_w1: convergence_analysis done", _t0_w1)
-
-    _log_resources("run_all_w1: start pairwise_w1_analysis")
-    pairwise_w1_analysis(run_list, out_dir)
-    _log_resources("run_all_w1: pairwise_w1_analysis done", _t0_w1)
-
-    _log_resources("run_all_w1: start run_statistical_convergence_test (L2+L3)")
-    run_statistical_convergence_test(data_path, run_list, out_dir)
-    _log_resources("run_all_w1: run_statistical_convergence_test done", _t0_w1)
-    return recommendations
 
 
 # ---------------------------------------------------------------------------
@@ -3400,35 +1947,19 @@ def main() -> None:
     plot_cut_nc_material(run_list, out_dir)
     _log_resources("plot_cut_nc_material", t_main)
 
-    # Free memory no longer needed before the W1 convergence analysis.
-    # write_statistics only needs 5 scalar counts from agg; extract them first.
+    print("\n--- Monte Carlo Uncertainty Analysis ---")
+    mc_uncertainty_analysis(agg, out_dir)
+    _log_resources("mc_uncertainty_analysis done", t_main)
+
+    # write_statistics only needs 5 scalar counts from agg; extract them before freeing.
     agg_stats = {k: agg[k] for k in ("n_muons_total", "n_nc_total", "n_nc_ge77",
                                       "n_muons_ge77", "n_muons_with_nc")}
     del agg
-    # Strip RunData fields used only by earlier plot stages:
-    #   muon kinematics (px/py/pz used by fingerprint; x/y/z by 3-D scatter/fingerprint)
-    #   muon_evtid not used by any convergence function
-    #   nc_material_name / nc_is_water / ge77_nc_per_ge77muon not used by convergence
-    for _rd in run_list:
-        _rd.muon_evtid           = np.array([], dtype=np.int64)
-        _rd.muon_px_mev          = np.array([], dtype=np.float64)
-        _rd.muon_py_mev          = np.array([], dtype=np.float64)
-        _rd.muon_pz_mev          = np.array([], dtype=np.float64)
-        _rd.muon_x_m             = np.array([], dtype=np.float64)
-        _rd.muon_y_m             = np.array([], dtype=np.float64)
-        _rd.muon_z_m             = np.array([], dtype=np.float64)
-        _rd.nc_material_name     = np.array([], dtype=object)
-        _rd.nc_is_water          = np.array([], dtype=bool)
-        _rd.ge77_nc_per_ge77muon = np.array([], dtype=np.int64)
     gc.collect()
-    _log_resources("freed agg + unused RunData fields before W1 analysis", t_main)
-
-    print("\n--- W1 Convergence Analysis ---")
-    recommendations = run_all_w1_convergence_analysis(data_path, run_list, out_dir)
-    _log_resources("W1 convergence analysis done", t_main)
+    _log_resources("freed agg", t_main)
 
     print("\n--- Statistics ---")
-    write_statistics(agg_stats, outlier_info, recommendations, run_list, out_dir)
+    write_statistics(agg_stats, outlier_info, run_list, out_dir)
     _log_resources("total runtime", t_main)
 
     print("\nDone.")
