@@ -561,15 +561,14 @@ def _single_hist(
     if data.size == 0:
         return
     fig, ax = plt.subplots(figsize=(10, 6))
-    w = np.ones(len(data)) / len(data) if normalized else None
-    ax.hist(data, bins=bins, weights=w, color=color,
+    ax.hist(data, bins=bins, density=normalized, color=color,
             edgecolor="black", linewidth=0.3, alpha=0.85)
     if log_x:
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
     ax.set_xlabel(xlabel, fontsize=13)
-    ax.set_ylabel("Fraction" if normalized else "Count", fontsize=13)
+    ax.set_ylabel("Probability density" if normalized else "Count", fontsize=13)
     ax.set_title(f"{title}  (N = {len(data):,})", fontsize=14)
     ax.tick_params(labelsize=11)
     _save(fig, out_path)
@@ -588,15 +587,14 @@ def _comparison_hist(
     for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
         if data.size == 0:
             continue
-        w = np.ones(len(data)) / len(data) if normalized else None
-        ax.hist(data, bins=bins, weights=w, color=color, alpha=0.7,
+        ax.hist(data, bins=bins, density=normalized, color=color, alpha=0.7,
                 edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
     if log_x:
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
     ax.set_xlabel(xlabel, fontsize=13)
-    ax.set_ylabel("Fraction" if normalized else "Count", fontsize=13)
+    ax.set_ylabel("Probability density" if normalized else "Count", fontsize=13)
     ax.set_title(title, fontsize=14)
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
@@ -647,6 +645,158 @@ def _ratio_plot(
             spread = y_hi - y_lo
             margin = max(0.15 * spread, 0.05)
             ax.set_ylim(y_lo - margin, y_hi + margin)
+    plt.tight_layout()
+    _save(fig, out_path)
+
+
+# ---------------------------------------------------------------------------
+# Publication-quality comparison utilities  (axis-level building blocks)
+# ---------------------------------------------------------------------------
+
+def plot_normalized_histogram(
+    ax: "plt.Axes",
+    d1: np.ndarray, d2: np.ndarray,
+    l1: str, l2: str, c1: str, c2: str,
+    bins: np.ndarray,
+    log_x: bool = False, log_y: bool = False,
+) -> None:
+    """Overlay density-normalised histograms for two classes on *ax*.
+
+    Uses density=True: bin value = count / (N * Δx).  For variable-width bins
+    (e.g. log-spaced energy) this is the only correct normalisation — equal-
+    fraction weighting (1/N) would make wide bins appear falsely large because
+    the comparison is not per-unit-x.  Identical bin edges are applied to both
+    distributions so every bin represents the same x-interval.
+    """
+    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
+        if data.size == 0:
+            continue
+        ax.hist(data, bins=bins, density=True, color=color, alpha=0.7,
+                edgecolor="black", linewidth=0.3,
+                label=f"{label}  (N={data.size:,})")
+    if log_x:
+        ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_ylabel("Probability density", fontsize=11)
+    ax.legend(fontsize=9)
+    ax.tick_params(labelsize=9)
+
+
+def plot_cdf(
+    ax: "plt.Axes",
+    d1: np.ndarray, d2: np.ndarray,
+    l1: str, l2: str, c1: str, c2: str,
+    bins: np.ndarray,
+    log_x: bool = False,
+) -> None:
+    """Plot empirical CDFs for two classes using shared bin edges on *ax*.
+
+    CDF[i] = fraction of events with value ≤ bins[i+1] (right bin edge).
+    Using the same bin edges as the density histogram ensures that CDF
+    breakpoints correspond exactly to histogram bins.  The vertical separation
+    between the two CDFs at any x indicates cumulative discrimination power:
+    larger gaps → the two distributions have diverged more by that point.
+    """
+    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
+        if data.size == 0:
+            continue
+        h, _ = np.histogram(data, bins=bins)
+        cdf = np.cumsum(h).astype(float) / data.size
+        x_step = np.concatenate([[bins[0]], bins[1:]])
+        y_step = np.concatenate([[0.0], cdf])
+        ax.step(x_step, y_step, where="post", color=color, linewidth=1.5,
+                label=f"{label}  (N={data.size:,})")
+    if log_x:
+        ax.set_xscale("log")
+    ax.set_ylim(-0.02, 1.05)
+    ax.set_ylabel("Cumulative probability", fontsize=11)
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
+    ax.legend(fontsize=9)
+    ax.tick_params(labelsize=9)
+
+
+def plot_ratio(
+    ax: "plt.Axes",
+    d_num: np.ndarray, d_den: np.ndarray,
+    l_num: str, l_den: str,
+    bins: np.ndarray,
+    log_x: bool = False,
+) -> None:
+    """Plot density ratio R(x) = p_num(x) / p_den(x) with Poisson error bars.
+
+    Density in bin i:  p_i = k_i / (N * Δx_i),  k_i = raw bin count.
+    Poisson uncertainty on the numerator counts: σ_k = √k_i.
+    Propagated to the ratio:  σ_R = R / √k_i  (numerator errors only, as the
+    denominator population is large enough to treat as a reference).
+    Bins where the denominator density is zero are skipped.  R > 1 means the
+    numerator class is enriched; R < 1 means it is depleted.
+    """
+    if d_num.size == 0 or d_den.size == 0:
+        return
+    bin_widths = np.diff(bins)
+    h_num, _ = np.histogram(d_num, bins=bins)
+    h_den, _ = np.histogram(d_den, bins=bins)
+    p_num = h_num / (d_num.size * bin_widths)
+    p_den = h_den / (d_den.size * bin_widths)
+    bc = 0.5 * (bins[:-1] + bins[1:])
+
+    valid = p_den > 0
+    ratio = np.where(valid, p_num / np.where(valid, p_den, 1.0), np.nan)
+    sigma = np.where(
+        valid & (h_num > 0), ratio / np.sqrt(h_num.astype(float)), np.nan
+    )
+
+    mask = valid & np.isfinite(ratio)
+    ax.errorbar(
+        bc[mask], ratio[mask], yerr=sigma[mask],
+        fmt="o-", color=COLORS["red"], markersize=4, linewidth=1.2,
+        elinewidth=0.8, capsize=3, label=f"{l_num} / {l_den}",
+    )
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
+    if log_x:
+        ax.set_xscale("log")
+    ax.set_ylabel(f"Density ratio  {l_num} / {l_den}", fontsize=10)
+    ax.legend(fontsize=9)
+    ax.tick_params(labelsize=9)
+
+
+def _analysis_panel(
+    d_num: np.ndarray, d_den: np.ndarray,
+    l_num: str, l_den: str,
+    c_num: str, c_den: str,
+    bins: np.ndarray,
+    xlabel: str, title: str, out_path: Path,
+    log_x: bool = False, log_y: bool = False,
+) -> None:
+    """Three-panel comparison figure: density histogram | CDF | ratio with errors.
+
+    Combines plot_normalized_histogram, plot_cdf, and plot_ratio into a single
+    publication-quality figure.  The numerator class (d_num, typically Ge77)
+    carries Poisson error bars in the ratio panel; the denominator (d_den) is
+    treated as the reference distribution.  Reading the three panels together:
+      left   — shape differences at each x value (probability density)
+      centre  — cumulative discrimination power (CDF)
+      right   — pointwise enrichment factor with statistical significance (ratio)
+    """
+    if d_num.size == 0 and d_den.size == 0:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle(title, fontsize=13)
+
+    plot_normalized_histogram(axes[0], d_num, d_den, l_num, l_den,
+                               c_num, c_den, bins, log_x, log_y)
+    axes[0].set_xlabel(xlabel, fontsize=11)
+    axes[0].set_title("Probability density", fontsize=12)
+
+    plot_cdf(axes[1], d_num, d_den, l_num, l_den, c_num, c_den, bins, log_x)
+    axes[1].set_xlabel(xlabel, fontsize=11)
+    axes[1].set_title("Cumulative distribution function", fontsize=12)
+
+    plot_ratio(axes[2], d_num, d_den, l_num, l_den, bins, log_x)
+    axes[2].set_xlabel(xlabel, fontsize=11)
+    axes[2].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
+
     plt.tight_layout()
     _save(fig, out_path)
 
@@ -713,22 +863,33 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
         xl = obs["xlabel"]
         title = obs["title"]
 
+        d_ge77   = d[obs["mask_ge77"]]
+        d_noge77 = d[obs["mask_noge77"]]
         _comparison_hist(
-            d[obs["mask_noge77"]], d[obs["mask_ge77"]],
+            d_noge77, d_ge77,
             "Non-Ge77", "Ge77", COLORS["blue"], COLORS["red"],
             f"{title}: Ge77 vs non-Ge77", xl,
             out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx,
         )
-        _ratio_plot(
-            d[obs["mask_noge77"]], d[obs["mask_ge77"]],
-            "Non-Ge77", "Ge77", bins, xl,
-            out_dir / f"{base}_ge77_vs_noge77_ratio.png", log_x=lx,
+        _analysis_panel(
+            d_ge77, d_noge77,
+            "Ge77", "Non-Ge77", COLORS["red"], COLORS["blue"],
+            bins, xl, f"{title}: Ge77 vs non-Ge77 muons",
+            out_dir / f"{base}_ge77_vs_noge77_panel.png", log_x=lx,
         )
+        d_nc   = d[obs["mask_nc"]]
+        d_nonc = d[obs["mask_nonc"]]
         _comparison_hist(
-            d[obs["mask_nonc"]], d[obs["mask_nc"]],
+            d_nonc, d_nc,
             "No NC", "NC-producing", COLORS["blue"], COLORS["red"],
             f"{title}: NC-producing vs non-NC", xl,
             out_dir / f"{base}_nc_vs_nonc.png", bins, log_x=lx,
+        )
+        _analysis_panel(
+            d_nc, d_nonc,
+            "NC-producing", "No NC", COLORS["red"], COLORS["blue"],
+            bins, xl, f"{title}: NC-producing vs non-NC muons",
+            out_dir / f"{base}_nc_vs_nonc_panel.png", log_x=lx,
         )
 
 
@@ -794,11 +955,13 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "nc_count_per_muon_comparison.png")
-    _ratio_plot(
-        counts_noge77, counts_ge77,
-        "Non-Ge77 NC-producing", "Ge77-producing", bins,
-        "NC count per muon",
-        out_dir / "nc_count_per_muon_comparison_ratio.png",
+    _analysis_panel(
+        counts_ge77, counts_noge77,
+        "Ge77-producing", "Non-Ge77 NC-producing",
+        COLORS["red"], COLORS["blue"],
+        bins, "NC count per muon",
+        "NC count per muon: Ge77-producing vs non-Ge77 NC-producing muons",
+        out_dir / "nc_count_per_muon_comparison_panel.png",
         log_x=True,
     )
 
@@ -846,59 +1009,40 @@ def plot_ge77_per_ge77muon(agg: dict, out_dir: Path) -> None:
 # NC time distributions
 # ---------------------------------------------------------------------------
 def plot_nc_times(agg: dict, out_dir: Path) -> None:
-    """NC capture time: all muons + Ge77-muons (all NCs + Ge77-flagged)."""
-    nc_time = agg["nc_time_ns"]
-    nc_ge77_flag = agg["nc_ge77"]
+    """NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs (muon-level split)."""
+    nc_time      = agg["nc_time_ns"]
     nc_is_ge77mu = agg["nc_is_ge77mu"]
 
     if nc_time.size == 0:
         return
 
     pos = nc_time > 0
-    t_pos = nc_time[pos]
-    if t_pos.size == 0:
-        return
-    bins = make_log_bins(max(1.0, float(t_pos.min())), float(t_pos.max()))
+    t_ge77mu   = nc_time[pos & nc_is_ge77mu]
+    t_noge77mu = nc_time[pos & ~nc_is_ge77mu]
 
-    # ---- All muons: all NCs + Ge77-flagged NCs highlighted ----
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(t_pos, bins=bins, color=COLORS["blue"], edgecolor="black",
-            linewidth=0.3, label=f"All NCs (N={len(t_pos):,})")
-    ge77_t = nc_time[pos & (nc_ge77_flag == 1)]
-    if ge77_t.size > 0:
-        ax.hist(ge77_t, bins=bins, color=COLORS["red"], edgecolor="black",
-                linewidth=0.3, label=f"Ge77-flagged NCs (N={len(ge77_t):,})")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("NC capture time [ns]", fontsize=13)
-    ax.set_ylabel("Number of NCs", fontsize=13)
-    ax.set_title("NC capture time — all muons", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "nc_time_all.png")
-
-    # ---- Ge77-producing muons only ----
-    ge77mu_mask = pos & nc_is_ge77mu
-    t_ge77mu = nc_time[ge77mu_mask]
-    if t_ge77mu.size == 0:
+    t_all_pos = nc_time[pos]
+    if t_all_pos.size == 0:
         return
-    bins2 = make_log_bins(max(1.0, float(t_ge77mu.min())), float(t_ge77mu.max()))
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(t_ge77mu, bins=bins2, color=COLORS["blue"], edgecolor="black",
-            linewidth=0.3,
-            label=f"All NCs of Ge77 muons (N={len(t_ge77mu):,})")
-    ge77_only = nc_time[ge77mu_mask & (nc_ge77_flag == 1)]
-    if ge77_only.size > 0:
-        ax.hist(ge77_only, bins=bins2, color=COLORS["red"], edgecolor="black",
-                linewidth=0.3, label=f"Ge77-flagged NCs (N={len(ge77_only):,})")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("NC capture time [ns]", fontsize=13)
-    ax.set_ylabel("Number of NCs", fontsize=13)
-    ax.set_title("NC capture time — Ge77-producing muons only", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "nc_time_ge77muons.png")
+    bins = make_log_bins(max(1.0, float(t_all_pos.min())), float(t_all_pos.max()))
+
+    _comparison_hist(
+        t_noge77mu, t_ge77mu,
+        "Non-Ge77-muon NCs", "Ge77-muon NCs",
+        COLORS["blue"], COLORS["red"],
+        "NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs",
+        "NC capture time [ns]",
+        out_dir / "nc_time_ge77_vs_noge77.png",
+        bins, log_x=True, log_y=True,
+    )
+    _analysis_panel(
+        t_ge77mu, t_noge77mu,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins, "NC capture time [ns]",
+        "NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_time_ge77_vs_noge77_panel.png",
+        log_x=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -917,73 +1061,70 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     if phi.size == 0:
         return
 
-    # ---- 1-D φ: comparison overlay (all NCs vs Ge77-muon NCs) ----
-    bins_phi = np.linspace(-180, 180, 73)
-    phi_ge77mu = phi[is_ge77mu]
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(phi, bins=bins_phi, color=COLORS["blue"], alpha=0.7,
-            edgecolor="black", linewidth=0.3, label=f"All NCs (N={phi.size:,})")
-    if phi_ge77mu.size > 0:
-        ax.hist(phi_ge77mu, bins=bins_phi, color=COLORS["red"], alpha=0.7,
-                edgecolor="black", linewidth=0.3,
-                label=f"NCs of Ge77-producing muons (N={phi_ge77mu.size:,})")
-    ax.set_xlabel("NC azimuth φ [°]", fontsize=13)
-    ax.set_ylabel("Number of NCs", fontsize=13)
-    ax.set_title("NC azimuthal position: all NCs vs Ge77-muon NCs", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "nc_phi_1d_comparison.png")
-    _ratio_plot(
-        phi, phi_ge77mu,
-        "All NCs", "NCs of Ge77-producing muons", bins_phi,
+    # ---- 1-D φ: Ge77-muon NCs vs non-Ge77-muon NCs ----
+    bins_phi     = np.linspace(-180, 180, 73)
+    phi_ge77mu   = phi[is_ge77mu]
+    phi_noge77mu = phi[~is_ge77mu]
+    _comparison_hist(
+        phi_noge77mu, phi_ge77mu,
+        "Non-Ge77-muon NCs", "Ge77-muon NCs",
+        COLORS["blue"], COLORS["red"],
+        "NC azimuthal position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC azimuth φ [°]",
-        out_dir / "nc_phi_1d_comparison_ratio.png",
+        out_dir / "nc_phi_1d_comparison.png",
+        bins_phi,
+    )
+    _analysis_panel(
+        phi_ge77mu, phi_noge77mu,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins_phi, "NC azimuth φ [°]",
+        "NC azimuthal position: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_phi_1d_comparison_panel.png",
     )
 
-    # ---- 1-D z: comparison overlay (all NCs vs Ge77-muon NCs) ----
-    bins_z = np.linspace(float(z_mm.min()), float(z_mm.max()), 100)
-    z_ge77mu = z_mm[is_ge77mu]
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(z_mm, bins=bins_z, color=COLORS["blue"], alpha=0.7,
-            edgecolor="black", linewidth=0.3, label=f"All NCs (N={z_mm.size:,})")
-    if z_ge77mu.size > 0:
-        ax.hist(z_ge77mu, bins=bins_z, color=COLORS["red"], alpha=0.7,
-                edgecolor="black", linewidth=0.3,
-                label=f"NCs of Ge77-producing muons (N={z_ge77mu.size:,})")
-    ax.set_xlabel("NC z position [mm]", fontsize=13)
-    ax.set_ylabel("Number of NCs", fontsize=13)
-    ax.set_title("NC z position: all NCs vs Ge77-muon NCs", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "nc_z_1d_comparison.png")
-    _ratio_plot(
-        z_mm, z_ge77mu,
-        "All NCs", "NCs of Ge77-producing muons", bins_z,
+    # ---- 1-D z: Ge77-muon NCs vs non-Ge77-muon NCs ----
+    bins_z     = np.linspace(float(z_mm.min()), float(z_mm.max()), 100)
+    z_ge77mu   = z_mm[is_ge77mu]
+    z_noge77mu = z_mm[~is_ge77mu]
+    _comparison_hist(
+        z_noge77mu, z_ge77mu,
+        "Non-Ge77-muon NCs", "Ge77-muon NCs",
+        COLORS["blue"], COLORS["red"],
+        "NC z position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC z position [mm]",
-        out_dir / "nc_z_1d_comparison_ratio.png",
+        out_dir / "nc_z_1d_comparison.png",
+        bins_z,
+    )
+    _analysis_panel(
+        z_ge77mu, z_noge77mu,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins_z, "NC z position [mm]",
+        "NC z position: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_z_1d_comparison_panel.png",
     )
 
-    # ---- 1-D r: comparison overlay (all NCs vs Ge77-muon NCs) ----
-    bins_r = np.linspace(0.0, float(r_mm.max()), 73)
-    r_ge77mu = r_mm[is_ge77mu]
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(r_mm, bins=bins_r, color=COLORS["blue"], alpha=0.7,
-            edgecolor="black", linewidth=0.3, label=f"All NCs (N={r_mm.size:,})")
-    if r_ge77mu.size > 0:
-        ax.hist(r_ge77mu, bins=bins_r, color=COLORS["red"], alpha=0.7,
-                edgecolor="black", linewidth=0.3,
-                label=f"NCs of Ge77-producing muons (N={r_ge77mu.size:,})")
-    ax.set_xlabel("NC radial position r [mm]", fontsize=13)
-    ax.set_ylabel("Number of NCs", fontsize=13)
-    ax.set_title("NC radial position: all NCs vs Ge77-muon NCs", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_dir / "nc_r_1d_comparison.png")
-    _ratio_plot(
-        r_mm, r_ge77mu,
-        "All NCs", "NCs of Ge77-producing muons", bins_r,
+    # ---- 1-D r: Ge77-muon NCs vs non-Ge77-muon NCs ----
+    bins_r     = np.linspace(0.0, float(r_mm.max()), 73)
+    r_ge77mu   = r_mm[is_ge77mu]
+    r_noge77mu = r_mm[~is_ge77mu]
+    _comparison_hist(
+        r_noge77mu, r_ge77mu,
+        "Non-Ge77-muon NCs", "Ge77-muon NCs",
+        COLORS["blue"], COLORS["red"],
+        "NC radial position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC radial position r [mm]",
-        out_dir / "nc_r_1d_comparison_ratio.png",
+        out_dir / "nc_r_1d_comparison.png",
+        bins_r,
+    )
+    _analysis_panel(
+        r_ge77mu, r_noge77mu,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins_r, "NC radial position r [mm]",
+        "NC radial position: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_r_1d_comparison_panel.png",
     )
 
     # ---- 2-D φ vs z AND r vs z (shared colorbar scale per subset) ----
@@ -1183,11 +1324,13 @@ def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_gamma_count_ge77_vs_noge77.png",
         bins, log_x=False, log_y=True,
     )
-    _ratio_plot(
-        noge77_g, ge77_g,
-        "Non-Ge77 muon NCs", "Ge77-muon NCs", bins,
-        "Number of capture gammas per NC",
-        out_dir / "nc_gamma_count_ge77_vs_noge77_ratio.png",
+    _analysis_panel(
+        ge77_g, noge77_g,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins, "Number of capture gammas per NC",
+        "Capture-gamma multiplicity: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_gamma_count_ge77_vs_noge77_panel.png",
     )
 
 
