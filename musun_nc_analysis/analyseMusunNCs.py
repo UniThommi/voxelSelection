@@ -1660,6 +1660,11 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
                         agg["mu_py_mev"][mu_is_ge77],
                         agg["mu_pz_mev"][mu_is_ge77])
 
+    _nc_time     = agg["nc_time_ns"].astype(np.float64)
+    _nc_time_pos = _nc_time > 0
+    nc_time_all  = _nc_time[_nc_time_pos]
+    nc_time_ge77 = _nc_time[is_ge77mu & _nc_time_pos]
+
     observables: list[dict] = [
         {
             "key":            "nc_count",
@@ -1703,13 +1708,13 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
         },
         {
             "key":            "nc_time",
-            "label":          "NC capture time",
+            "label":          "NC capture time (t > 0)",
             "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [ns]",
             "pop_all_label":  "All NCs",
             "pop_ge77_label": "Ge77-muon NCs",
             "scalar":         True,
-            "data_all":       agg["nc_time_ns"].astype(np.float64),
-            "data_ge77":      agg["nc_time_ns"][is_ge77mu].astype(np.float64),
+            "data_all":       nc_time_all,
+            "data_ge77":      nc_time_ge77,
         },
     ]
 
@@ -1738,10 +1743,11 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
             ax.plot(n_arr, sem_mean, "-", color=color, marker=marker,
                     markersize=4, linewidth=1.5,
                     label=f"{pop_label}  (N = {len(data):,})")
+            _rel = np.where(sem_mean > 0, sem_std / sem_mean, 0.0)
             ax.fill_between(
                 n_arr,
-                np.maximum(sem_mean - sem_std, 1e-30),
-                sem_mean + sem_std,
+                np.maximum(sem_mean * np.exp(-_rel), 1e-30),
+                sem_mean * np.exp(_rel),
                 color=color, alpha=0.2,
             )
             # Anchor 1/√N reference at the first valid point of the all-population curve
