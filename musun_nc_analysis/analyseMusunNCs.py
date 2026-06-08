@@ -1550,7 +1550,7 @@ def _mc_sem_scalar(
     n_min = max(10, N_full // 1000)
     n_vals = np.unique(
         np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
-        .astype(int)
+        .round().astype(int)
         .clip(2, N_full)
     )
 
@@ -1591,7 +1591,7 @@ def _mc_sem_vector(
     n_min = max(10, N_full // 1000)
     n_vals = np.unique(
         np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
-        .astype(int)
+        .round().astype(int)
         .clip(2, N_full)
     )
 
@@ -1674,7 +1674,7 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
         {
             "key":            "nc_position",
             "label":          "NC position (x, y, z)",
-            "ylabel":         r"$\|\Delta E\| = \|S/\sqrt{N}\|$  [m]",
+            "ylabel":         r"$\|\Delta\vec{E}_N\|_2 = \sqrt{\sum_c (S_c/\sqrt{N})^2}$  [m]",
             "pop_all_label":  "All NCs",
             "pop_ge77_label": "Ge77-muon NCs",
             "scalar":         False,
@@ -1694,7 +1694,7 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
         {
             "key":            "mu_momentum",
             "label":          r"Normalized muon momentum $\hat{p}$",
-            "ylabel":         r"$\|\Delta E\| = \|S/\sqrt{N}\|$  [dimensionless]",
+            "ylabel":         r"$\|\Delta\vec{E}_N\|_2 = \sqrt{\sum_c (S_c/\sqrt{N})^2}$  [dimensionless]",
             "pop_all_label":  "NC-producing muons",
             "pop_ge77_label": "Ge77-producing muons",
             "scalar":         False,
@@ -1723,8 +1723,9 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
         ax = axes_flat[idx]
         fn = _mc_sem_vector if not obs["scalar"] else _mc_sem_scalar
 
-        ref_n0:   float | None = None
-        ref_sem0: float | None = None
+        ref_n0:    float | None = None
+        ref_sem0:  float | None = None
+        max_n_ref: float        = 0.0
 
         for data, color, marker, pop_label in [
             (obs["data_all"],  COLORS["blue"],   "o", obs["pop_all_label"]),
@@ -1733,6 +1734,7 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
             if len(data) == 0:
                 continue
             n_arr, sem_mean, sem_std = fn(data, seed=RANDOM_SEED + idx)
+            max_n_ref = max(max_n_ref, float(n_arr[-1]))
             ax.plot(n_arr, sem_mean, "-", color=color, marker=marker,
                     markersize=4, linewidth=1.5,
                     label=f"{pop_label}  (N = {len(data):,})")
@@ -1750,8 +1752,8 @@ def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
                     ref_n0   = float(n_arr[i0])
                     ref_sem0 = float(sem_mean[i0])
 
-        if ref_n0 is not None and ref_sem0 is not None and ref_n0 > 0:
-            n_ref = np.logspace(np.log10(ref_n0), np.log10(float(n_arr[-1])), 100)
+        if ref_n0 is not None and ref_sem0 is not None and ref_n0 > 0 and max_n_ref > ref_n0:
+            n_ref = np.logspace(np.log10(ref_n0), np.log10(max_n_ref), 100)
             ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
                     ":", color="gray", linewidth=1.2, alpha=0.7,
                     label=r"$1/\sqrt{N}$ reference")
