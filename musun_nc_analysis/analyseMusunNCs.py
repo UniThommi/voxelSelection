@@ -683,38 +683,6 @@ def plot_normalized_histogram(
     ax.tick_params(labelsize=9)
 
 
-def plot_cdf(
-    ax: "plt.Axes",
-    d1: np.ndarray, d2: np.ndarray,
-    l1: str, l2: str, c1: str, c2: str,
-    bins: np.ndarray,
-    log_x: bool = False,
-) -> None:
-    """Plot empirical CDFs for two classes using shared bin edges on *ax*.
-
-    CDF[i] = fraction of events with value ≤ bins[i+1] (right bin edge).
-    Using the same bin edges as the density histogram ensures that CDF
-    breakpoints correspond exactly to histogram bins.  The vertical separation
-    between the two CDFs at any x indicates cumulative discrimination power:
-    larger gaps → the two distributions have diverged more by that point.
-    """
-    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
-        if data.size == 0:
-            continue
-        h, _ = np.histogram(data, bins=bins)
-        cdf = np.cumsum(h).astype(float) / data.size
-        x_step = np.concatenate([[bins[0]], bins[1:]])
-        y_step = np.concatenate([[0.0], cdf])
-        ax.step(x_step, y_step, where="post", color=color, linewidth=1.5,
-                label=f"{label}  (N={data.size:,})")
-    if log_x:
-        ax.set_xscale("log")
-    ax.set_ylim(-0.02, 1.05)
-    ax.set_ylabel("Cumulative probability", fontsize=11)
-    ax.axhline(0.5, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
-    ax.legend(fontsize=9)
-    ax.tick_params(labelsize=9)
-
 
 def plot_ratio(
     ax: "plt.Axes",
@@ -769,19 +737,16 @@ def _analysis_panel(
     xlabel: str, title: str, out_path: Path,
     log_x: bool = False, log_y: bool = False,
 ) -> None:
-    """Three-panel comparison figure: density histogram | CDF | ratio with errors.
+    """Two-panel comparison figure: density histogram | ratio with errors.
 
-    Combines plot_normalized_histogram, plot_cdf, and plot_ratio into a single
+    Combines plot_normalized_histogram and plot_ratio into a single
     publication-quality figure.  The numerator class (d_num, typically Ge77)
     carries Poisson error bars in the ratio panel; the denominator (d_den) is
-    treated as the reference distribution.  Reading the three panels together:
-      left   — shape differences at each x value (probability density)
-      centre  — cumulative discrimination power (CDF)
-      right   — pointwise enrichment factor with statistical significance (ratio)
+    treated as the reference distribution.
     """
     if d_num.size == 0 and d_den.size == 0:
         return
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     fig.suptitle(title, fontsize=13)
 
     plot_normalized_histogram(axes[0], d_num, d_den, l_num, l_den,
@@ -789,13 +754,9 @@ def _analysis_panel(
     axes[0].set_xlabel(xlabel, fontsize=11)
     axes[0].set_title("Probability density", fontsize=12)
 
-    plot_cdf(axes[1], d_num, d_den, l_num, l_den, c_num, c_den, bins, log_x)
+    plot_ratio(axes[1], d_num, d_den, l_num, l_den, bins, log_x)
     axes[1].set_xlabel(xlabel, fontsize=11)
-    axes[1].set_title("Cumulative distribution function", fontsize=12)
-
-    plot_ratio(axes[2], d_num, d_den, l_num, l_den, bins, log_x)
-    axes[2].set_xlabel(xlabel, fontsize=11)
-    axes[2].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
+    axes[1].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
 
     plt.tight_layout()
     _save(fig, out_path)
