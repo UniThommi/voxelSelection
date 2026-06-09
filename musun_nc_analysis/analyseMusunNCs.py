@@ -1725,9 +1725,11 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
 
     Returns dict keys:
         n_mu_total, mu_is_ge77, mu_nc_count,
-        mu_nc_pos (N×3 mean position, metres),
-        mu_nc_first_time (seconds of first NC per muon),
-        mu_nc_mean_gammas, mu_nc_mean_energy_mev.
+        mu_nc_pos (N×3 mean NC position, mm),
+        mu_nc_mean_time (mean NC capture time per muon, ns),
+        mu_nc_mean_gammas, mu_nc_mean_energy_kev,
+        mu_ekin (MeV), mu_phi_rad (rad), mu_theta_rad (rad),
+        mu_pos_mm (N×3 muon start position, mm).
     All arrays have length n_mu_total; muons without NCs receive 0 / zero-vector.
     """
     _empty: dict = {
@@ -1735,9 +1737,13 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
         "mu_is_ge77":            np.array([], dtype=bool),
         "mu_nc_count":           np.array([], dtype=np.float64),
         "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
-        "mu_nc_first_time":      np.array([], dtype=np.float64),
+        "mu_nc_mean_time":       np.array([], dtype=np.float64),
         "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
-        "mu_nc_mean_energy_mev": np.array([], dtype=np.float64),
+        "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
+        "mu_ekin":               np.array([], dtype=np.float64),
+        "mu_phi_rad":            np.array([], dtype=np.float64),
+        "mu_theta_rad":          np.array([], dtype=np.float64),
+        "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
     }
 
     hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
@@ -1755,6 +1761,12 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
     nc_ng_l: list[np.ndarray] = []
     nc_en_l: list[np.ndarray] = []
     mu_ev_l: list[np.ndarray] = []
+    mu_ekin_l:  list[np.ndarray] = []
+    mu_phi_l:   list[np.ndarray] = []   # φ = arctan2(py, px) [rad]
+    mu_theta_l: list[np.ndarray] = []   # θ = arccos(pz / |p|) [rad]
+    mu_x_mm_l:  list[np.ndarray] = []   # start position [mm]
+    mu_y_mm_l:  list[np.ndarray] = []
+    mu_z_mm_l:  list[np.ndarray] = []
 
     for fp in hdf5_files:
         nc = _read_nc_full(fp)
@@ -1771,15 +1783,33 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
         mu = read_muon_data_file(fp)
         if mu["evtid"].size > 0:
             mu_ev_l.append(mu["evtid"])
+            mu_ekin_l.append(mu["ekin_mev"])
+            mu_phi_l.append(np.radians(mu["azimuth_deg"]))
+            mu_theta_l.append(np.radians(mu["zenith_deg"]))
+            mu_x_mm_l.append(mu["x_m"] * 1000.0)
+            mu_y_mm_l.append(mu["y_m"] * 1000.0)
+            mu_z_mm_l.append(mu["z_m"] * 1000.0)
 
     # ---- Muon deduplication (first occurrence per evtid) ----
-    mu_evtid: np.ndarray = (
-        np.unique(np.concatenate(mu_ev_l)) if mu_ev_l
-        else np.array([], dtype=np.int64)
-    )
+    if mu_ev_l:
+        evtid_all = np.concatenate(mu_ev_l)
+        _, first_idx = np.unique(evtid_all, return_index=True)
+        mu_evtid  = evtid_all[first_idx]
+        mu_ekin   = np.concatenate(mu_ekin_l)[first_idx]
+        mu_phi    = np.concatenate(mu_phi_l)[first_idx]
+        mu_theta  = np.concatenate(mu_theta_l)[first_idx]
+        mu_x_mm   = np.concatenate(mu_x_mm_l)[first_idx]
+        mu_y_mm   = np.concatenate(mu_y_mm_l)[first_idx]
+        mu_z_mm   = np.concatenate(mu_z_mm_l)[first_idx]
+        del evtid_all, first_idx
+    else:
+        mu_evtid = np.array([], dtype=np.int64)
+        mu_ekin  = mu_phi = mu_theta = np.array([], dtype=np.float64)
+        mu_x_mm  = mu_y_mm = mu_z_mm = np.array([], dtype=np.float64)
     n_mu = mu_evtid.size
     if n_mu == 0:
         return _empty
+    mu_pos_mm = np.stack([mu_x_mm, mu_y_mm, mu_z_mm], axis=1)
 
     # ---- NC deduplication on (evtid, nC_track_id) ----
     if nc_ev_l:
@@ -1816,13 +1846,13 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
     mu_is_ge77 = np.isin(mu_evtid, ge77_evtids)
 
     # ---- Map NC evtids → muon array indices (mu_evtid is sorted by np.unique) ----
-    mu_nc_count      = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_x      = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_y      = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_z      = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_first_time = np.full(n_mu, np.inf, dtype=np.float64)
-    mu_nc_ngam_sum   = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_energ_sum  = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_count     = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_pos_x     = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_pos_y     = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_pos_z     = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_time_sum  = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_ngam_sum  = np.zeros(n_mu, dtype=np.float64)
+    mu_nc_energ_sum = np.zeros(n_mu, dtype=np.float64)
 
     if nc_evtid.size > 0:
         nc_mu_idx = np.searchsorted(mu_evtid, nc_evtid)
@@ -1839,33 +1869,37 @@ def _load_single_run_for_mc(run_dir: Path) -> dict:
             nc_energ  = nc_energ[valid]
 
         mu_nc_count   = np.bincount(nc_mu_idx, minlength=n_mu).astype(np.float64)
-        mu_nc_pos_x   = np.bincount(nc_mu_idx, weights=nc_x,    minlength=n_mu)
-        mu_nc_pos_y   = np.bincount(nc_mu_idx, weights=nc_y,    minlength=n_mu)
-        mu_nc_pos_z   = np.bincount(nc_mu_idx, weights=nc_z,    minlength=n_mu)
+        mu_nc_pos_x   = np.bincount(nc_mu_idx, weights=nc_x,     minlength=n_mu)
+        mu_nc_pos_y   = np.bincount(nc_mu_idx, weights=nc_y,     minlength=n_mu)
+        mu_nc_pos_z   = np.bincount(nc_mu_idx, weights=nc_z,     minlength=n_mu)
+        mu_nc_time_sum  = np.bincount(nc_mu_idx, weights=nc_time,  minlength=n_mu)
         mu_nc_ngam_sum  = np.bincount(nc_mu_idx, weights=nc_ngam,  minlength=n_mu)
         mu_nc_energ_sum = np.bincount(nc_mu_idx, weights=nc_energ, minlength=n_mu)
-        np.minimum.at(mu_nc_first_time, nc_mu_idx, nc_time)
 
     has_nc    = mu_nc_count > 0
     inv_count = np.where(has_nc, 1.0 / np.where(has_nc, mu_nc_count, 1.0), 0.0)
 
     mu_nc_pos = np.stack([
-        mu_nc_pos_x * inv_count,
-        mu_nc_pos_y * inv_count,
-        mu_nc_pos_z * inv_count,
+        mu_nc_pos_x * inv_count * 1000.0,   # m → mm
+        mu_nc_pos_y * inv_count * 1000.0,
+        mu_nc_pos_z * inv_count * 1000.0,
     ], axis=1)
+    mu_nc_mean_time       = mu_nc_time_sum  * inv_count          # mean NC time [ns]
     mu_nc_mean_gammas     = mu_nc_ngam_sum  * inv_count
-    mu_nc_mean_energy_mev = mu_nc_energ_sum * inv_count / 1e3   # keV → MeV
-    mu_nc_first_time      = np.where(has_nc, mu_nc_first_time, 0.0)
+    mu_nc_mean_energy_kev = mu_nc_energ_sum * inv_count          # keV (no conversion)
 
     return {
         "n_mu_total":            n_mu,
         "mu_is_ge77":            mu_is_ge77,
         "mu_nc_count":           mu_nc_count,
-        "mu_nc_pos":             mu_nc_pos,
-        "mu_nc_first_time":      mu_nc_first_time,
+        "mu_nc_pos":             mu_nc_pos,              # [N_mu, 3] mm
+        "mu_nc_mean_time":       mu_nc_mean_time,        # mean NC time [ns]
         "mu_nc_mean_gammas":     mu_nc_mean_gammas,
-        "mu_nc_mean_energy_mev": mu_nc_mean_energy_mev,
+        "mu_nc_mean_energy_kev": mu_nc_mean_energy_kev,  # keV
+        "mu_ekin":               mu_ekin,                # MeV  [N_mu]
+        "mu_phi_rad":            mu_phi,                 # rad  [N_mu]
+        "mu_theta_rad":          mu_theta,               # rad  [N_mu]
+        "mu_pos_mm":             mu_pos_mm,              # [N_mu, 3] mm
     }
 
 
@@ -1897,21 +1931,27 @@ def _load_dataset_for_mc(dataset_dir: Path) -> dict:
             "mu_is_ge77":            np.array([], dtype=bool),
             "mu_nc_count":           np.array([], dtype=np.float64),
             "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
-            "mu_nc_first_time":      np.array([], dtype=np.float64),
+            "mu_nc_mean_time":       np.array([], dtype=np.float64),
             "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
-            "mu_nc_mean_energy_mev": np.array([], dtype=np.float64),
+            "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
+            "mu_ekin":               np.array([], dtype=np.float64),
+            "mu_phi_rad":            np.array([], dtype=np.float64),
+            "mu_theta_rad":          np.array([], dtype=np.float64),
+            "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
         }
 
     return {
-        "n_mu_total": n_mu_total,
-        "mu_is_ge77": np.concatenate([p["mu_is_ge77"] for p in parts]),
+        "n_mu_total":  n_mu_total,
+        "mu_is_ge77":  np.concatenate([p["mu_is_ge77"]  for p in parts]),
         "mu_nc_count": np.concatenate([p["mu_nc_count"] for p in parts]),
-        "mu_nc_pos": np.concatenate([p["mu_nc_pos"] for p in parts], axis=0),
-        "mu_nc_first_time": np.concatenate([p["mu_nc_first_time"] for p in parts]),
-        "mu_nc_mean_gammas": np.concatenate([p["mu_nc_mean_gammas"] for p in parts]),
-        "mu_nc_mean_energy_mev": np.concatenate(
-            [p["mu_nc_mean_energy_mev"] for p in parts]
-        ),
+        "mu_nc_pos":   np.concatenate([p["mu_nc_pos"]   for p in parts], axis=0),
+        "mu_nc_mean_time":       np.concatenate([p["mu_nc_mean_time"]       for p in parts]),
+        "mu_nc_mean_gammas":     np.concatenate([p["mu_nc_mean_gammas"]     for p in parts]),
+        "mu_nc_mean_energy_kev": np.concatenate([p["mu_nc_mean_energy_kev"] for p in parts]),
+        "mu_ekin":     np.concatenate([p["mu_ekin"]     for p in parts]),
+        "mu_phi_rad":  np.concatenate([p["mu_phi_rad"]  for p in parts]),
+        "mu_theta_rad": np.concatenate([p["mu_theta_rad"] for p in parts]),
+        "mu_pos_mm":   np.concatenate([p["mu_pos_mm"]   for p in parts], axis=0),
     }
 
 
@@ -1967,12 +2007,16 @@ def mc_uncertainty_analysis_muon_level(
     drawn with replacement from this sparse array, so the variance correctly
     reflects the dilution by non-contributing muons.
 
-    Observables (5 total, 3×2 subplot grid, last cell empty):
-        nc_count        — NC count per muon              [scalar]
-        nc_position     — mean NC position (x,y,z)       [vector → ‖ΔE⃗‖₂]
-        nc_time         — first NC capture time           [scalar]
-        nc_n_gammas     — mean gammas per NC per muon     [scalar]
-        nc_gamma_energy — mean total gamma energy per NC  [scalar, MeV]
+    Observables (9 total, 5×2 subplot grid, last cell empty):
+        nc_count        — NC count per muon                   [scalar]
+        nc_position     — mean NC position (x,y,z)            [vector → ‖ΔE⃗‖₂, mm]
+        nc_time         — mean NC capture time per muon       [scalar, ns]
+        nc_n_gammas     — mean gammas per NC per muon         [scalar]
+        nc_gamma_energy — mean total gamma energy per NC      [scalar, keV]
+        mu_ekin         — muon kinetic energy                 [scalar, MeV]
+        mu_phi          — muon azimuthal angle φ=arctan2(py,px) [scalar, rad]
+        mu_theta        — muon polar angle θ=arccos(pz/|p|)  [scalar, rad]
+        mu_pos          — muon start position (x,y,z)         [vector → ‖ΔE⃗‖₂, mm]
 
     Two populations per observable:
         all  — muons with ≥1 NC contribute their observable; others contribute 0
@@ -2009,6 +2053,7 @@ def mc_uncertainty_analysis_muon_level(
     }
 
     observables: list[dict] = [
+        # --- NC observables ---
         {
             "key":    "nc_count",
             "label":  "NC count per muon",
@@ -2018,12 +2063,12 @@ def mc_uncertainty_analysis_muon_level(
         {
             "key":    "nc_position",
             "label":  "NC position (x, y, z)",
-            "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [m]",
+            "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
             "vector": True,
         },
         {
             "key":    "nc_time",
-            "label":  "NC capture time",
+            "label":  "NC capture time (mean per muon)",
             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [ns]",
             "vector": False,
         },
@@ -2036,8 +2081,33 @@ def mc_uncertainty_analysis_muon_level(
         {
             "key":    "nc_gamma_energy",
             "label":  "Total gamma energy per NC",
+            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [keV]",
+            "vector": False,
+        },
+        # --- Muon observables ---
+        {
+            "key":    "mu_ekin",
+            "label":  r"Muon kinetic energy $E_k$",
             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [MeV]",
             "vector": False,
+        },
+        {
+            "key":    "mu_phi",
+            "label":  r"Muon azimuthal angle $\varphi = \arctan2(p_y,\,p_x)$",
+            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
+            "vector": False,
+        },
+        {
+            "key":    "mu_theta",
+            "label":  r"Muon polar angle $\theta = \arccos(p_z / |\vec{p}|)$",
+            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
+            "vector": False,
+        },
+        {
+            "key":    "mu_pos",
+            "label":  "Muon start position (x, y, z)",
+            "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
+            "vector": True,
         },
     ]
 
@@ -2054,11 +2124,15 @@ def mc_uncertainty_analysis_muon_level(
         print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77:,}", flush=True)
 
         obs_arr: dict[str, np.ndarray] = {
-            "nc_count":       mu_data["mu_nc_count"],
-            "nc_position":    mu_data["mu_nc_pos"],
-            "nc_time":        mu_data["mu_nc_first_time"],
-            "nc_n_gammas":    mu_data["mu_nc_mean_gammas"],
-            "nc_gamma_energy": mu_data["mu_nc_mean_energy_mev"],
+            "nc_count":        mu_data["mu_nc_count"],
+            "nc_position":     mu_data["mu_nc_pos"],              # mm
+            "nc_time":         mu_data["mu_nc_mean_time"],        # mean [ns]
+            "nc_n_gammas":     mu_data["mu_nc_mean_gammas"],
+            "nc_gamma_energy": mu_data["mu_nc_mean_energy_kev"],  # keV
+            "mu_ekin":         mu_data["mu_ekin"],
+            "mu_phi":          mu_data["mu_phi_rad"],
+            "mu_theta":        mu_data["mu_theta_rad"],
+            "mu_pos":          mu_data["mu_pos_mm"],
         }
 
         for i_obs, obs in enumerate(observables):
