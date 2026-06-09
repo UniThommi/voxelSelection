@@ -140,14 +140,15 @@ def _pages(grp: h5py.Group, name: str) -> np.ndarray:
 def read_nc_data_file(fp: Path) -> dict[str, np.ndarray]:
     """Return NC fields from one HDF5 file; empty arrays if group absent/empty."""
     empty: dict[str, np.ndarray] = {
-        "evtid":       np.array([], dtype=np.int64),
-        "track_id":    np.array([], dtype=np.int64),
-        "ge77":        np.array([], dtype=np.int32),
-        "time_ns":     np.array([], dtype=np.float64),
-        "x_m":         np.array([], dtype=np.float64),
-        "y_m":         np.array([], dtype=np.float64),
-        "z_m":         np.array([], dtype=np.float64),
-        "material_id": np.array([], dtype=np.int32),
+        "evtid":            np.array([], dtype=np.int64),
+        "track_id":         np.array([], dtype=np.int64),
+        "ge77":             np.array([], dtype=np.int32),
+        "time_ns":          np.array([], dtype=np.float64),
+        "x_m":              np.array([], dtype=np.float64),
+        "y_m":              np.array([], dtype=np.float64),
+        "z_m":              np.array([], dtype=np.float64),
+        "material_id":      np.array([], dtype=np.int32),
+        "gamma_energy_kev": np.array([], dtype=np.float64),
     }
     try:
         with h5py.File(fp, "r") as f:
@@ -157,14 +158,15 @@ def read_nc_data_file(fp: Path) -> dict[str, np.ndarray]:
             if int(grp["entries"][()]) == 0:
                 return empty
             return {
-                "evtid":       _pages(grp, "evtid").astype(np.int64),
-                "track_id":    _pages(grp, "nC_track_id").astype(np.int64),
-                "ge77":        _pages(grp, "nC_flag_Ge77").astype(np.int32),
-                "time_ns":     _pages(grp, "nC_time_in_ns"),
-                "x_m":         _pages(grp, "nC_x_position_in_m"),
-                "y_m":         _pages(grp, "nC_y_position_in_m"),
-                "z_m":         _pages(grp, "nC_z_position_in_m"),
-                "material_id": _pages(grp, "nC_material_id").astype(np.int32),
+                "evtid":            _pages(grp, "evtid").astype(np.int64),
+                "track_id":         _pages(grp, "nC_track_id").astype(np.int64),
+                "ge77":             _pages(grp, "nC_flag_Ge77").astype(np.int32),
+                "time_ns":          _pages(grp, "nC_time_in_ns"),
+                "x_m":              _pages(grp, "nC_x_position_in_m"),
+                "y_m":              _pages(grp, "nC_y_position_in_m"),
+                "z_m":              _pages(grp, "nC_z_position_in_m"),
+                "material_id":      _pages(grp, "nC_material_id").astype(np.int32),
+                "gamma_energy_kev": _pages(grp, "nC_gamma_total_energy_in_keV"),
             }
     except Exception as exc:
         print(f"  ERROR reading NC data from {fp.name}: {exc}")
