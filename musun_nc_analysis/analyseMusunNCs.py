@@ -41,14 +41,11 @@ GAMMA_GROUP = "/hit/CaptureGammas"
 VERTICES_GROUP = "/hit/vertices"
 PARTICLES_GROUP = "/hit/particles"
 
-NC_CUT_100 = 100
-
 DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
 NUM_RUNS_DEFAULT = 10
 RANDOM_SEED = 42
-MAX_SCATTER_PTS = 5_000    # max points for 3-D scatter / arrow plots
 MC_N_DRAWS = 20            # random subsamples drawn per N grid point
 MC_N_SIZES = 20            # number of log-spaced N grid points
 
@@ -555,18 +552,6 @@ def _save(fig: plt.Figure, path: Path) -> None:
     print(f"  saved: {path.name}")
 
 
-def _draw_cylinder(ax: "plt.Axes", r: float = 4300.0,
-                   z_min: float = -5000.0, z_max: float = 3900.0) -> None:
-    """Draw a wireframe cylinder on a 3-D axes (dimensions in mm)."""
-    theta = np.linspace(0, 2 * np.pi, 80)
-    z_grid, th_grid = np.meshgrid([z_min, z_max], theta)
-    ax.plot_surface(r * np.cos(th_grid), r * np.sin(th_grid), z_grid,
-                    alpha=0.06, color="gray")
-    for z in (z_min, z_max):
-        ax.plot(r * np.cos(theta), r * np.sin(theta), z,
-                color="gray", linewidth=0.8, alpha=0.5)
-
-
 # ---------------------------------------------------------------------------
 # Muon property plots  (4 variants × 3 observables = 12 PNGs)
 # ---------------------------------------------------------------------------
@@ -618,54 +603,6 @@ def _comparison_hist(
     _save(fig, out_path)
 
 
-def _ratio_plot(
-    d1: np.ndarray, d2: np.ndarray,
-    l1: str, l2: str,
-    bins: np.ndarray,
-    xlabel: str, out_path: Path,
-    log_x: bool = False,
-) -> None:
-    """Two-panel figure: normalised-fraction ratio and raw-count ratio (d2 / d1).
-    Bins where the d1 count is zero are skipped (no marker).
-    """
-    if d1.size == 0 or d2.size == 0:
-        return
-    h1_raw, _ = np.histogram(d1, bins=bins)
-    h2_raw, _ = np.histogram(d2, bins=bins)
-    h1_norm = h1_raw / d1.size
-    h2_norm = h2_raw / d2.size
-    bc = 0.5 * (bins[:-1] + bins[1:])
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f"Ratio  {l2} / {l1}", fontsize=13)
-    for ax, num, den, ylabel, title, zoom_y in [
-        (axes[0], h2_norm, h1_norm,
-         f"({l2} fraction) / ({l1} fraction)", "Normalised-fraction ratio", False),
-        (axes[1], h2_raw.astype(float), h1_raw.astype(float),
-         f"({l2} count) / ({l1} count)", "Raw-count ratio", True),
-    ]:
-        valid = den > 0
-        ratio_vals = num[valid] / den[valid]
-        ax.plot(bc[valid], ratio_vals,
-                "o-", color=COLORS["red"], markersize=4, linewidth=1.2)
-        ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="ratio = 1")
-        if log_x:
-            ax.set_xscale("log")
-        ax.set_xlabel(xlabel, fontsize=12)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=10)
-        ax.tick_params(labelsize=10)
-        if zoom_y and ratio_vals.size > 0:
-            y_lo = float(ratio_vals.min())
-            y_hi = float(ratio_vals.max())
-            spread = y_hi - y_lo
-            margin = max(0.15 * spread, 0.05)
-            ax.set_ylim(y_lo - margin, y_hi + margin)
-    plt.tight_layout()
-    _save(fig, out_path)
-
-
 # ---------------------------------------------------------------------------
 # Publication-quality comparison utilities  (axis-level building blocks)
 # ---------------------------------------------------------------------------
@@ -698,7 +635,6 @@ def plot_normalized_histogram(
     ax.set_ylabel("Probability density", fontsize=11)
     ax.legend(fontsize=9)
     ax.tick_params(labelsize=9)
-
 
 
 def plot_ratio(
@@ -1149,70 +1085,6 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         fig.colorbar(pc, ax=axes[1], label="NCs / r  [mm⁻¹]")
 
         _save(fig, out_dir / f"nc_phi_r_z_2d_{tag}.png")
-
-
-# ---------------------------------------------------------------------------
-# 3-D muon position scatter plots
-# ---------------------------------------------------------------------------
-def _plot_3d_scatter(
-    x_mm: np.ndarray, y_mm: np.ndarray, z_mm: np.ndarray,
-    px: np.ndarray, py: np.ndarray, pz: np.ndarray,
-    title: str, out_path: Path,
-    max_pts: int = MAX_SCATTER_PTS,
-) -> None:
-    """3-D scatter of muon entry points with down-sampled momentum arrows."""
-    n = len(x_mm)
-    if n == 0:
-        return
-    rng = np.random.default_rng(RANDOM_SEED)
-    idx = rng.choice(n, min(n, max_pts), replace=False)
-    xs, ys, zs = x_mm[idx], y_mm[idx], z_mm[idx]
-    pxs, pys, pzs = px[idx], py[idx], pz[idx]
-
-    p_mag = np.sqrt(pxs**2 + pys**2 + pzs**2)
-    p_mag = np.where(p_mag > 0, p_mag, 1.0)
-    scale = 500.0   # arrow length in mm
-    dx, dy, dz = pxs / p_mag * scale, pys / p_mag * scale, pzs / p_mag * scale
-
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(xs, ys, zs, c="red", s=8, alpha=0.5, label=f"Muon vertex (N={n:,})")
-    for i in range(len(xs)):
-        ax.plot([xs[i], xs[i] + dx[i]], [ys[i], ys[i] + dy[i]],
-                [zs[i], zs[i] + dz[i]], color="red", alpha=0.2, linewidth=0.4)
-    _draw_cylinder(ax)
-    ax.set_xlabel("X [mm]", fontsize=11)
-    ax.set_ylabel("Y [mm]", fontsize=11)
-    ax.set_zlabel("Z [mm]", fontsize=11)
-    ax.set_title(
-        f"{title}  (N = {n:,}; showing {min(n, max_pts):,})", fontsize=13
-    )
-    ax.legend(fontsize=10)
-    _save(fig, out_path)
-
-
-def plot_muon_3d_scatters(agg: dict, out_dir: Path) -> None:
-    """3-D position scatter for Ge77 muons and NC-producing muons."""
-    x_mm = agg["mu_x_m"] * 1e3
-    y_mm = agg["mu_y_m"] * 1e3
-    z_mm = agg["mu_z_m"] * 1e3
-    px = agg["mu_px_mev"]
-    py = agg["mu_py_mev"]
-    pz = agg["mu_pz_mev"]
-    is_ge77 = agg["mu_is_ge77"]
-    has_nc = agg["mu_has_nc"]
-
-    for mask, fname, title in [
-        (is_ge77, "muon_ge77_3d.png", "Ge77-producing muon entry vertices"),
-        (has_nc, "muon_nc_3d.png", "NC-producing muon entry vertices"),
-    ]:
-        if mask.sum() == 0:
-            continue
-        _plot_3d_scatter(
-            x_mm[mask], y_mm[mask], z_mm[mask],
-            px[mask], py[mask], pz[mask],
-            title, out_dir / fname,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -2461,7 +2333,6 @@ def plot_nc_count_per_muon_outlier_corrected(agg: dict, out_dir: Path) -> None:
         bins = inner_bins
     bc          = 0.5 * (bins[:-1] + bins[1:])   # bin centres
     bin_widths  = np.diff(bins)
-    n_overflow_bin = len(bins) - 2   # index of the last (overflow) bin
 
     def _garwood(k: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return (lower_err, upper_err) arrays for bin-count array k."""
