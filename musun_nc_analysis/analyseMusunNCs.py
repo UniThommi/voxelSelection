@@ -705,6 +705,7 @@ def plot_ratio(
     l_num: str, l_den: str,
     bins: np.ndarray,
     log_x: bool = False,
+    log_y: bool = False,
 ) -> None:
     """Plot density ratio R(x) = p_num(x) / p_den(x) with Poisson error bars.
 
@@ -739,6 +740,8 @@ def plot_ratio(
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
     if log_x:
         ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
     ax.set_ylabel(f"Density ratio  {l_num} / {l_den}", fontsize=10)
     ax.legend(fontsize=9)
     ax.tick_params(labelsize=9)
@@ -750,7 +753,7 @@ def _analysis_panel(
     c_num: str, c_den: str,
     bins: np.ndarray,
     xlabel: str, title: str, out_path: Path,
-    log_x: bool = False, log_y: bool = False,
+    log_x: bool = False, log_y: bool = False, log_y_ratio: bool = False,
 ) -> None:
     """Two-panel comparison figure: density histogram | ratio with errors.
 
@@ -769,7 +772,7 @@ def _analysis_panel(
     axes[0].set_xlabel(xlabel, fontsize=11)
     axes[0].set_title("Probability density", fontsize=12)
 
-    plot_ratio(axes[1], d_num, d_den, l_num, l_den, bins, log_x)
+    plot_ratio(axes[1], d_num, d_den, l_num, l_den, bins, log_x, log_y_ratio)
     axes[1].set_xlabel(xlabel, fontsize=11)
     axes[1].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
 
@@ -797,6 +800,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             "base": "muon_energy",
             "title": "Muon kinetic energy",
             "log_x": True,
+            "log_y_ratio": True,
             "bins_fn": lambda d: make_log_bins(max(1.0, float(d.min())), float(d.max())),
         },
         {
@@ -835,6 +839,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             continue
         bins = obs["bins_fn"](d_all)
         lx = obs["log_x"]
+        lyr = obs.get("log_y_ratio", False)
         base = obs["base"]
         xl = obs["xlabel"]
         title = obs["title"]
@@ -851,7 +856,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             d_ge77, d_noge77,
             "Ge77", "Non-Ge77", COLORS["red"], COLORS["blue"],
             bins, xl, f"{title}: Ge77 vs non-Ge77 muons",
-            out_dir / f"{base}_ge77_vs_noge77_panel.png", log_x=lx,
+            out_dir / f"{base}_ge77_vs_noge77_panel.png", log_x=lx, log_y_ratio=lyr,
         )
         d_nc   = d[obs["mask_nc"]]
         d_nonc = d[obs["mask_nonc"]]
@@ -938,7 +943,7 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
         bins, "NC count per muon",
         "NC count per muon: Ge77-producing vs non-Ge77 NC-producing muons",
         out_dir / "nc_count_per_muon_comparison_panel.png",
-        log_x=True,
+        log_x=True, log_y_ratio=True,
     )
 
 
