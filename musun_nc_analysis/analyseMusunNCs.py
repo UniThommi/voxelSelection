@@ -2037,7 +2037,7 @@ def mc_uncertainty_analysis_muon_level(
     _t0 = time.perf_counter()
 
     N_FIXED   = 10**7
-    N_MIN_FIX = 10**3
+    N_MIN_FIX = 10**5
     RHO_THRESH = 0.05
 
     n_vals = np.unique(
@@ -2177,34 +2177,37 @@ def mc_uncertainty_analysis_muon_level(
         gc.collect()
         _log_resources(f"  dataset '{ds_key}' done", t_ds)
 
-    # ---- Plot ----------------------------------------------------------------
-    n_obs  = len(observables)
-    ncols  = 2
-    nrows  = (n_obs + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5.5 * nrows))
-    axes_flat  = np.array(axes).flatten()
-    n_arr_f    = n_vals.astype(np.float64)
+    # ---- Plot: one figure per population (all / Ge77) -----------------------
+    n_obs   = len(observables)
+    ncols   = 2
+    nrows   = (n_obs + ncols - 1) // ncols
+    n_arr_f = n_vals.astype(np.float64)
 
-    for idx, obs in enumerate(observables):
-        ax   = axes_flat[idx]
-        okey = obs["key"]
+    for pop_filter, pop_title, fname in [
+        ("all",  "All muons",          "mc_uncertainty_scaling_muon_level_all.png"),
+        ("ge77", "Ge77-producing muons", "mc_uncertainty_scaling_muon_level_ge77.png"),
+    ]:
+        fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5.5 * nrows))
+        axes_flat = np.array(axes).flatten()
 
-        ax2 = ax.twinx()
-        ax2.set_yscale("log")
-        ax2.set_ylabel(r"$\rho_N = \Delta E_N\,/\,|E_N|$",
-                       fontsize=9, color="dimgray")
-        ax2.tick_params(labelsize=8, colors="dimgray")
-        ax2.axhline(RHO_THRESH, color="gray", linestyle=":",
-                    linewidth=0.9, alpha=0.55)
+        for idx, obs in enumerate(observables):
+            ax   = axes_flat[idx]
+            okey = obs["key"]
 
-        ref_n0: float | None   = None
-        ref_sem0: float | None = None
+            ax2 = ax.twinx()
+            ax2.set_yscale("log")
+            ax2.set_ylabel(r"$\rho_N = \Delta E_N\,/\,|E_N|$",
+                           fontsize=9, color="dimgray")
+            ax2.tick_params(labelsize=8, colors="dimgray")
+            ax2.axhline(RHO_THRESH, color="gray", linestyle=":",
+                        linewidth=0.9, alpha=0.55)
 
-        for ds_key in dataset_dirs:
-            color = DS_COLORS.get(ds_key, "black")
+            ref_n0: float | None   = None
+            ref_sem0: float | None = None
 
-            for pop, ls_left in [("all", "-"), ("ge77", "--")]:
-                key = (ds_key, okey, pop)
+            for ds_key in dataset_dirs:
+                color = DS_COLORS.get(ds_key, "black")
+                key   = (ds_key, okey, pop_filter)
                 if key not in results:
                     continue
                 r        = results[key]
@@ -2214,15 +2217,14 @@ def mc_uncertainty_analysis_muon_level(
                 k        = r["k_ge77"]
                 n_mu_tot = r["n_mu_total"]
 
-                if pop == "all":
-                    label = f"{ds_key} — all  (N={n_mu_tot:,})"
+                if pop_filter == "all":
+                    label = f"{ds_key}  (N={n_mu_tot:,})"
                 elif ds_key == "1e6":
-                    label = f"{ds_key} — Ge77  (k≈{k}, high variance)"
+                    label = f"{ds_key}  (k≈{k:,}, high variance)"
                 else:
-                    label = f"{ds_key} — Ge77  (k≈{k})"
+                    label = f"{ds_key}  (k≈{k:,})"
 
-                # ΔE_N on left axis
-                ax.plot(n_arr_f, sem_mean, ls_left, color=color,
+                ax.plot(n_arr_f, sem_mean, "-", color=color,
                         linewidth=1.5, label=label)
                 _rel = np.where(sem_mean > 0, sem_std / sem_mean, 0.0)
                 ax.fill_between(
@@ -2232,23 +2234,21 @@ def mc_uncertainty_analysis_muon_level(
                     color=color, alpha=0.12,
                 )
 
-                # Anchor 1/√N reference at first valid point of the 1e8 all curve
-                if ds_key == "1e8" and pop == "all" and ref_n0 is None:
-                    valid = np.isfinite(sem_mean) & (sem_mean > 0)
-                    if valid.any():
-                        i0      = int(np.argmax(valid))
-                        ref_n0  = float(n_arr_f[i0])
+                # Anchor 1/√N reference at the first valid 1e8 point
+                if ds_key == "1e8" and ref_n0 is None:
+                    _v = np.isfinite(sem_mean) & (sem_mean > 0)
+                    if _v.any():
+                        i0       = int(np.argmax(_v))
+                        ref_n0   = float(n_arr_f[i0])
                         ref_sem0 = float(sem_mean[i0])
 
-                # ρ_N on right axis (same color, dotted)
+                # ρ_N on right axis (dotted, same colour)
                 if abs(E_full) > 0:
                     rho    = sem_mean / abs(E_full)
                     finite = np.isfinite(rho) & (rho > 0)
                     if finite.any():
                         ax2.plot(n_arr_f[finite], rho[finite],
                                  ":", color=color, linewidth=0.9, alpha=0.65)
-
-                        # Annotate N* (first N where ρ < 5 %)
                         below = np.where(finite & (rho < RHO_THRESH))[0]
                         if below.size > 0:
                             n_star = n_arr_f[below[0]]
@@ -2259,7 +2259,6 @@ def mc_uncertainty_analysis_muon_level(
                                 fontsize=6, color=color, alpha=0.85,
                             )
                         else:
-                            # ρ never crosses 5 % — annotate at rightmost point
                             ax2.text(
                                 n_arr_f[-1], rho[finite][-1],
                                 "ρ > 5%",
@@ -2267,34 +2266,132 @@ def mc_uncertainty_analysis_muon_level(
                                 ha="right", va="bottom",
                             )
 
-        # 1/√N reference on left axis
-        if ref_n0 is not None and ref_sem0 is not None:
-            n_ref = np.logspace(np.log10(ref_n0), np.log10(float(N_FIXED)), 100)
-            ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
-                    ":", color="gray", linewidth=1.2, alpha=0.7,
-                    label=r"$1/\sqrt{N}$ ref.")
+            if ref_n0 is not None and ref_sem0 is not None:
+                n_ref = np.logspace(np.log10(ref_n0), np.log10(float(N_FIXED)), 100)
+                ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
+                        ":", color="gray", linewidth=1.2, alpha=0.7,
+                        label=r"$1/\sqrt{N}$ ref.")
 
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("Sample size $N$", fontsize=11)
-        ax.set_ylabel(obs["ylabel"], fontsize=10)
-        ax.set_title(obs["label"], fontsize=12)
-        ax.legend(fontsize=7, loc="upper right")
-        ax.tick_params(labelsize=9)
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel("Sample size $N$", fontsize=11)
+            ax.set_ylabel(obs["ylabel"], fontsize=10)
+            ax.set_title(obs["label"], fontsize=12)
+            ax.legend(fontsize=7, loc="upper right")
+            ax.tick_params(labelsize=9)
 
-    for extra in axes_flat[n_obs:]:
-        extra.set_visible(False)
+        for extra in axes_flat[n_obs:]:
+            extra.set_visible(False)
 
-    fig.suptitle(
-        "Monte Carlo Uncertainty Scaling — Muon-Level Sampling\n"
-        r"Left axis: $\Delta E_N = S/\sqrt{N}$  |  "
-        r"Right axis (dotted): $\rho_N = \Delta E_N\,/\,|E_N|$, threshold 5\,\%"
-        rf"   ({MC_N_DRAWS} draws per grid point)",
-        fontsize=12,
-    )
-    plt.tight_layout()
-    _save(fig, out_dir / "mc_uncertainty_scaling_muon_level.png")
+        fig.suptitle(
+            f"Monte Carlo Uncertainty Scaling — Muon-Level Sampling  [{pop_title}]\n"
+            r"Left axis: $\Delta E_N = S/\sqrt{N}$  |  "
+            r"Right axis (dotted): $\rho_N = \Delta E_N\,/\,|E_N|$, threshold 5\,\%"
+            rf"   ({MC_N_DRAWS} draws per grid point)",
+            fontsize=12,
+        )
+        plt.tight_layout()
+        _save(fig, out_dir / fname)
+
     _log_resources("mc_uncertainty_analysis_muon_level done", _t0)
+
+
+# ---------------------------------------------------------------------------
+# Outlier-corrected NC count per muon
+# ---------------------------------------------------------------------------
+
+def plot_nc_count_per_muon_outlier_corrected(agg: dict, out_dir: Path) -> None:
+    """NC count per NC-producing muon: log-scale histogram with 99th-percentile
+    overflow bin and asymmetric Garwood–Poisson error bars.
+
+    Garwood interval (68.3 % coverage) for bin count k:
+        lower = k  - chi2.ppf(0.1585, 2k)   / 2   (= 0 when k = 0)
+        upper = chi2.ppf(0.8415, 2(k+1)) / 2 - k
+
+    These are asymmetric and correct on a log y-axis; symmetric sqrt(k) error
+    bars would extend below zero and are not plotted here.
+    """
+    from scipy.stats import chi2 as _chi2
+
+    counts_ge77   = agg["nc_counts_ge77mu"]
+    counts_noge77 = agg["nc_counts_noge77mu"]
+    counts_all    = agg["nc_counts"]
+
+    if counts_all.size == 0:
+        return
+
+    # 99th-percentile threshold (integer, ≥ 2)
+    q99 = max(int(np.ceil(np.percentile(counts_all, 99))), 2)
+    n_overflow = int((counts_all > q99).sum())
+    max_count  = int(counts_all.max())
+
+    # Build bins: log-spaced from 1 to q99, then one overflow bin up to max_count
+    inner_bins = make_log_bins(1.0, float(q99))
+    if inner_bins[-1] < max_count:
+        bins = np.append(inner_bins, float(max_count + 1))
+    else:
+        bins = inner_bins
+    bc          = 0.5 * (bins[:-1] + bins[1:])   # bin centres
+    bin_widths  = np.diff(bins)
+    n_overflow_bin = len(bins) - 2   # index of the last (overflow) bin
+
+    def _garwood(k: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return (lower_err, upper_err) arrays for bin-count array k."""
+        kf = k.astype(float)
+        lo = np.where(kf > 0, kf - _chi2.ppf(0.1585, 2.0 * kf) / 2.0, 0.0)
+        hi = _chi2.ppf(0.8415, 2.0 * (kf + 1.0)) / 2.0 - kf
+        return lo, hi
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for data, label, color in [
+        (counts_noge77, "Non-Ge77 NC-producing", COLORS["blue"]),
+        (counts_ge77,   "Ge77-producing",        COLORS["red"]),
+    ]:
+        if data.size == 0:
+            continue
+
+        h, _ = np.histogram(data, bins=bins)
+        lo, hi = _garwood(h)
+
+        # Bars: left-aligned at bin edges → equal apparent width on log x-axis
+        ax.bar(bins[:-1], h, width=bin_widths, align="edge",
+               color=color, alpha=0.60, edgecolor="black", linewidth=0.4,
+               label=f"{label}  (N={data.size:,})")
+
+        # Asymmetric Poisson error bars (only where count > 0)
+        nonzero = h > 0
+        if nonzero.any():
+            ax.errorbar(
+                bc[nonzero], h[nonzero],
+                yerr=[lo[nonzero], hi[nonzero]],
+                fmt="none", color=color, alpha=0.85,
+                elinewidth=0.9, capsize=2,
+            )
+
+    # 99th-percentile marker
+    ax.axvline(q99, color="dimgray", linestyle="--", linewidth=1.2,
+               label=f"99th percentile = {q99:,}")
+
+    # Shade overflow region
+    if max_count > q99:
+        ax.axvspan(q99, bins[-1], alpha=0.08, color="dimgray",
+                   label=f"overflow  (N={n_overflow:,})")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.xaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0]))
+    ax.xaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10))
+    ax.set_xlabel("NC count per muon", fontsize=13)
+    ax.set_ylabel("Number of muons", fontsize=13)
+    ax.set_title(
+        f"NC count per NC-producing muon  "
+        f"(99th percentile = {q99:,}, overflow = {n_overflow:,} muons)",
+        fontsize=13,
+    )
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "nc_count_per_muon_outlier_corrected.png")
 
 
 # ---------------------------------------------------------------------------
@@ -2447,6 +2544,8 @@ def main() -> None:
     print("\n--- NC distributions ---")
     plot_nc_count_per_muon(agg, out_dir)
     _log_resources("plot_nc_count_per_muon", t_main)
+    plot_nc_count_per_muon_outlier_corrected(agg, out_dir)
+    _log_resources("plot_nc_count_per_muon_outlier_corrected", t_main)
     plot_ge77_per_ge77muon(agg, out_dir)
     _log_resources("plot_ge77_per_ge77muon", t_main)
     plot_nc_times(agg, out_dir)
