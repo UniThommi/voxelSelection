@@ -125,6 +125,8 @@ class RunData:
     nc_material_name: np.ndarray = field(default_factory=lambda: np.array([], dtype=object))
     # Number of capture gammas per NC
     nc_n_gammas: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    # Total gamma energy per NC [keV]
+    nc_gamma_energy_kev: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +294,7 @@ def load_run(run_dir: Path) -> RunData:
         return rd
 
     nc_parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m")
+        k: [] for k in ("evtid", "track_id", "ge77", "time_ns", "x_m", "y_m", "z_m", "gamma_energy_kev")
     }
     nc_mat_name_parts: list[np.ndarray] = []
     mu_parts: dict[str, list[np.ndarray]] = {
@@ -391,6 +393,8 @@ def load_run(run_dir: Path) -> RunData:
              for e, t in zip(rd.nc_evtid, unique_track_ids)],
             dtype=np.int32,
         )
+        energy_arr = np.concatenate(nc_parts["gamma_energy_kev"]) if nc_parts["gamma_energy_kev"] else np.array([], dtype=np.float64)
+        rd.nc_gamma_energy_kev = energy_arr[unique_idx]
 
         # Per-muon NC counts
         mu_nc_ids, counts = np.unique(rd.nc_evtid, return_counts=True)
@@ -426,6 +430,8 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
     nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_r_m_l, nc_is_ge77mu_l, nc_is_water_l, nc_n_gammas_l = [], [], [], [], [], [], [], []
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
+    mu_nc_mean_energy_l: list[np.ndarray] = []
+    mu_nc_mean_energy_is_ge77_l: list[np.ndarray] = []
     mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
     mu_x_l, mu_y_l, mu_z_l = [], [], []
     mu_px_l, mu_py_l, mu_pz_l = [], [], []
@@ -450,6 +456,12 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
             nc_is_water_l.append(rd.nc_is_water)
             nc_n_gammas_l.append(rd.nc_n_gammas)
+            # Per-muon mean gamma energy
+            mu_ids_e, inv_e = np.unique(rd.nc_evtid, return_inverse=True)
+            energy_sum = np.bincount(inv_e, weights=rd.nc_gamma_energy_kev, minlength=mu_ids_e.size)
+            nc_cnt_e   = np.bincount(inv_e, minlength=mu_ids_e.size)
+            mu_nc_mean_energy_l.append(energy_sum / np.maximum(nc_cnt_e, 1))
+            mu_nc_mean_energy_is_ge77_l.append(np.isin(mu_ids_e, rd.ge77_evtids))
 
         if rd.nc_counts.size > 0:
             ge77_mu_mask = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
@@ -490,6 +502,9 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
         "nc_is_water":  cat(nc_is_water_l,  bool),
         "nc_n_gammas":  cat(nc_n_gammas_l,  np.int32),
+        # Per-muon mean gamma energy (one entry per NC-producing muon)
+        "mu_nc_mean_energy_kev":    cat(mu_nc_mean_energy_l,         np.float64),
+        "mu_nc_mean_energy_is_ge77": cat(mu_nc_mean_energy_is_ge77_l, bool),
         # Per-muon NC counts
         "nc_counts": cat(nc_counts_all_l, np.int64),
         "nc_counts_ge77mu": cat(nc_counts_ge77mu_l, np.int64),
@@ -1298,6 +1313,34 @@ def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
         bins, "Number of capture gammas per NC",
         "Capture-gamma multiplicity: Ge77-muon NCs vs non-Ge77-muon NCs",
         out_dir / "nc_gamma_count_ge77_vs_noge77_panel.png",
+    )
+
+
+# ---------------------------------------------------------------------------
+# NC gamma energy distribution
+# ---------------------------------------------------------------------------
+def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
+    """Mean total gamma energy per NC per muon: Ge77 vs non-Ge77 panel."""
+    energies = agg["mu_nc_mean_energy_kev"]
+    is_ge77  = agg["mu_nc_mean_energy_is_ge77"]
+
+    if energies.size == 0:
+        return
+
+    ge77_e   = energies[is_ge77]
+    noge77_e = energies[~is_ge77]
+
+    vmin = max(float(energies[energies > 0].min()) if (energies > 0).any() else 1e-1, 1e-1)
+    bins = make_log_bins(vmin, float(energies.max()))
+
+    _analysis_panel(
+        ge77_e, noge77_e,
+        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        COLORS["red"], COLORS["blue"],
+        bins, "Mean total gamma energy per NC per muon [keV]",
+        r"Mean total $\gamma$ energy per NC: Ge77-muon NCs vs non-Ge77-muon NCs",
+        out_dir / "nc_gamma_energy_ge77_vs_noge77_panel.png",
+        log_x=True,
     )
 
 
@@ -2634,6 +2677,8 @@ def main() -> None:
     _log_resources("plot_nc_material_distribution", t_main)
     plot_nc_gamma_count(agg, out_dir)
     _log_resources("plot_nc_gamma_count", t_main)
+    plot_nc_gamma_energy(agg, out_dir)
+    _log_resources("plot_nc_gamma_energy", t_main)
 
     print("\n--- Outlier analysis ---")
     outlier_info = analyze_outliers(agg, out_dir)
