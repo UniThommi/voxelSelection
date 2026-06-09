@@ -1675,268 +1675,6 @@ def plot_cut_nc_material(run_list: list[RunData], out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Monte Carlo uncertainty analysis
-# ---------------------------------------------------------------------------
-
-def _mc_sem_scalar(
-    data: np.ndarray,
-    n_sizes: int = MC_N_SIZES,
-    n_draws: int = MC_N_DRAWS,
-    seed: int = RANDOM_SEED,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Monte Carlo standard error curve for a scalar observable f(x).
-
-    For each N in a log-spaced grid [n_min, N_full], draws n_draws random
-    subsamples (with replacement) and computes ΔE_N = S/√N per draw.
-    Returns mean and std of ΔE_N across draws as a function of N.
-
-    Returns: (n_arr, sem_mean, sem_std)
-    """
-    N_full = len(data)
-    if N_full < 2:
-        return np.array([float(N_full)]), np.array([np.nan]), np.array([np.nan])
-
-    n_min = max(10, N_full // 1000)
-    n_vals = np.unique(
-        np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
-        .round().astype(int)
-        .clip(2, N_full)
-    )
-
-    rng = np.random.default_rng(seed)
-    sem_means = np.zeros(len(n_vals), dtype=np.float64)
-    sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
-
-    for i, n in enumerate(n_vals):
-        sems: list[float] = []
-        for _ in range(n_draws):
-            idx = rng.choice(N_full, size=int(n), replace=True)
-            s = float(np.std(data[idx], ddof=1))
-            sems.append(s / np.sqrt(n))
-        sem_means[i] = float(np.mean(sems))
-        sem_stds[i]  = float(np.std(sems))
-
-    return n_vals.astype(np.float64), sem_means, sem_stds
-
-
-def _mc_sem_vector(
-    data: np.ndarray,
-    n_sizes: int = MC_N_SIZES,
-    n_draws: int = MC_N_DRAWS,
-    seed: int = RANDOM_SEED,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """MC standard error for a 3-D vector observable: L2 norm of SEM vector.
-
-    For each component c ∈ {0, 1, 2}: SEM_c = std_c / √N.
-    Scalar metric: ‖ΔE‖ = √(SEM_0² + SEM_1² + SEM_2²).
-
-    data: shape (N, 3).
-    Returns: (n_arr, sem_norm_mean, sem_norm_std)
-    """
-    N_full = len(data)
-    if N_full < 2:
-        return np.array([float(N_full)]), np.array([np.nan]), np.array([np.nan])
-
-    n_min = max(10, N_full // 1000)
-    n_vals = np.unique(
-        np.logspace(np.log10(n_min), np.log10(N_full), n_sizes)
-        .round().astype(int)
-        .clip(2, N_full)
-    )
-
-    rng = np.random.default_rng(seed)
-    sem_means = np.zeros(len(n_vals), dtype=np.float64)
-    sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
-
-    for i, n in enumerate(n_vals):
-        norms: list[float] = []
-        for _ in range(n_draws):
-            idx    = rng.choice(N_full, size=int(n), replace=True)
-            sample = data[idx]                         # (n, 3)
-            std_c  = np.std(sample, axis=0, ddof=1)   # (3,)
-            sem_c  = std_c / np.sqrt(n)               # (3,)
-            norms.append(float(np.linalg.norm(sem_c)))
-        sem_means[i] = float(np.mean(norms))
-        sem_stds[i]  = float(np.std(norms))
-
-    return n_vals.astype(np.float64), sem_means, sem_stds
-
-
-def mc_uncertainty_analysis(agg: dict, out_dir: Path) -> None:
-    """Monte Carlo standard error scaling ΔE_N = S/√N vs sample size N.
-
-    Observables (each treated as f(x) for MC variance estimation):
-      NC count per muon       — per NC-producing / Ge77 muon  [scalar]
-      NC position (x, y, z)  — per NC / Ge77-muon NC         [3-D vector → ‖ΔE‖]
-      Capture gammas per NC  — per NC / Ge77-muon NC         [scalar]
-      Normalized momentum     — per NC-producing / Ge77 muon  [3-D vector → ‖ΔE‖]
-      NC capture time        — per NC / Ge77-muon NC         [scalar]
-
-    Two populations per observable:
-      • All   — all NCs / all NC-producing muons
-      • Ge77  — NCs of Ge77-producing muons / Ge77 muons
-
-    For each N in a log-spaced grid, MC_N_DRAWS subsamples (with replacement)
-    are drawn; mean ΔE_N and ±1σ band are plotted.  A 1/√N reference anchored
-    at the smallest N confirms the expected Monte Carlo convergence rate.
-
-    Outputs: mc_uncertainty_scaling.png
-    """
-    print("\n--- Monte Carlo uncertainty analysis ---", flush=True)
-    _t0 = time.perf_counter()
-
-    is_ge77mu  = agg["nc_is_ge77mu"]
-    mu_has_nc  = agg["mu_has_nc"]
-    mu_is_ge77 = agg["mu_is_ge77"]
-
-    # Reconstruct NC x, y from stored cylindrical coordinates
-    nc_x = agg["nc_r_m"] * np.cos(agg["nc_phi_rad"])
-    nc_y = agg["nc_r_m"] * np.sin(agg["nc_phi_rad"])
-    nc_z = agg["nc_z_m"]
-    nc_pos_all  = np.stack([nc_x, nc_y, nc_z], axis=1).astype(np.float64)
-    nc_pos_ge77 = nc_pos_all[is_ge77mu]
-
-    # Normalized muon momentum for NC-producing and Ge77-producing muons
-    def _norm_p(px: np.ndarray, py: np.ndarray, pz: np.ndarray) -> np.ndarray:
-        p_mag = np.sqrt(px**2 + py**2 + pz**2)
-        p_mag = np.where(p_mag > 0, p_mag, 1.0)
-        return np.stack([px / p_mag, py / p_mag, pz / p_mag], axis=1).astype(np.float64)
-
-    mu_p_all  = _norm_p(agg["mu_px_mev"][mu_has_nc],
-                        agg["mu_py_mev"][mu_has_nc],
-                        agg["mu_pz_mev"][mu_has_nc])
-    mu_p_ge77 = _norm_p(agg["mu_px_mev"][mu_is_ge77],
-                        agg["mu_py_mev"][mu_is_ge77],
-                        agg["mu_pz_mev"][mu_is_ge77])
-
-    _nc_time     = agg["nc_time_ns"].astype(np.float64)
-    _nc_time_pos = _nc_time > 0
-    nc_time_all  = _nc_time[_nc_time_pos]
-    nc_time_ge77 = _nc_time[is_ge77mu & _nc_time_pos]
-
-    observables: list[dict] = [
-        {
-            "key":            "nc_count",
-            "label":          "NC count per muon",
-            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [NCs]",
-            "pop_all_label":  "NC-producing muons",
-            "pop_ge77_label": "Ge77-producing muons",
-            "scalar":         True,
-            "data_all":       agg["nc_counts"].astype(np.float64),
-            "data_ge77":      agg["nc_counts_ge77mu"].astype(np.float64),
-        },
-        {
-            "key":            "nc_position",
-            "label":          "NC position (x, y, z)",
-            "ylabel":         r"$\|\Delta\vec{E}_N\|_2 = \sqrt{\sum_c (S_c/\sqrt{N})^2}$  [m]",
-            "pop_all_label":  "All NCs",
-            "pop_ge77_label": "Ge77-muon NCs",
-            "scalar":         False,
-            "data_all":       nc_pos_all,
-            "data_ge77":      nc_pos_ge77,
-        },
-        {
-            "key":            "nc_n_gammas",
-            "label":          "Capture gammas per NC",
-            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [gammas]",
-            "pop_all_label":  "All NCs",
-            "pop_ge77_label": "Ge77-muon NCs",
-            "scalar":         True,
-            "data_all":       agg["nc_n_gammas"].astype(np.float64),
-            "data_ge77":      agg["nc_n_gammas"][is_ge77mu].astype(np.float64),
-        },
-        {
-            "key":            "mu_momentum",
-            "label":          r"Normalized muon momentum $\hat{p}$",
-            "ylabel":         r"$\|\Delta\vec{E}_N\|_2 = \sqrt{\sum_c (S_c/\sqrt{N})^2}$  [dimensionless]",
-            "pop_all_label":  "NC-producing muons",
-            "pop_ge77_label": "Ge77-producing muons",
-            "scalar":         False,
-            "data_all":       mu_p_all,
-            "data_ge77":      mu_p_ge77,
-        },
-        {
-            "key":            "nc_time",
-            "label":          "NC capture time (t > 0)",
-            "ylabel":         r"$\Delta E_N = S/\sqrt{N}$  [ns]",
-            "pop_all_label":  "All NCs",
-            "pop_ge77_label": "Ge77-muon NCs",
-            "scalar":         True,
-            "data_all":       nc_time_all,
-            "data_ge77":      nc_time_ge77,
-        },
-    ]
-
-    n_obs = len(observables)
-    ncols = 2
-    nrows = (n_obs + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 5 * nrows))
-    axes_flat = np.array(axes).flatten()
-
-    for idx, obs in enumerate(observables):
-        ax = axes_flat[idx]
-        fn = _mc_sem_vector if not obs["scalar"] else _mc_sem_scalar
-
-        ref_n0:    float | None = None
-        ref_sem0:  float | None = None
-        max_n_ref: float        = 0.0
-
-        for data, color, marker, pop_label in [
-            (obs["data_all"],  COLORS["blue"],   "o", obs["pop_all_label"]),
-            (obs["data_ge77"], COLORS["orange"], "s", obs["pop_ge77_label"]),
-        ]:
-            if len(data) == 0:
-                continue
-            n_arr, sem_mean, sem_std = fn(data, seed=RANDOM_SEED + idx)
-            max_n_ref = max(max_n_ref, float(n_arr[-1]))
-            ax.plot(n_arr, sem_mean, "-", color=color, marker=marker,
-                    markersize=4, linewidth=1.5,
-                    label=f"{pop_label}  (N = {len(data):,})")
-            _rel = np.where(sem_mean > 0, sem_std / sem_mean, 0.0)
-            ax.fill_between(
-                n_arr,
-                np.maximum(sem_mean * np.exp(-_rel), 1e-30),
-                sem_mean * np.exp(_rel),
-                color=color, alpha=0.2,
-            )
-            # Anchor 1/√N reference at the first valid point of the all-population curve
-            if ref_n0 is None:
-                valid = np.isfinite(sem_mean) & (sem_mean > 0)
-                if valid.any():
-                    i0       = int(np.argmax(valid))
-                    ref_n0   = float(n_arr[i0])
-                    ref_sem0 = float(sem_mean[i0])
-
-        if ref_n0 is not None and ref_sem0 is not None and ref_n0 > 0 and max_n_ref > ref_n0:
-            n_ref = np.logspace(np.log10(ref_n0), np.log10(max_n_ref), 100)
-            ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
-                    ":", color="gray", linewidth=1.2, alpha=0.7,
-                    label=r"$1/\sqrt{N}$ reference")
-
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel("Sample size $N$", fontsize=11)
-        ax.set_ylabel(obs["ylabel"], fontsize=11)
-        ax.set_title(obs["label"], fontsize=12)
-        ax.legend(fontsize=9)
-        ax.tick_params(labelsize=9)
-
-    for extra in axes_flat[n_obs:]:
-        extra.set_visible(False)
-
-    fig.suptitle(
-        r"Monte Carlo Uncertainty Scaling: $\Delta E_N = S/\sqrt{N}$ vs Sample Size $N$"
-        "\n"
-        r"$S^2 = \frac{1}{N-1}\sum_{n=1}^{N}(f(x_n)-E_N)^2$"
-        rf"   (shaded band = $\pm 1\sigma$ across {MC_N_DRAWS} draws)",
-        fontsize=13,
-    )
-    plt.tight_layout()
-    _save(fig, out_dir / "mc_uncertainty_scaling.png")
-    _log_resources("mc_uncertainty_analysis done", _t0)
-
-
-# ---------------------------------------------------------------------------
 # Muon-level MC uncertainty analysis — helpers
 # ---------------------------------------------------------------------------
 
@@ -2567,6 +2305,18 @@ def parse_args() -> argparse.Namespace:
         default=NUM_RUNS_DEFAULT,
         help=f"Number of runs to load (default: {NUM_RUNS_DEFAULT}).",
     )
+    p.add_argument(
+        "--data-path-1e6",
+        default=None,
+        help="Directory containing the 1e6-muon dataset (single HDF5 file).  "
+             "Defaults to <data-path>/1e6/.",
+    )
+    p.add_argument(
+        "--data-path-1e7",
+        default=None,
+        help="Directory containing the 1e7-muon dataset (single HDF5 file).  "
+             "Defaults to <data-path>/1e7/.",
+    )
     return p.parse_args()
 
 
@@ -2652,9 +2402,20 @@ def main() -> None:
     plot_cut_nc_material(run_list, out_dir)
     _log_resources("plot_cut_nc_material", t_main)
 
-    print("\n--- Monte Carlo Uncertainty Analysis ---")
-    mc_uncertainty_analysis(agg, out_dir)
-    _log_resources("mc_uncertainty_analysis done", t_main)
+    print("\n--- Monte Carlo Uncertainty Analysis (muon level) ---")
+    _path_1e6 = Path(args.data_path_1e6) if args.data_path_1e6 else data_path / "1e6"
+    _path_1e7 = Path(args.data_path_1e7) if args.data_path_1e7 else data_path / "1e7"
+    _ds_dirs: dict[str, Path] = {}
+    for _ds_key, _ds_path in [("1e6", _path_1e6), ("1e7", _path_1e7), ("1e8", data_path)]:
+        if _ds_path.exists():
+            _ds_dirs[_ds_key] = _ds_path
+        else:
+            print(f"  Skipping dataset '{_ds_key}': path not found: {_ds_path}")
+    if _ds_dirs:
+        mc_uncertainty_analysis_muon_level(_ds_dirs, out_dir)
+        _log_resources("mc_uncertainty_analysis_muon_level done", t_main)
+    else:
+        print("  No dataset paths found — skipping muon-level MC analysis.")
 
     # write_statistics only needs 5 scalar counts from agg; extract them before freeing.
     agg_stats = {k: agg[k] for k in ("n_muons_total", "n_nc_total", "n_nc_ge77",
