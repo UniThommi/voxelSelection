@@ -2305,31 +2305,25 @@ def parse_args() -> argparse.Namespace:
         default=NUM_RUNS_DEFAULT,
         help=f"Number of runs to load (default: {NUM_RUNS_DEFAULT}).",
     )
-    p.add_argument(
-        "--data-path-1e6",
-        default=None,
-        help="Directory containing the 1e6-muon dataset (single HDF5 file).  "
-             "Defaults to <data-path>/1e6/.",
-    )
-    p.add_argument(
-        "--data-path-1e7",
-        default=None,
-        help="Directory containing the 1e7-muon dataset (single HDF5 file).  "
-             "Defaults to <data-path>/1e7/.",
-    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     data_path = Path(args.data_path)
+
+    if not data_path.exists():
+        raise RuntimeError(f"data path not found: {data_path}")
+    path_1e6 = data_path / "1e6"
+    path_1e7 = data_path / "1e7"
+    if not path_1e6.exists():
+        raise RuntimeError(f"1e6 dataset directory not found: {path_1e6}")
+    if not path_1e7.exists():
+        raise RuntimeError(f"1e7 dataset directory not found: {path_1e7}")
+
     output_base = Path(args.output_path) if args.output_path else data_path
     out_dir = output_base / "musun_nc_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    if not data_path.exists():
-        print(f"ERROR: data path not found: {data_path}")
-        sys.exit(1)
 
     run_dirs = sorted(data_path.glob("run_*"))[: args.runs]
     if not run_dirs:
@@ -2403,19 +2397,11 @@ def main() -> None:
     _log_resources("plot_cut_nc_material", t_main)
 
     print("\n--- Monte Carlo Uncertainty Analysis (muon level) ---")
-    _path_1e6 = Path(args.data_path_1e6) if args.data_path_1e6 else data_path / "1e6"
-    _path_1e7 = Path(args.data_path_1e7) if args.data_path_1e7 else data_path / "1e7"
-    _ds_dirs: dict[str, Path] = {}
-    for _ds_key, _ds_path in [("1e6", _path_1e6), ("1e7", _path_1e7), ("1e8", data_path)]:
-        if _ds_path.exists():
-            _ds_dirs[_ds_key] = _ds_path
-        else:
-            print(f"  Skipping dataset '{_ds_key}': path not found: {_ds_path}")
-    if _ds_dirs:
-        mc_uncertainty_analysis_muon_level(_ds_dirs, out_dir)
-        _log_resources("mc_uncertainty_analysis_muon_level done", t_main)
-    else:
-        print("  No dataset paths found — skipping muon-level MC analysis.")
+    mc_uncertainty_analysis_muon_level(
+        {"1e6": path_1e6, "1e7": path_1e7, "1e8": data_path},
+        out_dir,
+    )
+    _log_resources("mc_uncertainty_analysis_muon_level done", t_main)
 
     # write_statistics only needs 5 scalar counts from agg; extract them before freeing.
     agg_stats = {k: agg[k] for k in ("n_muons_total", "n_nc_total", "n_nc_ge77",
