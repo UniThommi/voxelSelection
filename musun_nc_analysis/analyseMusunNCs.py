@@ -2117,64 +2117,181 @@ def mc_uncertainty_analysis_muon_level(
     for i_ds, (ds_key, ds_dir) in enumerate(dataset_dirs.items()):
         print(f"\n  Dataset '{ds_key}'  ({ds_dir})", flush=True)
         t_ds = time.perf_counter()
-        mu_data   = _load_dataset_for_mc(ds_dir)
-        n_mu_total = mu_data["n_mu_total"]
-        mu_is_ge77 = mu_data["mu_is_ge77"]
-        k_ge77 = int(mu_is_ge77.sum())
-        print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77:,}", flush=True)
 
-        obs_arr: dict[str, np.ndarray] = {
-            "nc_count":        mu_data["mu_nc_count"],
-            "nc_position":     mu_data["mu_nc_pos"],              # mm
-            "nc_time":         mu_data["mu_nc_mean_time"],        # mean [ns]
-            "nc_n_gammas":     mu_data["mu_nc_mean_gammas"],
-            "nc_gamma_energy": mu_data["mu_nc_mean_energy_kev"],  # keV
-            "mu_ekin":         mu_data["mu_ekin"],
-            "mu_phi":          mu_data["mu_phi_rad"],
-            "mu_theta":        mu_data["mu_theta_rad"],
-            "mu_pos":          mu_data["mu_pos_mm"],
-        }
+        # Detect multi-run layout (e.g. the 1e8 dataset with run_001/…run_010/).
+        # Process one run at a time to avoid loading 100 M muon arrays simultaneously.
+        run_dirs_mc = sorted(ds_dir.glob("run_*/"))
 
-        for i_obs, obs in enumerate(observables):
-            okey   = obs["key"]
-            is_vec = obs["vector"]
-            d_all  = obs_arr[okey]   # reference into mu_data; no copy
+        if not run_dirs_mc:
+            # ---- Single-run layout (1e6, 1e7): load everything at once ----------
+            mu_data    = _load_dataset_for_mc(ds_dir)
+            n_mu_total = mu_data["n_mu_total"]
+            mu_is_ge77 = mu_data["mu_is_ge77"]
+            k_ge77     = int(mu_is_ge77.sum())
+            print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77:,}", flush=True)
 
-            # Ge77 array: identical to d_all for Ge77 muons, zero elsewhere
-            if is_vec:
-                d_ge77 = d_all.copy()
-                d_ge77[~mu_is_ge77] = 0.0
-            else:
-                d_ge77 = np.where(mu_is_ge77, d_all, 0.0)
+            obs_arr: dict[str, np.ndarray] = {
+                "nc_count":        mu_data["mu_nc_count"],
+                "nc_position":     mu_data["mu_nc_pos"],
+                "nc_time":         mu_data["mu_nc_mean_time"],
+                "nc_n_gammas":     mu_data["mu_nc_mean_gammas"],
+                "nc_gamma_energy": mu_data["mu_nc_mean_energy_kev"],
+                "mu_ekin":         mu_data["mu_ekin"],
+                "mu_phi":          mu_data["mu_phi_rad"],
+                "mu_theta":        mu_data["mu_theta_rad"],
+                "mu_pos":          mu_data["mu_pos_mm"],
+            }
 
-            for i_pop, (pop, data) in enumerate(
-                [("all", d_all), ("ge77", d_ge77)]
-            ):
-                if pop == "ge77" and k_ge77 == 0:
-                    continue
+            for i_obs, obs in enumerate(observables):
+                okey   = obs["key"]
+                is_vec = obs["vector"]
+                d_all  = obs_arr[okey]
 
                 if is_vec:
-                    E_full = float(np.linalg.norm(np.mean(data, axis=0)))
+                    d_ge77 = d_all.copy()
+                    d_ge77[~mu_is_ge77] = 0.0
                 else:
-                    E_full = float(np.mean(data))
+                    d_ge77 = np.where(mu_is_ge77, d_all, 0.0)
 
-                seed = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop
-                sem_mean, sem_std = _mc_sem_fixed(
-                    data, n_vals,
-                    n_draws=MC_N_DRAWS, seed=seed, vector=is_vec,
-                )
-                results[(ds_key, okey, pop)] = {
-                    "sem_mean":   sem_mean,
-                    "sem_std":    sem_std,
-                    "E_full":     E_full,
-                    "n_mu_total": n_mu_total,
-                    "k_ge77":     k_ge77,
+                for i_pop, (pop, data) in enumerate(
+                    [("all", d_all), ("ge77", d_ge77)]
+                ):
+                    if pop == "ge77" and k_ge77 == 0:
+                        continue
+                    if is_vec:
+                        E_full = float(np.linalg.norm(np.mean(data, axis=0)))
+                    else:
+                        E_full = float(np.mean(data))
+                    seed = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop
+                    sem_mean, sem_std = _mc_sem_fixed(
+                        data, n_vals, n_draws=MC_N_DRAWS, seed=seed, vector=is_vec,
+                    )
+                    results[(ds_key, okey, pop)] = {
+                        "sem_mean":   sem_mean,
+                        "sem_std":    sem_std,
+                        "E_full":     E_full,
+                        "n_mu_total": n_mu_total,
+                        "k_ge77":     k_ge77,
+                    }
+                del d_ge77
+
+            del mu_data, obs_arr, mu_is_ge77
+            gc.collect()
+
+        else:
+            # ---- Multi-run layout (1e8): stream one run at a time ---------------
+            # For each (okey, pop) key accumulate:
+            #   e_sum     — sum of muon-level values across all runs (for E_full)
+            #   sem_means — list of per-run sem_mean arrays (averaged at the end)
+            #   sem_stds  — list of per-run sem_std arrays
+            # Each run has ~N_FIXED muons, so per-run bootstrap is an unbiased
+            # estimator of the full-population SEM at any N ≤ N_FIXED.
+            e_sum:     dict[tuple, np.ndarray] = {}
+            sem_means: dict[tuple, list]        = {}
+            sem_stds:  dict[tuple, list]        = {}
+            n_mu_total   = 0
+            k_ge77_total = 0
+
+            for i_run, rd_path in enumerate(run_dirs_mc):
+                print(f"    {rd_path.name} ...", end="  ", flush=True)
+                t_run  = time.perf_counter()
+                mu_r   = _load_single_run_for_mc(rd_path)
+                n_mu_r = mu_r["n_mu_total"]
+                print(f"N_mu={n_mu_r:,}", flush=True)
+                if n_mu_r == 0:
+                    del mu_r
+                    continue
+
+                n_mu_total   += n_mu_r
+                mu_is_ge77_r  = mu_r["mu_is_ge77"]
+                k_ge77_r      = int(mu_is_ge77_r.sum())
+                k_ge77_total += k_ge77_r
+
+                obs_arr_r: dict[str, np.ndarray] = {
+                    "nc_count":        mu_r["mu_nc_count"],
+                    "nc_position":     mu_r["mu_nc_pos"],
+                    "nc_time":         mu_r["mu_nc_mean_time"],
+                    "nc_n_gammas":     mu_r["mu_nc_mean_gammas"],
+                    "nc_gamma_energy": mu_r["mu_nc_mean_energy_kev"],
+                    "mu_ekin":         mu_r["mu_ekin"],
+                    "mu_phi":          mu_r["mu_phi_rad"],
+                    "mu_theta":        mu_r["mu_theta_rad"],
+                    "mu_pos":          mu_r["mu_pos_mm"],
                 }
 
-            del d_ge77   # free the per-observable copy; d_all is a reference
+                for i_obs, obs in enumerate(observables):
+                    okey   = obs["key"]
+                    is_vec = obs["vector"]
+                    d_all_r = obs_arr_r[okey]
 
-        del mu_data, obs_arr, mu_is_ge77
-        gc.collect()
+                    if is_vec:
+                        d_ge77_r = d_all_r.copy()
+                        d_ge77_r[~mu_is_ge77_r] = 0.0
+                    else:
+                        d_ge77_r = np.where(mu_is_ge77_r, d_all_r, 0.0)
+
+                    for i_pop, (pop, data_r) in enumerate(
+                        [("all", d_all_r), ("ge77", d_ge77_r)]
+                    ):
+                        if pop == "ge77" and k_ge77_r == 0:
+                            continue
+
+                        k_acc = (okey, pop)
+
+                        # Accumulate sum for E_full
+                        contrib = (np.sum(data_r, axis=0)
+                                   if is_vec
+                                   else np.float64(np.sum(data_r)))
+                        if k_acc not in e_sum:
+                            e_sum[k_acc] = contrib.copy() if is_vec else contrib
+                        else:
+                            e_sum[k_acc] = e_sum[k_acc] + contrib
+
+                        # Per-run SEM bootstrap
+                        seed_r = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop + i_run * 1000
+                        sm_r, ss_r = _mc_sem_fixed(
+                            data_r, n_vals, n_draws=MC_N_DRAWS,
+                            seed=seed_r, vector=is_vec,
+                        )
+                        sem_means.setdefault(k_acc, []).append(sm_r)
+                        sem_stds.setdefault(k_acc, []).append(ss_r)
+
+                    del d_ge77_r
+
+                del mu_r, obs_arr_r, mu_is_ge77_r
+                gc.collect()
+                _log_resources(f"    run {rd_path.name}", t_run)
+
+            print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77_total:,}", flush=True)
+
+            # Combine per-run results
+            for i_obs, obs in enumerate(observables):
+                okey   = obs["key"]
+                is_vec = obs["vector"]
+                for i_pop, pop in enumerate(["all", "ge77"]):
+                    k_acc = (okey, pop)
+                    if k_acc not in sem_means or not sem_means[k_acc]:
+                        continue
+                    # E_full: total sum / total muon count
+                    total_sum = e_sum[k_acc]
+                    if is_vec:
+                        E_full = float(np.linalg.norm(total_sum / n_mu_total))
+                    else:
+                        E_full = float(total_sum / n_mu_total)
+                    # SEM: mean over per-run estimates (each run is an unbiased draw)
+                    sem_mean = np.mean(sem_means[k_acc], axis=0)
+                    sem_std  = np.mean(sem_stds[k_acc],  axis=0)
+                    results[(ds_key, okey, pop)] = {
+                        "sem_mean":   sem_mean,
+                        "sem_std":    sem_std,
+                        "E_full":     E_full,
+                        "n_mu_total": n_mu_total,
+                        "k_ge77":     k_ge77_total,
+                    }
+
+            del e_sum, sem_means, sem_stds
+            gc.collect()
+
         _log_resources(f"  dataset '{ds_key}' done", t_ds)
 
     # ---- Plot: one figure per population (all / Ge77) -----------------------
