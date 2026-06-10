@@ -889,7 +889,7 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
         bins, "NC count per muon",
         "NC count per muon: Ge77-producing vs non-Ge77 NC-producing muons",
         out_dir / "nc_count_per_muon_comparison_panel.png",
-        log_x=True, log_y_ratio=True,
+        log_x=True, log_y=True, log_y_ratio=True,
     )
 
 
