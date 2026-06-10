@@ -427,6 +427,8 @@ def load_run(run_dir: Path) -> RunData:
 def aggregate_runs(run_list: list[RunData]) -> dict:
     """Combine all runs into flat arrays; add boolean muon flags."""
     nc_ge77_l, nc_time_l, nc_phi_l, nc_z_l, nc_r_m_l, nc_is_ge77mu_l, nc_is_water_l, nc_n_gammas_l = [], [], [], [], [], [], [], []
+    nc_muon_idx_l: list[np.ndarray] = []
+    muon_nc_offset = 0
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
     mu_nc_mean_energy_l: list[np.ndarray] = []
@@ -455,6 +457,9 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             nc_is_ge77mu_l.append(np.isin(rd.nc_evtid, rd.ge77_evtids))
             nc_is_water_l.append(rd.nc_is_water)
             nc_n_gammas_l.append(rd.nc_n_gammas)
+            # Per-NC global muon index (unique across all runs)
+            local_muon_idx = np.searchsorted(rd.muon_nc_evtids, rd.nc_evtid)
+            nc_muon_idx_l.append(local_muon_idx + muon_nc_offset)
             # Per-muon mean gamma energy
             mu_ids_e, inv_e = np.unique(rd.nc_evtid, return_inverse=True)
             energy_sum = np.bincount(inv_e, weights=rd.nc_gamma_energy_kev, minlength=mu_ids_e.size)
@@ -470,6 +475,8 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
 
         if rd.ge77_nc_per_ge77muon.size > 0:
             ge77_nc_per_mu_l.append(rd.ge77_nc_per_ge77muon)
+
+        muon_nc_offset += rd.muon_nc_evtids.size
 
         if rd.muon_evtid.size > 0:
             is_ge77 = np.isin(rd.muon_evtid, rd.ge77_evtids)
@@ -501,6 +508,7 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_is_ge77mu": cat(nc_is_ge77mu_l, bool),
         "nc_is_water":  cat(nc_is_water_l,  bool),
         "nc_n_gammas":  cat(nc_n_gammas_l,  np.int32),
+        "nc_muon_idx":  cat(nc_muon_idx_l,  np.int64),
         # Per-muon mean gamma energy (one entry per NC-producing muon)
         "mu_nc_mean_energy_kev":    cat(mu_nc_mean_energy_l,         np.float64),
         "mu_nc_mean_energy_is_ge77": cat(mu_nc_mean_energy_is_ge77_l, bool),
@@ -919,7 +927,7 @@ def plot_ge77_per_ge77muon(agg: dict, out_dir: Path) -> None:
     )
     ax.set_xticks(x_vals)
     ax.set_xlim(0.4, x_max + 0.6)
-    ax.set_ylim(0, max(bar_counts) * 1.55)
+    ax.set_ylim(0, 1800)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "ge77_per_ge77muon.png")
 
@@ -1085,6 +1093,55 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         fig.colorbar(pc, ax=axes[1], label="NCs / r  [mm⁻¹]")
 
         _save(fig, out_dir / f"nc_phi_r_z_2d_{tag}.png")
+
+    # ---- 2-D plots excluding the muon with the most neutron captures ----
+    nc_muon_idx = agg.get("nc_muon_idx")
+    if nc_muon_idx is not None and nc_muon_idx.size > 0:
+        nc_per_muon = np.bincount(nc_muon_idx.astype(np.intp))
+        top_muon_idx = int(np.argmax(nc_per_muon))
+        top_muon_nc_count = int(nc_per_muon[top_muon_idx])
+        not_top_mask = nc_muon_idx != top_muon_idx
+
+        for mask, tag, title_base in [
+            (np.ones(phi.size, dtype=bool), "all", "NC positions — all NCs"),
+            (is_ge77mu, "ge77muons", "NC positions — NCs of Ge77-producing muons"),
+        ]:
+            combined_mask = mask & not_top_mask
+            ph = phi[combined_mask]
+            zm = z_mm[combined_mask]
+            rm = r_mm[combined_mask]
+            if ph.size == 0:
+                continue
+
+            r_bins_2d = np.linspace(0.0, float(rm.max()) * 1.02, 73)
+            z_bins_2d = np.linspace(float(zm.min()), float(zm.max()), 101)
+            H_r, r_edges, z_edges = np.histogram2d(rm, zm, bins=[r_bins_2d, z_bins_2d])
+            r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                H_r_density = H_r / r_centers[:, None]
+
+            fig, axes = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
+            fig.suptitle(
+                f"{title_base}  (N = {ph.size:,})\n"
+                f"Highest-multiplicity muon excluded ({top_muon_nc_count:,} NCs removed)",
+                fontsize=14,
+            )
+
+            hh1 = axes[0].hist2d(ph, zm, bins=[72, 100], cmap="viridis", vmin=0)
+            axes[0].set_xlabel("NC azimuth φ [°]", fontsize=13)
+            axes[0].set_ylabel("NC z position [mm]", fontsize=13)
+            axes[0].set_title("φ vs z", fontsize=12)
+            axes[0].tick_params(labelsize=11)
+            fig.colorbar(hh1[3], ax=axes[0], label="Number of NCs")
+
+            pc = axes[1].pcolormesh(r_edges, z_edges, H_r_density.T, cmap="viridis", vmin=0)
+            axes[1].set_xlabel("NC radial position r [mm]", fontsize=13)
+            axes[1].set_ylabel("NC z position [mm]", fontsize=13)
+            axes[1].set_title("r vs z  (NCs / r)", fontsize=12)
+            axes[1].tick_params(labelsize=11)
+            fig.colorbar(pc, ax=axes[1], label="NCs / r  [mm⁻¹]")
+
+            _save(fig, out_dir / f"nc_phi_r_z_2d_{tag}_no_top_muon.png")
 
 
 # ---------------------------------------------------------------------------
