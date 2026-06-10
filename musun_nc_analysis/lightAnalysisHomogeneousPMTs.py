@@ -231,8 +231,10 @@ def load_light_run(
         k for k, t in nc_time.items()
         if NC_TIME_LOW_NS <= t <= NC_TIME_HIGH_NS
     )
-    nc_counter: dict[tuple[int, int], int]  = {k: 0 for k in nc_ge77}
-    nc_pmt_set:  dict[tuple[int, int], set] = {k: set() for k in nc_ge77}
+    print(f"  Sim1 window NCs [{NC_TIME_LOW_NS:.0f}, {NC_TIME_HIGH_NS:.0f}] ns: "
+          f"{len(window_nc_set):,} / {len(nc_ge77):,}")
+    nc_counter: dict[tuple[int, int], int]  = {k: 0 for k in window_nc_set}
+    nc_pmt_set:  dict[tuple[int, int], set] = {k: set() for k in window_nc_set}
 
     for fp in sorted(sim2_run_dir.glob("output_t*.hdf5")):
         data = _load_optical_file(fp)
@@ -352,8 +354,8 @@ def load_light_run(
                 h_ge77_wl, _ = np.histogram(wl_ge77_w, bins=WL_BINS)
                 ge77_wl_hist += h_ge77_wl
 
-    # Build output arrays — one entry per sim 1 NC (preserves 0-photon NCs)
-    nc_keys_list = list(nc_ge77.keys())
+    # Build output arrays — one entry per window NC only
+    nc_keys_list = sorted(window_nc_set)
     rd.nc_photon_counts = np.array(
         [nc_counter[k] for k in nc_keys_list], dtype=np.int64)
     rd.nc_pmt_counts = np.array(
