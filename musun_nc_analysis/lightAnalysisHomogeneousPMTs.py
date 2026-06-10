@@ -88,6 +88,9 @@ class LightRunData:
     # NC capture time relative to muon [ns] (from sim 1)
     nc_time_ns: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.float64))
+    # True if the NC occurred in EnrichedGermanium0.913 (resolved per-file from sim 1)
+    nc_in_germanium: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool))
     # One entry per NC-producing muon from sim 1
     muon_photon_counts: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.int64))
@@ -127,6 +130,7 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
     dict[tuple[int, int], float],                       # nc_time (ns, relative to muon)
     dict[tuple[int, int], tuple[float, float, float]],  # nc_pos
     dict[tuple[int, int], bool],                        # nc_is_water
+    dict[tuple[int, int], bool],                        # nc_in_germanium
     dict[int, list[tuple[int, int]]],                   # muon_nc
 ]:
     """
@@ -136,11 +140,12 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
     Geant4 process and may assign different IDs to the same materials).
 
     Returns:
-      nc_ge77:    (evtid, tid) -> ge77 flag (0 or 1)
-      nc_time:    (evtid, tid) -> NC capture time relative to muon [ns]
-      nc_pos:     (evtid, tid) -> (x_m, y_m, z_m)
-      nc_is_water:(evtid, tid) -> True if NC occurred in water
-      muon_nc:    muon_evtid  -> list of NC keys belonging to that muon
+      nc_ge77:        (evtid, tid) -> ge77 flag (0 or 1)
+      nc_time:        (evtid, tid) -> NC capture time relative to muon [ns]
+      nc_pos:         (evtid, tid) -> (x_m, y_m, z_m)
+      nc_is_water:    (evtid, tid) -> True if NC occurred in water
+      nc_in_germanium:(evtid, tid) -> True if NC occurred in EnrichedGermanium0.913
+      muon_nc:        muon_evtid  -> list of NC keys belonging to that muon
     """
     nc_ge77:         dict[tuple[int, int], int] = {}
     nc_time:         dict[tuple[int, int], float] = {}
@@ -187,7 +192,7 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
             f"  ge77_flag=1 but NOT in EnrichedGermanium0.913: {len(flagged_outside_ge)} NCs"
         )
 
-    return nc_ge77, nc_time, nc_pos, nc_is_water, dict(muon_nc)
+    return nc_ge77, nc_time, nc_pos, nc_is_water, nc_in_germanium, dict(muon_nc)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +225,7 @@ def load_light_run(
     """
     rd = LightRunData(run_name=sim2_run_dir.name)
 
-    nc_ge77, nc_time, nc_pos, nc_is_water, muon_nc = _load_nc_keys(sim1_run_dir)
+    nc_ge77, nc_time, nc_pos, nc_is_water, nc_in_germanium, muon_nc = _load_nc_keys(sim1_run_dir)
     if not nc_ge77:
         print(f"  WARNING: no NC data in sim 1 run {sim1_run_dir.name}")
         return rd
@@ -247,15 +252,6 @@ def load_light_run(
         time_ns = data["time_ns"]
         wl_nm   = data["wavelength_nm"]
 
-        # Cross-check: relative times must not be < -1 ns
-        bad = time_ns < -1.0
-        if bad.any():
-            raise RuntimeError(
-                f"{bad.sum()} photon(s) with relative time < -1 ns in {fp} "
-                f"(min = {time_ns[bad].min():.3f} ns). "
-                "Expected photon times to be relative to NC time."
-            )
-
         filter_counts["n_raw"] += len(evtid)
 
         # ---- Filter 1: PMT UID mask ----------------------------------------
@@ -269,48 +265,72 @@ def load_light_run(
         wl_nm_p   = wl_nm[pmt_mask]
         filter_counts["n_after_pmt"] += len(evtid_p)
 
-        # Accumulate full relative-time histogram (all PMT photons, before time cut)
-        if time_ns_p.size > 0:
-            h, _ = np.histogram(time_ns_p, bins=TIME_HIST_BINS)
-            all_times_hist += h
-
-        # Accumulate Ge77 time histogram (PMT photons from Ge77 NCs, before time cut)
-        if time_ns_p.size > 0:
-            ge77_mask_p = np.fromiter(
-                ((int(e), int(t)) in ge77_nc_set
-                 for e, t in zip(evtid_p.tolist(), nc_tid_p.tolist())),
-                dtype=bool, count=len(evtid_p),
-            )
-            t_ge77 = time_ns_p[ge77_mask_p]
-            if t_ge77.size > 0:
-                h_ge77, _ = np.histogram(t_ge77, bins=TIME_HIST_BINS)
-                ge77_times_hist += h_ge77
-
-        # ---- Filter 2: keep photons within 200 ns of NC (prompt signal) ----
-        time_mask  = time_ns_p <= TIME_FILTER_NS
-        evtid_t    = evtid_p[time_mask]
-        nc_tid_t   = nc_tid_p[time_mask]
-        det_uid_t  = det_uid_p[time_mask]
-        wl_nm_t    = wl_nm_p[time_mask]
-        filter_counts["n_after_time"] += len(evtid_t)
-
-        if evtid_t.size == 0:
+        if evtid_p.size == 0:
             continue
 
-        # ---- Filter 3: NC match (every photon must exist in sim 1) ----------
+        # ---- Filter 2: NC match (every photon must exist in sim 1) ----------
         match_mask = np.fromiter(
             ((int(e), int(t)) in valid_nc_set
-             for e, t in zip(evtid_t.tolist(), nc_tid_t.tolist())),
-            dtype=bool, count=len(evtid_t),
+             for e, t in zip(evtid_p.tolist(), nc_tid_p.tolist())),
+            dtype=bool, count=len(evtid_p),
         )
         n_unmatched = int((~match_mask).sum())
         if n_unmatched > 0:
             raise RuntimeError(
-                f"{n_unmatched} photon(s) in {fp} passed PMT mask and 200 ns cut "
+                f"{n_unmatched} photon(s) in {fp} passed PMT mask "
                 "but have no matching (evtid, nC_track_id) in sim 1. "
                 "Sim 2 should only contain NC events that exist in sim 1."
             )
-        filter_counts["n_after_nc_match"] += int(match_mask.sum())
+        evtid_m   = evtid_p[match_mask]
+        nc_tid_m  = nc_tid_p[match_mask]
+        det_uid_m = det_uid_p[match_mask]
+        time_ns_m = time_ns_p[match_mask]
+        wl_nm_m   = wl_nm_p[match_mask]
+        filter_counts["n_after_nc_match"] += len(evtid_m)
+
+        if evtid_m.size == 0:
+            continue
+
+        # Compute photon time relative to NC by subtracting sim 1 NC capture time
+        nc_time_arr = np.fromiter(
+            (nc_time[(int(e), int(t))]
+             for e, t in zip(evtid_m.tolist(), nc_tid_m.tolist())),
+            dtype=np.float64, count=len(evtid_m),
+        )
+        time_ns_rel = time_ns_m - nc_time_arr
+
+        # Sanity check: photons must not arrive before their NC
+        bad = time_ns_rel < -1.0
+        if bad.any():
+            raise RuntimeError(
+                f"{bad.sum()} photon(s) with NC-relative time < -1 ns in {fp} "
+                f"(min = {time_ns_rel[bad].min():.3f} ns). "
+                "Photon arrival time must not precede the NC capture."
+            )
+
+        # Accumulate NC-relative time histograms (before 200 ns cut)
+        h, _ = np.histogram(time_ns_rel, bins=TIME_HIST_BINS)
+        all_times_hist += h
+        ge77_mask_m = np.fromiter(
+            ((int(e), int(t)) in ge77_nc_set
+             for e, t in zip(evtid_m.tolist(), nc_tid_m.tolist())),
+            dtype=bool, count=len(evtid_m),
+        )
+        t_ge77_rel = time_ns_rel[ge77_mask_m]
+        if t_ge77_rel.size > 0:
+            h_ge77, _ = np.histogram(t_ge77_rel, bins=TIME_HIST_BINS)
+            ge77_times_hist += h_ge77
+
+        # ---- Filter 3: keep photons within 200 ns of NC (prompt signal) ----
+        time_mask = time_ns_rel <= TIME_FILTER_NS
+        evtid_t   = evtid_m[time_mask]
+        nc_tid_t  = nc_tid_m[time_mask]
+        det_uid_t = det_uid_m[time_mask]
+        wl_nm_t   = wl_nm_m[time_mask]
+        filter_counts["n_after_time"] += len(evtid_t)
+
+        if evtid_t.size == 0:
+            continue
 
         # ---- Filter 4: NC must be within the [1 µs, 200 µs] muon window ----
         window_mask = np.fromiter(
@@ -369,6 +389,8 @@ def load_light_run(
     rd.nc_z_m = np.array([nc_pos[k][2] for k in nc_keys_list], dtype=np.float64)
     rd.nc_is_water = np.array(
         [nc_is_water.get(k, False) for k in nc_keys_list], dtype=bool)
+    rd.nc_in_germanium = np.array(
+        [nc_in_germanium.get(k, False) for k in nc_keys_list], dtype=bool)
 
     muon_counts = [
         sum(nc_counter.get(k, 0) for k in keys)
@@ -881,6 +903,94 @@ def plot_ge77_light(
         _save(fig4, out_dir / "ge77_photon_time_distribution.png")
 
 # ---------------------------------------------------------------------------
+# Germanium NC positions vs Ge77 flag
+# ---------------------------------------------------------------------------
+def plot_germanium_nc_positions(
+    light_run_list: list[LightRunData],
+    out_dir: Path,
+) -> None:
+    """3-D NC positions for EnrichedGermanium0.913 NCs, coloured by Ge77 flag.
+
+    Annotates how many germanium NCs carry no Ge77 flag (other Ge isotopes)
+    and raises a warning if any Ge77-flagged NC falls outside germanium.
+    """
+    has_ge = [rd for rd in light_run_list if rd.nc_in_germanium.any()]
+    if not has_ge:
+        print("  No NCs in EnrichedGermanium0.913 found — skipping plot.")
+        return
+
+    # All window NCs
+    all_ge_mask   = np.concatenate([rd.nc_in_germanium for rd in light_run_list])
+    all_ge77_mask = np.concatenate([rd.nc_is_ge77      for rd in light_run_list])
+    all_x = np.concatenate([rd.nc_x_m for rd in light_run_list])
+    all_y = np.concatenate([rd.nc_y_m for rd in light_run_list])
+    all_z = np.concatenate([rd.nc_z_m for rd in light_run_list])
+
+    n_total_ncs   = len(all_ge_mask)
+    n_ge_mat      = int(all_ge_mask.sum())
+    n_ge77_total  = int(all_ge77_mask.sum())
+
+    # NCs in germanium split by Ge77 flag
+    ge_ge77     = all_ge_mask &  all_ge77_mask   # in Ge AND ge77-flagged
+    ge_not_ge77 = all_ge_mask & ~all_ge77_mask   # in Ge but NOT ge77-flagged
+    # Ge77-flagged NCs NOT in germanium (should be 0 by RuntimeError in loader)
+    ge77_not_ge = ~all_ge_mask & all_ge77_mask
+
+    n_ge_ge77     = int(ge_ge77.sum())
+    n_ge_not_ge77 = int(ge_not_ge77.sum())
+    n_ge77_not_ge = int(ge77_not_ge.sum())
+
+    fig = plt.figure(figsize=(12, 9))
+    ax  = fig.add_subplot(111, projection="3d")
+
+    for mask, color, label in [
+        (ge_not_ge77, COLORS["blue"], f"In Ge, no Ge77 flag  ({n_ge_not_ge77:,})"),
+        (ge_ge77,     COLORS["red"],  f"In Ge + Ge77 flag  ({n_ge_ge77:,})"),
+    ]:
+        if mask.any():
+            ax.scatter(
+                all_x[mask] * 1000, all_y[mask] * 1000, all_z[mask] * 1000,
+                c=color, s=15, alpha=0.65, edgecolors="none", label=label,
+            )
+
+    ax.set_xlabel("X [mm]", fontsize=11)
+    ax.set_ylabel("Y [mm]", fontsize=11)
+    ax.set_zlabel("Z [mm]", fontsize=11)
+    ax.set_title(
+        f"NCs in EnrichedGermanium0.913  (window NCs only,  N_Ge = {n_ge_mat:,} / {n_total_ncs:,})",
+        fontsize=12,
+    )
+    ax.legend(fontsize=10, loc="upper right")
+
+    # Annotation note
+    note_lines = [
+        f"Total window NCs:          {n_total_ncs:,}",
+        f"In EnrichedGermanium0.913: {n_ge_mat:,}",
+        f"  of which Ge77-flagged:   {n_ge_ge77:,}",
+        f"  of which other Ge isotope: {n_ge_not_ge77:,}",
+    ]
+    if n_ge77_not_ge > 0:
+        note_lines.append(
+            f"WARNING: {n_ge77_not_ge:,} Ge77-flagged NC(s) NOT in EnrichedGermanium0.913!"
+        )
+    elif n_ge_ge77 == n_ge77_total:
+        note_lines.append("All Ge77-flagged NCs are within EnrichedGermanium0.913 ✓")
+    else:
+        note_lines.append(
+            f"Ge77 in window: {n_ge_ge77:,} / {n_ge77_total:,} total Ge77 NCs "
+            f"({n_ge77_total - n_ge_ge77:,} outside [1µs, 200µs] window)"
+        )
+
+    ax.text2D(
+        0.01, 0.01, "\n".join(note_lines),
+        transform=ax.transAxes, ha="left", va="bottom", fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.85),
+    )
+
+    _save(fig, out_dir / "germanium_nc_positions_3d.png")
+
+
+# ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------
 def write_statistics(
@@ -912,10 +1022,10 @@ def write_statistics(
         f"Total photons (raw):      {n_raw:,}",
         f"After PMT UID mask:       {filter_counts['n_after_pmt']:,}"
         f"  ({_pct(filter_counts['n_after_pmt'], n_raw)})",
-        f"After >= 200 ns cut:      {filter_counts['n_after_time']:,}"
-        f"  ({_pct(filter_counts['n_after_time'], n_raw)})",
         f"After NC match filter:    {filter_counts['n_after_nc_match']:,}"
         f"  ({_pct(filter_counts['n_after_nc_match'], n_raw)})",
+        f"After <= 200 ns NC-rel.:  {filter_counts['n_after_time']:,}"
+        f"  ({_pct(filter_counts['n_after_time'], n_raw)})",
         f"After NC time window:     {filter_counts.get('n_after_window', 0):,}"
         f"  ({_pct(filter_counts.get('n_after_window', 0), n_raw)})",
         "",
@@ -1048,6 +1158,10 @@ def main() -> None:
     print("\n--- Ge77 light plots ---")
     plot_ge77_light(light_run_list, ge77_times_hist, out_dir)
     _log_resources("Ge77 plots done", t_main)
+
+    print("\n--- Germanium NC positions ---")
+    plot_germanium_nc_positions(light_run_list, out_dir)
+    _log_resources("germanium NC positions done", t_main)
 
     print("\n--- Comparison plots ---")
     plot_photon_count_comparison(light_run_list, out_dir)
