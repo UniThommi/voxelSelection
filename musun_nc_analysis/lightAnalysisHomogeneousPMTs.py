@@ -108,6 +108,12 @@ class LightRunData:
     # True if ANY of the muon's NCs (any time) carries the Ge77 flag
     muon_is_ge77: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=bool))
+    # As muon_photon_counts / muon_pmt_counts, but WITHOUT the 200 ns photon cut
+    # (Filter 3 skipped; the [1 µs, 200 µs] NC window is still applied).
+    muon_photon_counts_nocut: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64))
+    muon_pmt_counts_nocut: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64))
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +260,10 @@ def load_light_run(
           f"{len(window_nc_set):,} / {len(nc_ge77):,}")
     nc_counter: dict[tuple[int, int], int]  = {k: 0 for k in window_nc_set}
     nc_pmt_set:  dict[tuple[int, int], set] = {k: set() for k in window_nc_set}
+    # No-200ns-cut twins: same window NCs, but every NC-matched photon counts
+    # (Filter 3 skipped) so we can quantify the effect of the 200 ns cut.
+    nc_counter_nocut: dict[tuple[int, int], int]  = {k: 0 for k in window_nc_set}
+    nc_pmt_set_nocut: dict[tuple[int, int], set] = {k: set() for k in window_nc_set}
 
     for fp in sorted(sim2_run_dir.glob("output_t*.hdf5")):
         data = _load_optical_file(fp)
@@ -340,6 +350,24 @@ def load_light_run(
             h_ge77, _ = np.histogram(t_ge77_rel, bins=TIME_HIST_BINS)
             ge77_times_hist += h_ge77
 
+        # ---- No-200ns-cut path: apply only the NC time window (skip Filter 3) ----
+        window_mask_m = np.fromiter(
+            ((int(e), int(t)) in window_nc_set
+             for e, t in zip(evtid_m.tolist(), nc_tid_m.tolist())),
+            dtype=bool, count=len(evtid_m),
+        )
+        evtid_nw   = evtid_m[window_mask_m]
+        nc_tid_nw  = nc_tid_m[window_mask_m]
+        det_uid_nw = det_uid_m[window_mask_m]
+        if evtid_nw.size > 0:
+            c_nc = Counter(zip(evtid_nw.tolist(), nc_tid_nw.tolist()))
+            for key, cnt in c_nc.items():
+                nc_counter_nocut[key] += cnt
+            for e_v, t_v, d_v in zip(
+                evtid_nw.tolist(), nc_tid_nw.tolist(), det_uid_nw.tolist()
+            ):
+                nc_pmt_set_nocut[(int(e_v), int(t_v))].add(int(d_v))
+
         # ---- Filter 3: keep photons within 200 ns of NC (prompt signal) ----
         time_mask = time_ns_rel <= TIME_FILTER_NS
         evtid_t   = evtid_m[time_mask]
@@ -401,6 +429,8 @@ def load_light_run(
     muon_photon_counts: list[int] = []
     muon_pmt_counts:    list[int] = []
     muon_is_ge77:       list[bool] = []
+    muon_photon_counts_nocut: list[int] = []
+    muon_pmt_counts_nocut:    list[int] = []
     for keys in muon_nc.values():
         muon_photon_counts.append(sum(nc_counter.get(k, 0) for k in keys))
         pmts: set = set()
@@ -408,9 +438,18 @@ def load_light_run(
             pmts |= nc_pmt_set.get(k, set())
         muon_pmt_counts.append(len(pmts))
         muon_is_ge77.append(any(nc_ge77.get(k, 0) == 1 for k in keys))
+        # No-200ns-cut twins (same muon ordering)
+        muon_photon_counts_nocut.append(
+            sum(nc_counter_nocut.get(k, 0) for k in keys))
+        pmts_nc: set = set()
+        for k in keys:
+            pmts_nc |= nc_pmt_set_nocut.get(k, set())
+        muon_pmt_counts_nocut.append(len(pmts_nc))
     rd.muon_photon_counts = np.array(muon_photon_counts, dtype=np.int64)
     rd.muon_pmt_counts    = np.array(muon_pmt_counts,    dtype=np.int64)
     rd.muon_is_ge77       = np.array(muon_is_ge77,       dtype=bool)
+    rd.muon_photon_counts_nocut = np.array(muon_photon_counts_nocut, dtype=np.int64)
+    rd.muon_pmt_counts_nocut    = np.array(muon_pmt_counts_nocut,    dtype=np.int64)
 
     return rd
 
@@ -537,16 +576,25 @@ def plot_light_per_nc(light_run_list: list[LightRunData], out_dir: Path) -> None
 # ---------------------------------------------------------------------------
 # Photon count per muon: Ge77 muons vs non-Ge77 muons
 # ---------------------------------------------------------------------------
-def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Path) -> None:
+def plot_photon_count_comparison(
+    light_run_list: list[LightRunData], out_dir: Path,
+    *,
+    attr: str = "muon_photon_counts",
+    title: str = "Photon count per muon: Ge77 muons vs non-Ge77 muons",
+    out_name: str = "photon_count_ge77_vs_noge77.png",
+) -> None:
     """Photon count per muon: Ge77 muons vs non-Ge77 muons, density + ratio panel.
 
     A Ge77 muon is a muon with at least one Ge77-flagged NC; photon counts are
     summed over each muon's window NCs (per-muon aggregate).
+
+    ``attr`` selects which per-muon array to use — ``muon_photon_counts`` (with
+    the 200 ns photon cut) or ``muon_photon_counts_nocut`` (200 ns cut removed).
     """
-    parts_ge77   = [rd.muon_photon_counts[rd.muon_is_ge77]
-                    for rd in light_run_list if rd.muon_photon_counts.size > 0]
-    parts_noge77 = [rd.muon_photon_counts[~rd.muon_is_ge77]
-                    for rd in light_run_list if rd.muon_photon_counts.size > 0]
+    parts_ge77   = [getattr(rd, attr)[rd.muon_is_ge77]
+                    for rd in light_run_list if getattr(rd, attr).size > 0]
+    parts_noge77 = [getattr(rd, attr)[~rd.muon_is_ge77]
+                    for rd in light_run_list if getattr(rd, attr).size > 0]
     if not parts_ge77 and not parts_noge77:
         return
 
@@ -561,7 +609,7 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
     bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle("Photon count per muon: Ge77 muons vs non-Ge77 muons", fontsize=13)
+    fig.suptitle(title, fontsize=13)
 
     for data, label, color in [
         (noge77_counts, "Non-Ge77 muons", COLORS["blue"]),
@@ -607,19 +655,28 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
     axes[1].tick_params(labelsize=10)
 
     plt.tight_layout()
-    _save(fig, out_dir / "photon_count_ge77_vs_noge77.png")
+    _save(fig, out_dir / out_name)
 
 
 # ---------------------------------------------------------------------------
 # PMT multiplicity per NC
 # ---------------------------------------------------------------------------
-def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> None:
+def plot_pmt_multiplicity(
+    light_run_list: list[LightRunData], out_dir: Path,
+    *,
+    attr: str = "muon_pmt_counts",
+    title: str = "Distinct PMTs per muon: Ge77 muons vs non-Ge77 muons",
+    out_name: str = "pmt_multiplicity_ge77_vs_noge77.png",
+) -> None:
     """Distinct PMTs per muon (det_uid count unioned over the muon's window NCs):
-    Ge77 muons vs non-Ge77 muons, density + ratio panel."""
-    parts_ge77   = [rd.muon_pmt_counts[rd.muon_is_ge77]
-                    for rd in light_run_list if rd.muon_pmt_counts.size > 0]
-    parts_noge77 = [rd.muon_pmt_counts[~rd.muon_is_ge77]
-                    for rd in light_run_list if rd.muon_pmt_counts.size > 0]
+    Ge77 muons vs non-Ge77 muons, density + ratio panel.
+
+    ``attr`` selects ``muon_pmt_counts`` (with the 200 ns photon cut) or
+    ``muon_pmt_counts_nocut`` (200 ns cut removed)."""
+    parts_ge77   = [getattr(rd, attr)[rd.muon_is_ge77]
+                    for rd in light_run_list if getattr(rd, attr).size > 0]
+    parts_noge77 = [getattr(rd, attr)[~rd.muon_is_ge77]
+                    for rd in light_run_list if getattr(rd, attr).size > 0]
     if not parts_ge77 and not parts_noge77:
         return
 
@@ -633,7 +690,7 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
     bins = np.arange(0, max_pmt + 2) - 0.5
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle("Distinct PMTs per muon: Ge77 muons vs non-Ge77 muons", fontsize=13)
+    fig.suptitle(title, fontsize=13)
 
     for data, label, color in [
         (noge77_pmt, "Non-Ge77 muons", COLORS["blue"]),
@@ -675,7 +732,7 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
     axes[1].tick_params(labelsize=10)
 
     plt.tight_layout()
-    _save(fig, out_dir / "pmt_multiplicity_ge77_vs_noge77.png")
+    _save(fig, out_dir / out_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1059,21 @@ def main() -> None:
     print("\n--- Comparison plots ---")
     plot_photon_count_comparison(light_run_list, out_dir)
     plot_pmt_multiplicity(light_run_list, out_dir)
+    # No-200ns-cut twins (200 ns photon cut removed; [1 µs, 200 µs] window kept)
+    plot_photon_count_comparison(
+        light_run_list, out_dir,
+        attr="muon_photon_counts_nocut",
+        title="Photon count per muon: Ge77 vs non-Ge77 muons "
+              "(no 200 ns cut)",
+        out_name="photon_count_ge77_vs_noge77_nocut.png",
+    )
+    plot_pmt_multiplicity(
+        light_run_list, out_dir,
+        attr="muon_pmt_counts_nocut",
+        title="Distinct PMTs per muon: Ge77 vs non-Ge77 muons "
+              "(no 200 ns cut)",
+        out_name="pmt_multiplicity_ge77_vs_noge77_nocut.png",
+    )
     plot_wavelength_all_ncs(all_wl_hist, out_dir)
     _log_resources("comparison plots done", t_main)
 
