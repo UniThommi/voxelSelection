@@ -5,10 +5,17 @@ Correlates optical photons from sim 2 (homogeneous PMT run) with NC events
 from sim 1 (MUSUN NC run).  All filters follow the same logic as
 zone_ratio_analysis.py.
 
+Photon → NC mapping uses the triple
+  (run_id, muon_id, nc_id)  [sim 2]  ==  (run_id, evtid, nc_id)  [sim 1]
+where run_id is the shared run_* directory name, muon_id is sim 2's
+optical/muon_track_id (== sim 1's evtid), and nc_id is nC_track_id in both.
+Each run is loaded in isolation, so the (muon_id, nc_id) pair is unique per run.
+
 Filter pipeline (applied in order):
   1. PMT UID mask:   det_uid in [10_000_000, 1_000_000_000)
-  2. Time filter:    photon_time_relative >= 200 ns
-  3. NC match:       (evtid, nC_track_id) present in sim 1 NC set
+  2. NC match:       (evtid, nC_track_id) present in sim 1 NC set (RuntimeError otherwise)
+  3. Time filter:    photon_time_relative <= 200 ns
+  4. NC time window: NC capture in [1 µs, 200 µs] after muon
 
 Run script: python lightAnalysisHomogeneousPMTs.py
 """
@@ -92,8 +99,15 @@ class LightRunData:
     nc_in_germanium: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=bool))
     # One entry per NC-producing muon from sim 1
+    # muon_photon_counts: total photons summed over the muon's window NCs
     muon_photon_counts: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.int64))
+    # Distinct PMTs (det_uid) unioned over the muon's window NCs
+    muon_pmt_counts: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int64))
+    # True if ANY of the muon's NCs (any time) carries the Ge77 flag
+    muon_is_ge77: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool))
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +220,19 @@ def load_light_run(
     all_times_hist: np.ndarray,
     ge77_times_hist: np.ndarray,
     all_wl_hist: np.ndarray,
-    ge77_wl_hist: np.ndarray,
 ) -> LightRunData:
     """
     Load one sim 2 run, apply all filters, return per-NC and per-muon counts.
 
     Histogram arrays are pre-allocated and accumulated in-place (no sampling):
       all_times_hist / ge77_times_hist — relative photon time, before 200 ns cut
-      all_wl_hist / ge77_wl_hist       — wavelength of accepted photons
+      all_wl_hist                      — wavelength of every NC-matched photon
+                                         (all NCs, before the time/window cuts)
 
     Filter pipeline:
       1. PMT UID mask (det_uid in [PMT_UID_MIN, PMT_UID_MAX))
-      2. Time filter: keep photons with t <= 200 ns of NC (prompt signal window)
-      3. NC match: validate every photon has a known NC in sim 1
+      2. NC match: validate every photon has a known NC in sim 1 (RuntimeError otherwise)
+      3. Time filter: keep photons with t <= 200 ns of NC (prompt signal window)
       4. NC time window: only count photons from NCs in [1 µs, 200 µs] after muon
 
     Mutates all passed-in accumulator arguments.
@@ -291,6 +305,11 @@ def load_light_run(
         if evtid_m.size == 0:
             continue
 
+        # Wavelength histogram: every NC-matched photon (all NCs, no time/window cut)
+        if wl_nm_m.size > 0:
+            h_wl, _ = np.histogram(wl_nm_m, bins=WL_BINS)
+            all_wl_hist += h_wl
+
         # Compute photon time relative to NC by subtracting sim 1 NC capture time
         nc_time_arr = np.fromiter(
             (nc_time[(int(e), int(t))]
@@ -326,7 +345,6 @@ def load_light_run(
         evtid_t   = evtid_m[time_mask]
         nc_tid_t  = nc_tid_m[time_mask]
         det_uid_t = det_uid_m[time_mask]
-        wl_nm_t   = wl_nm_m[time_mask]
         filter_counts["n_after_time"] += len(evtid_t)
 
         if evtid_t.size == 0:
@@ -341,7 +359,6 @@ def load_light_run(
         evtid_w   = evtid_t[window_mask]
         nc_tid_w  = nc_tid_t[window_mask]
         det_uid_w = det_uid_t[window_mask]
-        wl_nm_w   = wl_nm_t[window_mask]
         filter_counts["n_after_window"] = (
             filter_counts.get("n_after_window", 0) + len(evtid_w)
         )
@@ -359,20 +376,6 @@ def load_light_run(
             evtid_w.tolist(), nc_tid_w.tolist(), det_uid_w.tolist()
         ):
             nc_pmt_set[(int(e_v), int(t_v))].add(int(d_v))
-
-        # Wavelength histograms (accepted photons only)
-        if wl_nm_w.size > 0:
-            h_wl, _ = np.histogram(wl_nm_w, bins=WL_BINS)
-            all_wl_hist += h_wl
-            ge77_wl_mask_w = np.fromiter(
-                ((int(e), int(t)) in ge77_nc_set
-                 for e, t in zip(evtid_w.tolist(), nc_tid_w.tolist())),
-                dtype=bool, count=len(evtid_w),
-            )
-            wl_ge77_w = wl_nm_w[ge77_wl_mask_w]
-            if wl_ge77_w.size > 0:
-                h_ge77_wl, _ = np.histogram(wl_ge77_w, bins=WL_BINS)
-                ge77_wl_hist += h_ge77_wl
 
     # Build output arrays — one entry per window NC only
     nc_keys_list = sorted(window_nc_set)
@@ -392,11 +395,22 @@ def load_light_run(
     rd.nc_in_germanium = np.array(
         [nc_in_germanium.get(k, False) for k in nc_keys_list], dtype=bool)
 
-    muon_counts = [
-        sum(nc_counter.get(k, 0) for k in keys)
-        for keys in muon_nc.values()
-    ]
-    rd.muon_photon_counts = np.array(muon_counts, dtype=np.int64)
+    # Per NC-producing muon: total photons, distinct PMTs, and Ge77-muon flag.
+    # A muon is a Ge77 muon if ANY of its NCs (any time) carries the Ge77 flag
+    # (matches analyseMusunNCs's ge77_evtids / nc_is_ge77mu definition).
+    muon_photon_counts: list[int] = []
+    muon_pmt_counts:    list[int] = []
+    muon_is_ge77:       list[bool] = []
+    for keys in muon_nc.values():
+        muon_photon_counts.append(sum(nc_counter.get(k, 0) for k in keys))
+        pmts: set = set()
+        for k in keys:
+            pmts |= nc_pmt_set.get(k, set())
+        muon_pmt_counts.append(len(pmts))
+        muon_is_ge77.append(any(nc_ge77.get(k, 0) == 1 for k in keys))
+    rd.muon_photon_counts = np.array(muon_photon_counts, dtype=np.int64)
+    rd.muon_pmt_counts    = np.array(muon_pmt_counts,    dtype=np.int64)
+    rd.muon_is_ge77       = np.array(muon_is_ge77,       dtype=bool)
 
     return rd
 
@@ -521,14 +535,18 @@ def plot_light_per_nc(light_run_list: list[LightRunData], out_dir: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Photon count per NC: Ge77 vs non-Ge77
+# Photon count per muon: Ge77 muons vs non-Ge77 muons
 # ---------------------------------------------------------------------------
 def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Path) -> None:
-    """Photon count per NC: Ge77 NCs vs non-Ge77 NCs, density + ratio panel."""
-    parts_ge77   = [rd.nc_photon_counts[rd.nc_is_ge77]
-                    for rd in light_run_list if rd.nc_photon_counts.size > 0]
-    parts_noge77 = [rd.nc_photon_counts[~rd.nc_is_ge77]
-                    for rd in light_run_list if rd.nc_photon_counts.size > 0]
+    """Photon count per muon: Ge77 muons vs non-Ge77 muons, density + ratio panel.
+
+    A Ge77 muon is a muon with at least one Ge77-flagged NC; photon counts are
+    summed over each muon's window NCs (per-muon aggregate).
+    """
+    parts_ge77   = [rd.muon_photon_counts[rd.muon_is_ge77]
+                    for rd in light_run_list if rd.muon_photon_counts.size > 0]
+    parts_noge77 = [rd.muon_photon_counts[~rd.muon_is_ge77]
+                    for rd in light_run_list if rd.muon_photon_counts.size > 0]
     if not parts_ge77 and not parts_noge77:
         return
 
@@ -543,11 +561,11 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
     bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle("Photon count per NC: Ge77 NCs vs non-Ge77 NCs", fontsize=13)
+    fig.suptitle("Photon count per muon: Ge77 muons vs non-Ge77 muons", fontsize=13)
 
     for data, label, color in [
-        (noge77_counts, "Non-Ge77 NCs", COLORS["blue"]),
-        (ge77_counts,   "Ge77 NCs",     COLORS["red"]),
+        (noge77_counts, "Non-Ge77 muons", COLORS["blue"]),
+        (ge77_counts,   "Ge77 muons",     COLORS["red"]),
     ]:
         d_pos  = data[data > 0]
         n_zero = int((data == 0).sum())
@@ -558,7 +576,7 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
                      label=f"{label}  (N>0={d_pos.size:,}, zero={n_zero:,})")
     axes[0].set_xscale("log")
     axes[0].set_yscale("log")
-    axes[0].set_xlabel("Photon count per NC (>0)", fontsize=12)
+    axes[0].set_xlabel("Photon count per muon (>0)", fontsize=12)
     axes[0].set_ylabel("Probability density", fontsize=12)
     axes[0].set_title("Density comparison", fontsize=12)
     axes[0].legend(fontsize=10)
@@ -582,7 +600,7 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
                          elinewidth=0.8, capsize=3)
     axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
     axes[1].set_xscale("log")
-    axes[1].set_xlabel("Photon count per NC (>0)", fontsize=12)
+    axes[1].set_xlabel("Photon count per muon (>0)", fontsize=12)
     axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
     axes[1].legend(fontsize=10)
@@ -596,11 +614,12 @@ def plot_photon_count_comparison(light_run_list: list[LightRunData], out_dir: Pa
 # PMT multiplicity per NC
 # ---------------------------------------------------------------------------
 def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> None:
-    """Distinct PMTs per NC (det_uid count): Ge77 vs non-Ge77, density + ratio panel."""
-    parts_ge77   = [rd.nc_pmt_counts[rd.nc_is_ge77]
-                    for rd in light_run_list if rd.nc_pmt_counts.size > 0]
-    parts_noge77 = [rd.nc_pmt_counts[~rd.nc_is_ge77]
-                    for rd in light_run_list if rd.nc_pmt_counts.size > 0]
+    """Distinct PMTs per muon (det_uid count unioned over the muon's window NCs):
+    Ge77 muons vs non-Ge77 muons, density + ratio panel."""
+    parts_ge77   = [rd.muon_pmt_counts[rd.muon_is_ge77]
+                    for rd in light_run_list if rd.muon_pmt_counts.size > 0]
+    parts_noge77 = [rd.muon_pmt_counts[~rd.muon_is_ge77]
+                    for rd in light_run_list if rd.muon_pmt_counts.size > 0]
     if not parts_ge77 and not parts_noge77:
         return
 
@@ -614,11 +633,11 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
     bins = np.arange(0, max_pmt + 2) - 0.5
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle("Distinct PMTs per NC: Ge77 vs non-Ge77", fontsize=13)
+    fig.suptitle("Distinct PMTs per muon: Ge77 muons vs non-Ge77 muons", fontsize=13)
 
     for data, label, color in [
-        (noge77_pmt, "Non-Ge77 NCs", COLORS["blue"]),
-        (ge77_pmt,   "Ge77 NCs",     COLORS["red"]),
+        (noge77_pmt, "Non-Ge77 muons", COLORS["blue"]),
+        (ge77_pmt,   "Ge77 muons",     COLORS["red"]),
     ]:
         if data.size == 0:
             continue
@@ -626,7 +645,7 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
                      edgecolor="black", linewidth=0.3,
                      label=f"{label}  (N={data.size:,})")
     axes[0].set_yscale("log")
-    axes[0].set_xlabel("Distinct PMTs per NC", fontsize=12)
+    axes[0].set_xlabel("Distinct PMTs per muon", fontsize=12)
     axes[0].set_ylabel("Probability density", fontsize=12)
     axes[0].set_title("Density comparison", fontsize=12)
     axes[0].legend(fontsize=10)
@@ -649,7 +668,7 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
                          fmt="o-", color=COLORS["red"], markersize=4, linewidth=1.2,
                          elinewidth=0.8, capsize=3)
     axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
-    axes[1].set_xlabel("Distinct PMTs per NC", fontsize=12)
+    axes[1].set_xlabel("Distinct PMTs per muon", fontsize=12)
     axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
     axes[1].legend(fontsize=10)
@@ -660,127 +679,37 @@ def plot_pmt_multiplicity(light_run_list: list[LightRunData], out_dir: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# Time distribution panel (pre-filter, full range + signal zoom)
+# Wavelength of all NC photons
 # ---------------------------------------------------------------------------
-def plot_time_distribution_panel(
-    all_times_hist: np.ndarray,
-    ge77_times_hist: np.ndarray,
-    out_dir: Path,
-) -> None:
-    """Two-panel: full time range with cut marked | zoom on 0–250 ns signal window."""
-    if all_times_hist.sum() == 0:
-        return
-
-    bin_centers = 0.5 * (TIME_HIST_BINS[:-1] + TIME_HIST_BINS[1:])
-    bin_width   = TIME_HIST_BINS[1] - TIME_HIST_BINS[0]
-    cut_idx     = int(np.searchsorted(TIME_HIST_BINS, TIME_FILTER_NS, side="left"))
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle(
-        "Photon time relative to NC  (all PMT photons, before 200 ns filter)",
-        fontsize=13,
-    )
-
-    ax = axes[0]
-    ax.bar(bin_centers, all_times_hist, width=bin_width,
-           color=COLORS["blue"], alpha=0.75, linewidth=0, label="All PMT photons")
-    if ge77_times_hist.sum() > 0:
-        ax.bar(bin_centers, ge77_times_hist, width=bin_width,
-               color=COLORS["red"], alpha=0.60, linewidth=0, label="Ge77 NC photons")
-    ax.bar(bin_centers[cut_idx:], all_times_hist[cut_idx:], width=bin_width,
-           color="gray", alpha=0.45, linewidth=0,
-           label=f"Removed (t > {TIME_FILTER_NS:.0f} ns)")
-    ax.axvline(TIME_FILTER_NS, color="red", linestyle="--", linewidth=1.5,
-               label=f"{TIME_FILTER_NS:.0f} ns cut")
-    ax.set_yscale("log")
-    ax.set_xlabel("Photon time relative to NC  [ns]", fontsize=12)
-    ax.set_ylabel("Photon count", fontsize=12)
-    ax.set_title("Full range  (\u221250 to 2000 ns)", fontsize=12)
-    ax.legend(fontsize=10)
-    ax.tick_params(labelsize=10)
-
-    ax2 = axes[1]
-    zoom_mask = (bin_centers >= -10) & (bin_centers <= 250)
-    ax2.bar(bin_centers[zoom_mask], all_times_hist[zoom_mask], width=bin_width,
-            color=COLORS["blue"], alpha=0.75, linewidth=0, label="All PMT photons")
-    if ge77_times_hist.sum() > 0:
-        ax2.bar(bin_centers[zoom_mask], ge77_times_hist[zoom_mask], width=bin_width,
-                color=COLORS["red"], alpha=0.60, linewidth=0, label="Ge77 NC photons")
-    ax2.axvspan(0, TIME_FILTER_NS, alpha=0.07, color="green")
-    ax2.axvline(TIME_FILTER_NS, color="red", linestyle="--", linewidth=1.5,
-                label=f"Signal window: 0\u2013{TIME_FILTER_NS:.0f} ns")
-    ax2.set_xlabel("Photon time relative to NC  [ns]", fontsize=12)
-    ax2.set_ylabel("Photon count", fontsize=12)
-    ax2.set_title("Signal window zoom  (\u221210 to 250 ns)", fontsize=12)
-    ax2.legend(fontsize=10)
-    ax2.tick_params(labelsize=10)
-
-    plt.tight_layout()
-    _save(fig, out_dir / "time_distribution_panel.png")
-
-
-# ---------------------------------------------------------------------------
-# Wavelength distribution
-# ---------------------------------------------------------------------------
-def plot_wavelength_distribution(
+def plot_wavelength_all_ncs(
     all_wl_hist: np.ndarray,
-    ge77_wl_hist: np.ndarray,
     out_dir: Path,
 ) -> None:
-    """Wavelength of accepted photons: all vs Ge77 NC photons, density + ratio."""
+    """Histogram of the wavelengths of every NC-matched photon (all NCs).
+
+    Includes all photons that pass the PMT mask and have a matching NC in sim 1
+    (before the 200 ns time cut and the muon time window).  A photon that passes
+    the PMT mask without a matching NC already raises a RuntimeError during
+    loading, so this histogram covers every NC photon.
+    """
     if all_wl_hist.sum() == 0:
         return
 
     wl_centers = 0.5 * (WL_BINS[:-1] + WL_BINS[1:])
     bin_width  = WL_BINS[1] - WL_BINS[0]
     n_all      = int(all_wl_hist.sum())
-    n_ge77     = int(ge77_wl_hist.sum())
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(
-        "Wavelength of accepted photons  (t \u2264 200 ns, NC in [1 \u00b5s, 200 \u00b5s])",
-        fontsize=13,
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(wl_centers, all_wl_hist, width=bin_width, color=COLORS["blue"],
+           alpha=0.80, linewidth=0)
+    ax.set_xlabel("Wavelength  [nm]", fontsize=13)
+    ax.set_ylabel("Photon count", fontsize=13)
+    ax.set_title(
+        f"Wavelength of all NC photons  (NC-matched, N = {n_all:,})",
+        fontsize=14,
     )
-
-    ax = axes[0]
-    for hist, label, color, n in [
-        (all_wl_hist,  f"All accepted  (N={n_all:,})",       COLORS["blue"], n_all),
-        (ge77_wl_hist, f"Ge77 NC photons  (N={n_ge77:,})",  COLORS["red"],  n_ge77),
-    ]:
-        if n == 0:
-            continue
-        density = hist / (n * bin_width)
-        ax.bar(wl_centers, density, width=bin_width, color=color, alpha=0.70,
-               linewidth=0, label=label)
-    ax.set_xlabel("Wavelength  [nm]", fontsize=12)
-    ax.set_ylabel("Probability density  [nm\u207b\u00b9]", fontsize=12)
-    ax.set_title("Normalised density", fontsize=12)
-    ax.legend(fontsize=10)
-    ax.tick_params(labelsize=10)
-
-    ax2 = axes[1]
-    if n_all > 0 and n_ge77 > 0:
-        p_all  = all_wl_hist  / (n_all  * bin_width)
-        p_ge77 = ge77_wl_hist / (n_ge77 * bin_width)
-        valid  = p_all > 0
-        ratio  = np.where(valid, p_ge77 / np.where(valid, p_all, 1.0), np.nan)
-        sigma  = np.where(
-            valid & (ge77_wl_hist > 0),
-            ratio / np.sqrt(ge77_wl_hist.astype(float)), np.nan,
-        )
-        mask = valid & np.isfinite(ratio)
-        if mask.any():
-            ax2.errorbar(wl_centers[mask], ratio[mask], yerr=sigma[mask],
-                         fmt="o-", color=COLORS["red"], markersize=3, linewidth=1.2,
-                         elinewidth=0.7, capsize=2)
-    ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1.0)
-    ax2.set_xlabel("Wavelength  [nm]", fontsize=12)
-    ax2.set_ylabel("Density ratio  Ge77 / all", fontsize=12)
-    ax2.set_title("Density ratio  Ge77 / all accepted", fontsize=12)
-    ax2.tick_params(labelsize=10)
-
-    plt.tight_layout()
-    _save(fig, out_dir / "wavelength_distribution.png")
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "wavelength_all_ncs.png")
 
 
 # ---------------------------------------------------------------------------
@@ -901,94 +830,6 @@ def plot_ge77_light(
         ax4.legend(fontsize=11)
         ax4.tick_params(labelsize=11)
         _save(fig4, out_dir / "ge77_photon_time_distribution.png")
-
-# ---------------------------------------------------------------------------
-# Germanium NC positions vs Ge77 flag
-# ---------------------------------------------------------------------------
-def plot_germanium_nc_positions(
-    light_run_list: list[LightRunData],
-    out_dir: Path,
-) -> None:
-    """3-D NC positions for EnrichedGermanium0.913 NCs, coloured by Ge77 flag.
-
-    Annotates how many germanium NCs carry no Ge77 flag (other Ge isotopes)
-    and raises a warning if any Ge77-flagged NC falls outside germanium.
-    """
-    has_ge = [rd for rd in light_run_list if rd.nc_in_germanium.any()]
-    if not has_ge:
-        print("  No NCs in EnrichedGermanium0.913 found — skipping plot.")
-        return
-
-    # All window NCs
-    all_ge_mask   = np.concatenate([rd.nc_in_germanium for rd in light_run_list])
-    all_ge77_mask = np.concatenate([rd.nc_is_ge77      for rd in light_run_list])
-    all_x = np.concatenate([rd.nc_x_m for rd in light_run_list])
-    all_y = np.concatenate([rd.nc_y_m for rd in light_run_list])
-    all_z = np.concatenate([rd.nc_z_m for rd in light_run_list])
-
-    n_total_ncs   = len(all_ge_mask)
-    n_ge_mat      = int(all_ge_mask.sum())
-    n_ge77_total  = int(all_ge77_mask.sum())
-
-    # NCs in germanium split by Ge77 flag
-    ge_ge77     = all_ge_mask &  all_ge77_mask   # in Ge AND ge77-flagged
-    ge_not_ge77 = all_ge_mask & ~all_ge77_mask   # in Ge but NOT ge77-flagged
-    # Ge77-flagged NCs NOT in germanium (should be 0 by RuntimeError in loader)
-    ge77_not_ge = ~all_ge_mask & all_ge77_mask
-
-    n_ge_ge77     = int(ge_ge77.sum())
-    n_ge_not_ge77 = int(ge_not_ge77.sum())
-    n_ge77_not_ge = int(ge77_not_ge.sum())
-
-    fig = plt.figure(figsize=(12, 9))
-    ax  = fig.add_subplot(111, projection="3d")
-
-    for mask, color, label in [
-        (ge_not_ge77, COLORS["blue"], f"In Ge, no Ge77 flag  ({n_ge_not_ge77:,})"),
-        (ge_ge77,     COLORS["red"],  f"In Ge + Ge77 flag  ({n_ge_ge77:,})"),
-    ]:
-        if mask.any():
-            ax.scatter(
-                all_x[mask] * 1000, all_y[mask] * 1000, all_z[mask] * 1000,
-                c=color, s=15, alpha=0.65, edgecolors="none", label=label,
-            )
-
-    ax.set_xlabel("X [mm]", fontsize=11)
-    ax.set_ylabel("Y [mm]", fontsize=11)
-    ax.set_zlabel("Z [mm]", fontsize=11)
-    ax.set_title(
-        f"NCs in EnrichedGermanium0.913  (window NCs only,  N_Ge = {n_ge_mat:,} / {n_total_ncs:,})",
-        fontsize=12,
-    )
-    ax.legend(fontsize=10, loc="upper right")
-
-    # Annotation note
-    note_lines = [
-        f"Total window NCs:          {n_total_ncs:,}",
-        f"In EnrichedGermanium0.913: {n_ge_mat:,}",
-        f"  of which Ge77-flagged:   {n_ge_ge77:,}",
-        f"  of which other Ge isotope: {n_ge_not_ge77:,}",
-    ]
-    if n_ge77_not_ge > 0:
-        note_lines.append(
-            f"WARNING: {n_ge77_not_ge:,} Ge77-flagged NC(s) NOT in EnrichedGermanium0.913!"
-        )
-    elif n_ge_ge77 == n_ge77_total:
-        note_lines.append("All Ge77-flagged NCs are within EnrichedGermanium0.913 ✓")
-    else:
-        note_lines.append(
-            f"Ge77 in window: {n_ge_ge77:,} / {n_ge77_total:,} total Ge77 NCs "
-            f"({n_ge77_total - n_ge_ge77:,} outside [1µs, 200µs] window)"
-        )
-
-    ax.text2D(
-        0.01, 0.01, "\n".join(note_lines),
-        transform=ax.transAxes, ha="left", va="bottom", fontsize=9,
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.85),
-    )
-
-    _save(fig, out_dir / "germanium_nc_positions_3d.png")
-
 
 # ---------------------------------------------------------------------------
 # Statistics
@@ -1112,7 +953,6 @@ def main() -> None:
     ge77_times_hist = np.zeros(n_bins, dtype=np.int64)
     n_wl_bins = len(WL_BINS) - 1
     all_wl_hist  = np.zeros(n_wl_bins, dtype=np.int64)
-    ge77_wl_hist = np.zeros(n_wl_bins, dtype=np.int64)
 
     # Load all runs
     light_run_list: list[LightRunData] = []
@@ -1127,7 +967,7 @@ def main() -> None:
             run_dir_2, run_dir_1,
             global_pmt_uids, filter_counts,
             all_times_hist, ge77_times_hist,
-            all_wl_hist, ge77_wl_hist,
+            all_wl_hist,
         )
         light_run_list.append(lrd)
         _log_resources(f"run {run_name} done", t_main)
@@ -1159,15 +999,10 @@ def main() -> None:
     plot_ge77_light(light_run_list, ge77_times_hist, out_dir)
     _log_resources("Ge77 plots done", t_main)
 
-    print("\n--- Germanium NC positions ---")
-    plot_germanium_nc_positions(light_run_list, out_dir)
-    _log_resources("germanium NC positions done", t_main)
-
     print("\n--- Comparison plots ---")
     plot_photon_count_comparison(light_run_list, out_dir)
     plot_pmt_multiplicity(light_run_list, out_dir)
-    plot_time_distribution_panel(all_times_hist, ge77_times_hist, out_dir)
-    plot_wavelength_distribution(all_wl_hist, ge77_wl_hist, out_dir)
+    plot_wavelength_all_ncs(all_wl_hist, out_dir)
     _log_resources("comparison plots done", t_main)
 
     write_statistics(
