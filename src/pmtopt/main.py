@@ -66,8 +66,8 @@ from pmtopt.data_loading import (
 )
 from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
-    plot_selected_voxels, plot_muon_nc_histogram, plot_hit_heatmap,
-    plot_marginal_gain_heatmap, plot_ssd_voxels_3d,
+    plot_selected_voxels, plot_selected_voxels_grid, plot_muon_nc_histogram,
+    plot_hit_heatmap, plot_marginal_gain_heatmap, plot_ssd_voxels_3d,
 )
 from pmtopt.ratio_scaling import write_ratio_hdf5, fmt_ratio_filename
 from pmtopt.sensitivity import run_sensitivity
@@ -808,14 +808,37 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
     parser.add_argument(
         "json_files", nargs="+", type=str,
         help="One or more paths to JSON voxel selection files. "
-             "The PNG is saved next to each JSON with the same stem.",
+             "A single file produces one PNG next to the JSON; two or more "
+             "files are tiled into combined grid figure(s) (4 / 2 / 1 panels "
+             "per figure).",
     )
     parser.add_argument(
         "--title", type=str, default=None,
-        help="Custom title suffix for all plots. If not set, uses "
-             "config metadata from the JSON (N, efficiency, etc.).",
+        help="Custom title suffix for the single-file plot. If not set, uses "
+             "config metadata from the JSON (N, efficiency, etc.). "
+             "Ignored when multiple files are given (use --labels).",
+    )
+    parser.add_argument(
+        "--labels", nargs="*", default=None, metavar="LABEL",
+        help="Display labels for the combined grid panels (same order as the "
+             "JSON files). Missing labels fall back to the file stem.",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Directory for the combined grid figure(s). "
+             "Default: the directory of the first JSON file.",
+    )
+    parser.add_argument(
+        "--name", type=str, default="combined_grid",
+        help="Base filename for the combined grid figure(s). Multiple "
+             "figures are suffixed _01, _02, ...",
     )
     args = parser.parse_args(argv)
+
+    # --- Multiple files: combined grid figure(s) ---
+    if len(args.json_files) >= 2:
+        _run_plot_grid(args)
+        return
 
     for json_path_str in args.json_files:
         json_path = Path(json_path_str)
@@ -866,6 +889,52 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
                              output_path=png_path, title_extra=title_extra,
                              w2=_plot_w2)
         print(f"  -> {png_path}")
+
+
+def _run_plot_grid(args) -> None:
+    """Load ≥2 JSON selections and tile them into combined grid figure(s)."""
+    from pmtopt.homogeneous import compute_wasserstein_homogeneity, get_w2_ref
+
+    if args.labels and len(args.labels) != len(args.json_files):
+        print(f"WARNING: got {len(args.labels)} labels for "
+              f"{len(args.json_files)} files; missing labels use the file stem.")
+
+    setups: list[dict] = []
+    for i, json_path_str in enumerate(args.json_files):
+        json_path = Path(json_path_str)
+        if not json_path.exists():
+            print(f"ERROR: file not found: {json_path}", file=sys.stderr)
+            continue
+
+        with open(json_path) as jf:
+            data = json.load(jf)
+
+        selected_voxels = data.get("selected_voxels", [])
+        if not selected_voxels:
+            print(f"WARNING: no selected_voxels in {json_path.name}, skipping.")
+            continue
+
+        centers = np.array([v["center"] for v in selected_voxels], dtype=float)
+        layers = np.array([v["layer"] for v in selected_voxels])
+        label = (args.labels[i]
+                 if args.labels and i < len(args.labels)
+                 else json_path.stem)
+
+        w2 = None
+        if len(centers) >= 2:
+            w2 = compute_wasserstein_homogeneity(
+                centers, reference=get_w2_ref())["w2"]
+
+        setups.append({"centers": centers, "layers": layers,
+                       "label": label, "w2": w2})
+
+    if not setups:
+        print("ERROR: no valid selections to plot.", file=sys.stderr)
+        return
+
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else Path(args.json_files[0]).resolve().parent)
+    plot_selected_voxels_grid(setups, output_dir, name=args.name)
 
 
 def run_plot_hits(argv: Optional[list[str]] = None) -> None:
