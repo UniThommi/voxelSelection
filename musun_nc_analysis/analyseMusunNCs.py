@@ -1145,6 +1145,45 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ge77 NC positions (3-D)
+# ---------------------------------------------------------------------------
+def plot_ge77_nc_positions_3d(agg: dict, out_dir: Path) -> None:
+    """3-D scatter of Ge77 NC positions (single colour).
+
+    Mirrors the ``ge77_nc_positions_3d`` plot in
+    ``lightAnalysisHomogeneousPMTs.py``, but without the photon-count colour
+    split (no optical data here).  Selects NCs with the per-NC Ge77 flag
+    (nc_ge77 == 1).  Positions are reconstructed from the cylindrical
+    coordinates stored in ``agg`` (r, phi, z).
+    """
+    nc_ge77 = agg["nc_ge77"]
+    if nc_ge77.size == 0:
+        return
+
+    ge77_mask = nc_ge77 == 1
+    n_ge77 = int(ge77_mask.sum())
+    if n_ge77 == 0:
+        print("  No Ge77 NCs found — skipping Ge77 3-D position plot.")
+        return
+
+    r_mm   = agg["nc_r_m"][ge77_mask] * 1e3
+    phi    = agg["nc_phi_rad"][ge77_mask]
+    z_mm   = agg["nc_z_m"][ge77_mask] * 1e3
+    x_mm   = r_mm * np.cos(phi)
+    y_mm   = r_mm * np.sin(phi)
+
+    fig = plt.figure(figsize=(12, 9))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(x_mm, y_mm, z_mm,
+               c="gray", s=15, alpha=0.6, edgecolors="none")
+    ax.set_xlabel("X [mm]", fontsize=11)
+    ax.set_ylabel("Y [mm]", fontsize=11)
+    ax.set_zlabel("Z [mm]", fontsize=11)
+    ax.set_title(f"Ge77 NC positions  (N = {n_ge77:,})", fontsize=13)
+    _save(fig, out_dir / "ge77_nc_positions_3d.png")
+
+
+# ---------------------------------------------------------------------------
 # NC material distribution
 # ---------------------------------------------------------------------------
 def plot_nc_material_distribution(run_list: list[RunData], out_dir: Path) -> None:
@@ -2608,6 +2647,8 @@ def main() -> None:
     _log_resources("plot_nc_times", t_main)
     plot_nc_positions(agg, out_dir)
     _log_resources("plot_nc_positions", t_main)
+    plot_ge77_nc_positions_3d(agg, out_dir)
+    _log_resources("plot_ge77_nc_positions_3d", t_main)
     plot_nc_material_distribution(run_list, out_dir)
     _log_resources("plot_nc_material_distribution", t_main)
     plot_nc_gamma_count(agg, out_dir)
