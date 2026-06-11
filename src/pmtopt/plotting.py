@@ -21,20 +21,25 @@ from .geometry import (
 )
 
 
-def plot_selected_voxels(
+def _draw_voxels_on_ax(
+    ax,
     selected_centers: np.ndarray,
     selected_layers: np.ndarray,
-    selected_ids: list[str],
-    output_path: Path,
-    title_extra: str = "",
-    w2: "float | None" = None,
-) -> None:
-    """3D scatter plot of selected voxel positions."""
+    *,
+    title: "str | None" = None,
+    legend_boundaries: bool = True,
+    legend_fontsize: int = 10,
+    label_fontsize: int = 13,
+    title_fontsize: int = 13,
+) -> tuple[list[int], list[tuple[int, int, float]]]:
+    """Render the 3D detector scatter of selected voxels onto an existing axis.
+
+    PMTs are colored/marked per area; the per-area count appears only in the
+    legend label. Returns ``(boundary_failures, distance_violations)`` so the
+    caller can report or fold the counts into a title.
+    """
     Z_BASE = Z_BASE_GLOBAL
     Z_TOP = Z_BASE + H_ZYLINDER
-
-    fig = plt.figure(figsize=(14, 10))
-    ax = fig.add_subplot(111, projection="3d")
 
     theta = np.linspace(0, 2 * np.pi, 200)
     n_vert = 24
@@ -47,11 +52,13 @@ def plot_selected_voxels(
         ax.plot([R_ZYLINDER * np.cos(t)] * 2, [R_ZYLINDER * np.sin(t)] * 2,
                 [Z_BASE, Z_TOP], color="gray", alpha=0.3, linewidth=0.5)
 
-    ax.plot(R_PIT * np.cos(theta), R_PIT * np.sin(theta), Z_BASE,
-            color="blue", alpha=0.7, linewidth=1.2, label=f"Pit boundary (r = {R_PIT} mm)")
-    ax.plot(R_ZYL_BOT * np.cos(theta), R_ZYL_BOT * np.sin(theta), Z_BASE,
-            color="green", alpha=0.7, linewidth=1.2,
-            label=f"Bot inner boundary (r = {R_ZYL_BOT} mm)")
+    pit_kw = dict(color="blue", alpha=0.7, linewidth=1.2)
+    bot_kw = dict(color="green", alpha=0.7, linewidth=1.2)
+    if legend_boundaries:
+        pit_kw["label"] = f"Pit boundary (r = {R_PIT} mm)"
+        bot_kw["label"] = f"Bot inner boundary (r = {R_ZYL_BOT} mm)"
+    ax.plot(R_PIT * np.cos(theta), R_PIT * np.sin(theta), Z_BASE, **pit_kw)
+    ax.plot(R_ZYL_BOT * np.cos(theta), R_ZYL_BOT * np.sin(theta), Z_BASE, **bot_kw)
 
     layer_markers = {"pit": "o", "bot": "s", "top": "^", "wall": "D"}
     layer_colors = {"pit": "#1f77b4", "bot": "#2ca02c", "top": "#ff7f0e", "wall": "#d62728"}
@@ -68,7 +75,7 @@ def plot_selected_voxels(
             pts[:, 0], pts[:, 1], pts[:, 2],
             c=color, marker=layer_markers.get(layer, "o"),
             s=40, alpha=0.85, edgecolors=edge_color, linewidths=0.5,
-            label=f"{layer.capitalize()}  (N = {mask.sum()})",
+            label=f"{layer.capitalize()}  (N = {int(mask.sum())})",
         )
 
     boundary_failures = []
@@ -103,10 +110,59 @@ def plot_selected_voxels(
                 color="red", linewidth=2, alpha=0.8,
             )
 
-    ax.set_xlabel("x (mm)", fontsize=13, labelpad=8)
-    ax.set_ylabel("y (mm)", fontsize=13, labelpad=8)
-    ax.set_zlabel("z (mm)", fontsize=13, labelpad=8)
-    ax.tick_params(axis="both", labelsize=10)
+    ax.set_xlabel("x (mm)", fontsize=label_fontsize, labelpad=8)
+    ax.set_ylabel("y (mm)", fontsize=label_fontsize, labelpad=8)
+    ax.set_zlabel("z (mm)", fontsize=label_fontsize, labelpad=8)
+    ax.tick_params(axis="both", labelsize=max(8, label_fontsize - 3))
+
+    if title is not None:
+        ax.set_title(title, fontsize=title_fontsize, pad=12)
+
+    ax.legend(loc="upper left", fontsize=legend_fontsize, framealpha=0.85)
+
+    max_range = max(R_ZYLINDER, (Z_TOP - Z_BASE) / 2)
+    mid_z = (Z_BASE + Z_TOP) / 2
+    ax.set_xlim(-max_range, max_range)
+    ax.set_ylim(-max_range, max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+    return boundary_failures, distance_violations
+
+
+def _print_selection_stats(
+    selected_centers: np.ndarray,
+    selected_layers: np.ndarray,
+    boundary_failures: list[int],
+    distance_violations: list[tuple[int, int, float]],
+) -> None:
+    """Print boundary/distance checks and per-area extent for a selection."""
+    print(f"  Boundary check: {'PASS' if not boundary_failures else 'FAIL'}")
+    print(f"  Distance check: {'PASS' if not distance_violations else 'FAIL'}")
+    for layer in ["pit", "bot", "top", "wall"]:
+        count = np.sum(selected_layers == layer)
+        if count > 0:
+            pts = selected_centers[selected_layers == layer]
+            r_vals = np.sqrt(pts[:, 0]**2 + pts[:, 1]**2)
+            print(f"  {layer:>4}: {count:>4} voxels "
+                  f"(r: {r_vals.min():.0f}-{r_vals.max():.0f} mm, "
+                  f"z: {pts[:, 2].min():.0f}-{pts[:, 2].max():.0f} mm)")
+
+
+def plot_selected_voxels(
+    selected_centers: np.ndarray,
+    selected_layers: np.ndarray,
+    selected_ids: list[str],
+    output_path: Path,
+    title_extra: str = "",
+    w2: "float | None" = None,
+) -> None:
+    """3D scatter plot of selected voxel positions."""
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection="3d")
+
+    boundary_failures, distance_violations = _draw_voxels_on_ax(
+        ax, selected_centers, selected_layers, title=None,
+    )
 
     title_parts = [f"Selected PMT Positions  (N = {len(selected_centers)})"]
     if w2 is not None:
@@ -119,29 +175,90 @@ def plot_selected_voxels(
     title_str = title_line1 + (f"\n{title_extra}" if title_extra else "")
     ax.set_title(title_str, fontsize=13, pad=12)
 
-    ax.legend(loc="upper left", fontsize=10, framealpha=0.85)
-
-    max_range = max(R_ZYLINDER, (Z_TOP - Z_BASE) / 2)
-    mid_z = (Z_BASE + Z_TOP) / 2
-    ax.set_xlim(-max_range, max_range)
-    ax.set_ylim(-max_range, max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
-
     plt.tight_layout()
     plt.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close()
 
     print(f"\nPlot saved to {output_path}")
-    print(f"  Boundary check: {'PASS' if not boundary_failures else 'FAIL'}")
-    print(f"  Distance check: {'PASS' if not distance_violations else 'FAIL'}")
-    for layer in ["pit", "bot", "top", "wall"]:
-        count = np.sum(selected_layers == layer)
-        if count > 0:
-            pts = selected_centers[selected_layers == layer]
-            r_vals = np.sqrt(pts[:, 0]**2 + pts[:, 1]**2)
-            print(f"  {layer:>4}: {count:>4} voxels "
-                  f"(r: {r_vals.min():.0f}-{r_vals.max():.0f} mm, "
-                  f"z: {pts[:, 2].min():.0f}-{pts[:, 2].max():.0f} mm)")
+    _print_selection_stats(selected_centers, selected_layers,
+                           boundary_failures, distance_violations)
+
+
+# Allowed panels-per-figure and their grid shapes / figure sizes.
+_GRID_LAYOUT = {4: (2, 2), 2: (1, 2), 1: (1, 1)}
+_GRID_FIGSIZE = {4: (20, 16), 2: (22, 9), 1: (14, 10)}
+
+
+def _pack_group_sizes(n: int) -> list[int]:
+    """Split *n* setups into figures of 4, 2, or 1 panels (never 3).
+
+    Greedy-by-4, then the remainder: 3 → [2, 1]; 2 → [2]; 1 → [1].
+    """
+    if n <= 0:
+        return []
+    groups = [4] * (n // 4)
+    rem = n % 4
+    if rem == 3:
+        groups += [2, 1]
+    elif rem in (1, 2):
+        groups.append(rem)
+    return groups
+
+
+def plot_selected_voxels_grid(
+    setups: list[dict],
+    output_dir: Path,
+    name: str = "combined_grid",
+) -> list[Path]:
+    """Tile multiple selections into grid figures (4 / 2 / 1 panels each).
+
+    Each entry of *setups* is a dict with keys ``centers`` (N×3 array),
+    ``layers`` (N array), ``label`` (str) and optional ``w2`` (float). Each
+    panel reuses the standard 3D detector scatter with a per-panel legend
+    (per-area counts) and a per-panel title (label, N, W₂).
+
+    Returns the list of written PNG paths.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sizes = _pack_group_sizes(len(setups))
+    n_figs = len(sizes)
+    written: list[Path] = []
+
+    cursor = 0
+    for fig_idx, size in enumerate(sizes):
+        nrows, ncols = _GRID_LAYOUT[size]
+        fig = plt.figure(figsize=_GRID_FIGSIZE[size])
+
+        for panel in range(size):
+            s = setups[cursor + panel]
+            centers = s["centers"]
+            layers = s["layers"]
+            ax = fig.add_subplot(nrows, ncols, panel + 1, projection="3d")
+
+            title_parts = [str(s["label"]), f"N = {len(centers)}"]
+            if s.get("w2") is not None:
+                title_parts.append(f"W₂ = {s['w2']:.1f} mm")
+            title = "   |   ".join(title_parts)
+
+            _draw_voxels_on_ax(
+                ax, centers, layers, title=title,
+                legend_boundaries=False,
+                legend_fontsize=8, label_fontsize=10, title_fontsize=12,
+            )
+
+        cursor += size
+
+        out_name = f"{name}.png" if n_figs == 1 else f"{name}_{fig_idx + 1:02d}.png"
+        out_path = output_dir / out_name
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        written.append(out_path)
+        print(f"Grid figure saved to {out_path}  ({size} setup(s))")
+
+    return written
 
 
 def plot_muon_nc_histogram(
