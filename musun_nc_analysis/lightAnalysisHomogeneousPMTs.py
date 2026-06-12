@@ -648,6 +648,7 @@ def plot_photon_count_comparison(
                          elinewidth=0.8, capsize=3)
     axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
     axes[1].set_xscale("log")
+    axes[1].set_yscale("log")
     axes[1].set_xlabel("Photon count per muon (>0)", fontsize=12)
     axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
@@ -725,6 +726,7 @@ def plot_pmt_multiplicity(
                          fmt="o-", color=COLORS["red"], markersize=4, linewidth=1.2,
                          elinewidth=0.8, capsize=3)
     axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
+    axes[1].set_yscale("log")
     axes[1].set_xlabel("Distinct PMTs per muon", fontsize=12)
     axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
