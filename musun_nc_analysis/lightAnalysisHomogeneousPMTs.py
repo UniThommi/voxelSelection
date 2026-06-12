@@ -775,14 +775,15 @@ def plot_cut_comparison_all_muons(
         max_v = int(all_v.max()) if all_v.size > 0 else 1
         bins = np.arange(0, max_v + 2) - 0.5
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharex=True)
+    # Shared x and y axes so both panels use identical scales and limits
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharex=True, sharey=True)
     fig.suptitle(suptitle, fontsize=14)
 
     panels = [
-        (axes[0], cut,   "With 200 ns cut", COLORS["blue"],   False),
-        (axes[1], nocut, "No 200 ns cut",   COLORS["orange"], True),
+        (axes[0], cut,   "With 200 ns cut", COLORS["blue"]),
+        (axes[1], nocut, "No 200 ns cut",   COLORS["orange"]),
     ]
-    for ax, data, label, color, logy in panels:
+    for ax, data, label, color in panels:
         pos = data[data > 0]
         # Log-mode drops the zeros (no log-x bin for 0); int-mode keeps them.
         hist_data = pos if bin_mode == "log" else data
@@ -791,8 +792,7 @@ def plot_cut_comparison_all_muons(
                     edgecolor="black", linewidth=0.3)
         if bin_mode == "log":
             ax.set_xscale("log")
-        if logy:
-            ax.set_yscale("log")
+        ax.set_yscale("log")
 
         if pos.size > 0:
             mean = float(pos.mean())
