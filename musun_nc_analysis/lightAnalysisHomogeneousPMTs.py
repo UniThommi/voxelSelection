@@ -736,6 +736,96 @@ def plot_pmt_multiplicity(
 
 
 # ---------------------------------------------------------------------------
+# All-muon cut vs no-cut comparison (photon yield / PMT multiplicity)
+# ---------------------------------------------------------------------------
+def plot_cut_comparison_all_muons(
+    light_run_list: list[LightRunData], out_dir: Path,
+    *,
+    attr_cut: str,
+    attr_nocut: str,
+    xlabel: str,
+    suptitle: str,
+    out_name: str,
+    bin_mode: str,  # "log" (photon yield) or "int" (PMT multiplicity)
+) -> None:
+    """Two-panel comparison over ALL NC-producing muons: with 200 ns cut (left)
+    vs without it (right).  The right (no-cut) panel uses a logarithmic y-axis.
+
+    Each panel is annotated with mean and median (vertical lines) and a title
+    line giving N, the zero-detected fraction, std, and max of the >0 values.
+    """
+    def _concat(attr: str) -> np.ndarray:
+        arrs = [getattr(rd, attr) for rd in light_run_list
+                if getattr(rd, attr).size > 0]
+        return np.concatenate(arrs) if arrs else np.array([], dtype=np.int64)
+
+    cut   = _concat(attr_cut)
+    nocut = _concat(attr_nocut)
+    if cut.size == 0 and nocut.size == 0:
+        return
+
+    # Shared bins so the two panels are directly comparable
+    if bin_mode == "log":
+        all_pos = np.concatenate([cut[cut > 0], nocut[nocut > 0]])
+        if all_pos.size == 0:
+            return
+        bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
+    else:
+        all_v = np.concatenate([cut, nocut])
+        max_v = int(all_v.max()) if all_v.size > 0 else 1
+        bins = np.arange(0, max_v + 2) - 0.5
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharex=True)
+    fig.suptitle(suptitle, fontsize=14)
+
+    panels = [
+        (axes[0], cut,   "With 200 ns cut", COLORS["blue"],   False),
+        (axes[1], nocut, "No 200 ns cut",   COLORS["orange"], True),
+    ]
+    for ax, data, label, color, logy in panels:
+        pos = data[data > 0]
+        # Log-mode drops the zeros (no log-x bin for 0); int-mode keeps them.
+        hist_data = pos if bin_mode == "log" else data
+        if hist_data.size > 0:
+            ax.hist(hist_data, bins=bins, color=color, alpha=0.80,
+                    edgecolor="black", linewidth=0.3)
+        if bin_mode == "log":
+            ax.set_xscale("log")
+        if logy:
+            ax.set_yscale("log")
+
+        if pos.size > 0:
+            mean = float(pos.mean())
+            med  = float(np.median(pos))
+            ax.axvline(mean, color="red", linestyle="--", linewidth=1.5,
+                       label=f"Mean: {mean:.1f}")
+            ax.axvline(med, color="darkred", linestyle=":", linewidth=1.5,
+                       label=f"Median: {med:.0f}")
+            std = float(pos.std())
+            mx  = int(pos.max())
+        else:
+            std, mx = 0.0, 0
+
+        n      = data.size
+        n_zero = int((data == 0).sum())
+        frac   = n_zero / n * 100 if n > 0 else 0.0
+        ax.set_title(
+            f"{label}\n"
+            f"N = {n:,}  |  zero: {n_zero:,} ({frac:.1f}%)  |  "
+            f"std = {std:.1f}  |  max = {mx:,}",
+            fontsize=11,
+        )
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_ylabel("Number of muons", fontsize=12)
+        if pos.size > 0:
+            ax.legend(fontsize=10)
+        ax.tick_params(labelsize=10)
+
+    plt.tight_layout()
+    _save(fig, out_dir / out_name)
+
+
+# ---------------------------------------------------------------------------
 # Ge77 muons with zero detected signal
 # ---------------------------------------------------------------------------
 def plot_ge77_muon_zero_photons(
@@ -1137,20 +1227,24 @@ def main() -> None:
     print("\n--- Comparison plots ---")
     plot_photon_count_comparison(light_run_list, out_dir)
     plot_pmt_multiplicity(light_run_list, out_dir)
-    # No-200ns-cut twins (200 ns photon cut removed; [1 µs, 200 µs] window kept)
-    plot_photon_count_comparison(
+    # All-muon cut vs no-cut comparison (200 ns cut on vs off; window kept)
+    plot_cut_comparison_all_muons(
         light_run_list, out_dir,
-        attr="muon_photon_counts_nocut",
-        title="Photon count per muon: Ge77 vs non-Ge77 muons "
-              "(no 200 ns cut)",
-        out_name="photon_count_ge77_vs_noge77_nocut.png",
+        attr_cut="muon_photon_counts",
+        attr_nocut="muon_photon_counts_nocut",
+        xlabel="Photon count per muon (>0)",
+        suptitle="Photon yield per muon (all muons): 200 ns cut vs no cut",
+        out_name="photon_yield_all_muons_cut_vs_nocut.png",
+        bin_mode="log",
     )
-    plot_pmt_multiplicity(
+    plot_cut_comparison_all_muons(
         light_run_list, out_dir,
-        attr="muon_pmt_counts_nocut",
-        title="Distinct PMTs per muon: Ge77 vs non-Ge77 muons "
-              "(no 200 ns cut)",
-        out_name="pmt_multiplicity_ge77_vs_noge77_nocut.png",
+        attr_cut="muon_pmt_counts",
+        attr_nocut="muon_pmt_counts_nocut",
+        xlabel="Distinct PMTs per muon",
+        suptitle="PMT multiplicity per muon (all muons): 200 ns cut vs no cut",
+        out_name="pmt_multiplicity_all_muons_cut_vs_nocut.png",
+        bin_mode="int",
     )
     plot_ge77_muon_zero_photons(light_run_list, out_dir)
     plot_wavelength_all_ncs(all_wl_hist, out_dir)
