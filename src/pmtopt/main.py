@@ -68,6 +68,7 @@ from pmtopt.greedy import greedy_select_nc, greedy_select_muon
 from pmtopt.plotting import (
     plot_selected_voxels, plot_selected_voxels_grid, plot_muon_nc_histogram,
     plot_hit_heatmap, plot_marginal_gain_heatmap, plot_ssd_voxels_3d,
+    plot_ssd_voxels_2d,
 )
 from pmtopt.ratio_scaling import write_ratio_hdf5, fmt_ratio_filename
 from pmtopt.sensitivity import run_sensitivity
@@ -382,6 +383,12 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     plot_ssd_voxels_3d(
         centers, layers,
         output_dir / f"{base_name}_ssd_voxels.png",
+        invalid_centers=_inv_centers,
+        invalid_layers=_inv_layers,
+    )
+    plot_ssd_voxels_2d(
+        centers, layers,
+        output_dir / f"{base_name}_ssd_voxels_2d.png",
         invalid_centers=_inv_centers,
         invalid_layers=_inv_layers,
     )

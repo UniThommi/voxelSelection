@@ -691,6 +691,144 @@ def plot_marginal_gain_heatmap(
     print(f"  Marginal gain heatmap saved to {output_path}")
 
 
+def _setup_flat_area_axis(ax, area: str) -> None:
+    """Draw boundary circles and set limits/labels for a flat (x-y) sub-surface."""
+    if area == "pit":
+        ax.add_patch(mpatches.Circle(
+            (0, 0), R_PIT, fill=False, edgecolor="black", linewidth=1.2))
+        lim = R_PIT * 1.1
+    elif area == "bot":
+        for r in (R_ZYL_BOT, R_ZYLINDER):
+            ax.add_patch(mpatches.Circle(
+                (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+        lim = R_ZYLINDER * 1.1
+    elif area == "top":
+        for r in (R_ZYL_TOP, R_ZYLINDER):
+            ax.add_patch(mpatches.Circle(
+                (0, 0), r, fill=False, edgecolor="black", linewidth=1.2))
+        lim = R_ZYLINDER * 1.1
+    else:
+        lim = R_ZYLINDER * 1.1
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]", fontsize=10)
+    ax.set_ylabel("y [mm]", fontsize=10)
+
+
+def _draw_area_voxels(
+    ax,
+    centers: np.ndarray,
+    area: str,
+    color: str,
+    half: float,
+    phi_half: float,
+    edgecolor: str = "black",
+    alpha: float = 0.65,
+) -> None:
+    """Draw uniformly-colored voxel rectangles for one sub-surface onto ax."""
+    if area == "wall":
+        for cx, cy, cz in centers:
+            phi = np.arctan2(cy, cx)
+            ax.add_patch(mpatches.Rectangle(
+                (phi - phi_half, cz - half), 2 * phi_half, 2 * half,
+                facecolor=color, edgecolor=edgecolor, linewidth=0.2, alpha=alpha,
+            ))
+    else:
+        for cx, cy, _ in centers:
+            ax.add_patch(mpatches.Rectangle(
+                (cx - half, cy - half), 2 * half, 2 * half,
+                facecolor=color, edgecolor=edgecolor, linewidth=0.2, alpha=alpha,
+            ))
+
+
+def plot_ssd_voxels_2d(
+    centers: np.ndarray,
+    layers: np.ndarray,
+    output_path: Path,
+    voxel_size_mm: float = 195.0,
+    invalid_centers: np.ndarray | None = None,
+    invalid_layers: np.ndarray | None = None,
+) -> None:
+    """2D per-sub-surface view of all SSD voxels (pit / bot / top / wall).
+
+    Layout matches the hit heatmaps: wall (unrolled) spans the top row;
+    pit / bot / top occupy the bottom row. Valid (PMT-placeable) voxels are
+    drawn cyan, voxels that are invalid from the start of the greedy selection
+    (``invalid_centers`` / ``invalid_layers``) grey. Each panel title reports
+    the per-sub-surface invalid count and total (valid + invalid).
+    """
+    half = voxel_size_mm / 2.0
+    phi_half = half / R_ZYLINDER  # arc → radians for the unrolled wall
+
+    if invalid_centers is None:
+        invalid_centers = np.empty((0, 3), dtype=np.float64)
+        invalid_layers = np.empty(0, dtype=object)
+
+    VALID_COLOR = "cyan"
+    INVALID_COLOR = "#AAAAAA"
+
+    fig = plt.figure(figsize=(18, 14))
+    gs = fig.add_gridspec(2, 3, height_ratios=[2.5, 1], hspace=0.45, wspace=0.38)
+    ax_wall = fig.add_subplot(gs[0, :])
+    ax_pit  = fig.add_subplot(gs[1, 0])
+    ax_bot  = fig.add_subplot(gs[1, 1])
+    ax_top  = fig.add_subplot(gs[1, 2])
+    area_axes = {"wall": ax_wall, "pit": ax_pit, "bot": ax_bot, "top": ax_top}
+
+    for area, ax in area_axes.items():
+        v_mask = layers == area
+        i_mask = invalid_layers == area
+        v_centers = centers[v_mask]
+        i_centers = invalid_centers[i_mask]
+        n_valid = len(v_centers)
+        n_invalid = len(i_centers)
+        n_total = n_valid + n_invalid
+
+        # Invalid first (grey), then valid (cyan) on top
+        _draw_area_voxels(ax, i_centers, area, INVALID_COLOR, half, phi_half,
+                          edgecolor="#666666", alpha=0.5)
+        _draw_area_voxels(ax, v_centers, area, VALID_COLOR, half, phi_half,
+                          edgecolor="black", alpha=0.65)
+
+        if area == "wall":
+            ax.set_xlim(-np.pi, np.pi)
+            ax.set_ylim(Z_BASE_GLOBAL, Z_BASE_GLOBAL + H_ZYLINDER)
+            ax.set_xlabel(r"$\varphi$ [rad]", fontsize=11)
+            ax.set_ylabel("z [mm]", fontsize=11)
+            ax.set_xticks([-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
+            ax.set_xticklabels(
+                [r"$-\pi$", r"$-\pi/2$", "0", r"$\pi/2$", r"$\pi$"])
+        else:
+            _setup_flat_area_axis(ax, area)
+
+        ax.set_title(
+            f"{area.capitalize()} — invalid: {n_invalid:,} / total: {n_total:,}",
+            fontsize=11,
+        )
+        ax.grid(True, alpha=0.15)
+
+    legend_handles = [
+        mpatches.Patch(facecolor=VALID_COLOR, edgecolor="black", label="Valid"),
+        mpatches.Patch(facecolor=INVALID_COLOR, edgecolor="#666666",
+                       label="Invalid"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=2,
+               fontsize=11, framealpha=0.85, bbox_to_anchor=(0.5, 0.01))
+
+    n_valid_tot = len(centers)
+    n_invalid_tot = len(invalid_centers)
+    fig.suptitle(
+        f"SSD Voxel Geometry (2D) — valid: {n_valid_tot:,}  ·  "
+        f"invalid: {n_invalid_tot:,}  ·  total: {n_valid_tot + n_invalid_tot:,}",
+        fontsize=14, y=0.995,
+    )
+
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  2D voxel geometry plot saved to {output_path}")
+
+
 def _voxel_polys(
     centers: np.ndarray,
     layers: np.ndarray,
