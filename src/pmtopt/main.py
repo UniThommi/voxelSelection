@@ -382,6 +382,8 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     plot_ssd_voxels_3d(
         centers, layers,
         output_dir / f"{base_name}_ssd_voxels.png",
+        invalid_centers=_inv_centers,
+        invalid_layers=_inv_layers,
     )
 
     B = binarize_from_raw(
