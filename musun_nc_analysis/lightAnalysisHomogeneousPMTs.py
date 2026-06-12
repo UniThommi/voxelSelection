@@ -736,6 +736,84 @@ def plot_pmt_multiplicity(
 
 
 # ---------------------------------------------------------------------------
+# Ge77 muons with zero detected signal
+# ---------------------------------------------------------------------------
+def plot_ge77_muon_zero_photons(
+    light_run_list: list[LightRunData], out_dir: Path,
+) -> None:
+    """Bar chart: how many Ge77 muons have 0 detected photons / PMTs.
+
+    A Ge77 muon is a muon with at least one Ge77-flagged NC.  Four metric
+    variants are shown side by side, each split into "≥1 detected" (green) and
+    "0 detected" (red):
+
+      * Photons, 200 ns cut      — muon_photon_counts
+      * Photons, no 200 ns cut   — muon_photon_counts_nocut
+      * PMTs,    200 ns cut       — muon_pmt_counts
+      * PMTs,    no 200 ns cut    — muon_pmt_counts_nocut
+
+    All four share the same Ge77-muon denominator (counts summed/unioned over
+    each muon's window NCs).
+    """
+    parts = [getattr(rd, "muon_photon_counts")[rd.muon_is_ge77]
+             for rd in light_run_list if rd.muon_is_ge77.size > 0]
+    if not parts or sum(p.size for p in parts) == 0:
+        print("  No Ge77 muons found — skipping zero-photon bar chart.")
+        return
+
+    def _ge77(attr: str) -> np.ndarray:
+        arrs = [getattr(rd, attr)[rd.muon_is_ge77]
+                for rd in light_run_list if rd.muon_is_ge77.size > 0]
+        return np.concatenate(arrs) if arrs else np.array([], dtype=np.int64)
+
+    metrics = [
+        ("Photons\n(200 ns cut)",  "muon_photon_counts"),
+        ("Photons\n(no cut)",      "muon_photon_counts_nocut"),
+        ("Distinct PMTs\n(200 ns cut)", "muon_pmt_counts"),
+        ("Distinct PMTs\n(no cut)",     "muon_pmt_counts_nocut"),
+    ]
+
+    n_total = _ge77("muon_photon_counts").size
+    labels, n_with_list, n_zero_list = [], [], []
+    for label, attr in metrics:
+        vals = _ge77(attr)
+        n_zero = int((vals == 0).sum())
+        labels.append(label)
+        n_with_list.append(vals.size - n_zero)
+        n_zero_list.append(n_zero)
+
+    x = np.arange(len(metrics))
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=(11, 6.5))
+    bars_with = ax.bar(x - width / 2, n_with_list, width,
+                       color=COLORS["green"], edgecolor="black", linewidth=0.8,
+                       label="≥1 detected")
+    bars_zero = ax.bar(x + width / 2, n_zero_list, width,
+                       color=COLORS["red"], edgecolor="black", linewidth=0.8,
+                       label="0 detected")
+
+    for bars, vals in [(bars_with, n_with_list), (bars_zero, n_zero_list)]:
+        for bar, val in zip(bars, vals):
+            pct = val / n_total * 100 if n_total > 0 else 0.0
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f"{val:,}\n({pct:.1f}%)",
+                    ha="center", va="bottom", fontsize=9)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=11)
+    ax.set_ylabel("Number of Ge77 muons", fontsize=13)
+    ax.set_title(
+        f"Ge77 muons with zero detected signal  (N = {n_total:,} Ge77 muons)",
+        fontsize=14,
+    )
+    ax.margins(y=0.15)
+    ax.legend(fontsize=11)
+    ax.tick_params(labelsize=11)
+    _save(fig, out_dir / "ge77_muon_zero_photons.png")
+
+
+# ---------------------------------------------------------------------------
 # Wavelength of all NC photons
 # ---------------------------------------------------------------------------
 def plot_wavelength_all_ncs(
@@ -1074,6 +1152,7 @@ def main() -> None:
               "(no 200 ns cut)",
         out_name="pmt_multiplicity_ge77_vs_noge77_nocut.png",
     )
+    plot_ge77_muon_zero_photons(light_run_list, out_dir)
     plot_wavelength_all_ncs(all_wl_hist, out_dir)
     _log_resources("comparison plots done", t_main)
 
