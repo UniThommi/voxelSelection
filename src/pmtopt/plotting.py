@@ -691,21 +691,17 @@ def plot_marginal_gain_heatmap(
     print(f"  Marginal gain heatmap saved to {output_path}")
 
 
-def plot_ssd_voxels_3d(
+def _voxel_polys(
     centers: np.ndarray,
     layers: np.ndarray,
-    output_path: Path,
-    voxel_size_mm: float = 195.0,
-) -> None:
-    """3D plot of all SSD voxels as 195×195 mm² patches.
+    half: float,
+) -> list[list]:
+    """Build the 3D quad polygons for a set of voxels.
 
     Wall voxels: vertical patch in the tangential-z plane (normal = radial).
     Pit / bot / top voxels: horizontal patch in the x-y plane.
     """
-    half = voxel_size_mm / 2.0
-
     polys: list[list] = []
-
     for (cx, cy, cz), layer in zip(centers, layers):
         if layer == "wall":
             r = np.hypot(cx, cy)
@@ -725,9 +721,43 @@ def plot_ssd_voxels_3d(
                 [cx + half, cy + half, cz],
                 [cx - half, cy + half, cz],
             ])
+    return polys
+
+
+def plot_ssd_voxels_3d(
+    centers: np.ndarray,
+    layers: np.ndarray,
+    output_path: Path,
+    voxel_size_mm: float = 195.0,
+    invalid_centers: np.ndarray | None = None,
+    invalid_layers: np.ndarray | None = None,
+) -> None:
+    """3D plot of all SSD voxels as 195×195 mm² patches.
+
+    Wall voxels: vertical patch in the tangential-z plane (normal = radial).
+    Pit / bot / top voxels: horizontal patch in the x-y plane.
+
+    Valid (PMT-placeable) voxels are drawn cyan. Voxels that are invalid from
+    the start of the greedy selection (``invalid_centers`` / ``invalid_layers``,
+    as returned by :func:`load_invalid_voxel_data`) are drawn grey.
+    """
+    half = voxel_size_mm / 2.0
+
+    n_invalid = 0 if invalid_centers is None else len(invalid_centers)
+
+    polys = _voxel_polys(centers, layers, half)
 
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
+
+    # Invalid voxels first (grey, underneath the valid layer)
+    if n_invalid > 0:
+        inv_polys = _voxel_polys(invalid_centers, invalid_layers, half)
+        if inv_polys:
+            inv_coll = Poly3DCollection(inv_polys, alpha=0.4, linewidths=0.3)
+            inv_coll.set_facecolor("#AAAAAA")
+            inv_coll.set_edgecolor("#666666")
+            ax.add_collection3d(inv_coll)
 
     coll = Poly3DCollection(polys, alpha=0.65, linewidths=0.3)
     coll.set_facecolor("cyan")
@@ -747,15 +777,28 @@ def plot_ssd_voxels_3d(
     ax.set_ylabel("y [mm]", fontsize=10)
     ax.set_zlabel("z [mm]", fontsize=10)
 
+    legend_handles = [
+        mpatches.Patch(facecolor="cyan", edgecolor="black",
+                       label=f"Valid ({len(centers):,})"),
+    ]
+    if n_invalid > 0:
+        legend_handles.append(
+            mpatches.Patch(facecolor="#AAAAAA", edgecolor="#666666",
+                           label=f"Invalid ({n_invalid:,})")
+        )
+    ax.legend(handles=legend_handles, loc="upper left", fontsize=10,
+              framealpha=0.85)
+
     layer_counts = {a: int(np.sum(layers == a))
                     for a in ["pit", "bot", "top", "wall"]}
     count_lines = "  ".join(
         f"{a.upper()}: {n}" for a, n in layer_counts.items() if n > 0
     )
-    ax.set_title(
-        f"SSD Voxel Geometry  (N={len(centers):,})\n{count_lines}",
-        fontsize=12,
-    )
+    title = f"SSD Voxel Geometry  (valid N={len(centers):,}"
+    if n_invalid > 0:
+        title += f"  ·  invalid N={n_invalid:,}"
+    title += f")\n{count_lines}"
+    ax.set_title(title, fontsize=12)
 
     R_lim = R_ZYLINDER * 1.1
     ax.set_xlim(-R_lim, R_lim)
