@@ -4597,6 +4597,32 @@ def plot_stat_limit_only(
                            alpha_inner=0.15, alpha_outer=0.07,
                            point_labels=_w_labels_sorted(sl_filt))
 
+    # Mark the FoM-optimal operating point (highest discovery FoM = best).
+    sl_fom = [(r, figure_of_merit(r["ge_77_surv"], r["sig_surv"])) for r in sl_filt]
+    sl_fom = [(r, f) for r, f in sl_fom if np.isfinite(f)]
+    if sl_fom:
+        best, best_fom = max(sl_fom, key=lambda t: t[1])
+        ax.scatter([best["sig_surv"]], [best["ge_77_surv"]],
+                   marker="*", s=340, facecolor="white",
+                   edgecolor=stat_limit_color, linewidths=1.8, zorder=6,
+                   label="Optimal working point (max FoM)")
+        annot = (
+            f"Optimal working point ($W = {int(best['x_cut'])}$)\n"
+            f"Ge-77 survival = {best['ge_77_surv'] * 100:.2f}%\n"
+            f"Signal survival = {best['sig_surv'] * 100:.2f}%\n"
+            f"FoM = {best_fom:.3f}"
+        )
+        ax.annotate(
+            annot,
+            xy=(best["sig_surv"], best["ge_77_surv"]),
+            xytext=(0.40, 0.45), textcoords="axes fraction",
+            fontsize=10, ha="left", va="center",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                      edgecolor=stat_limit_color, alpha=0.92),
+            arrowprops=dict(arrowstyle="->", color=stat_limit_color, lw=1.2),
+            zorder=7,
+        )
+
     from matplotlib.patches import Patch as _Patch
     handles, _ = ax.get_legend_handles_labels()
     handles += [
