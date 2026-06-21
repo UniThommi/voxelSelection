@@ -50,6 +50,27 @@ AREA_SURFACES: dict[str, float] = {
 }
 
 
+def print_area_surfaces() -> dict[str, float]:
+    """Print the detector surface areas (pit, bot, top, wall) derived from
+    the geometry constants and return the ``AREA_SURFACES`` dict.
+
+    Returns
+    -------
+    dict[str, float]
+        Surface area per layer in mm².
+    """
+    print("Detector surface areas (derived from geometry constants):")
+    print(f"  {'Area':<6} {'mm²':>18} {'M mm²':>14}")
+    print(f"  {'-' * 40}")
+    for area in ["pit", "bot", "top", "wall"]:
+        a_mm2 = AREA_SURFACES[area]
+        print(f"  {area:<6} {a_mm2:>18.2f} {a_mm2 / 1e6:>14.2f}")
+    total = sum(AREA_SURFACES.values())
+    print(f"  {'-' * 40}")
+    print(f"  {'total':<6} {total:>18.2f} {total / 1e6:>14.2f}")
+    return AREA_SURFACES
+
+
 def compute_per_area_N(
     N: int,
     areas: list[str] | None = None,
@@ -371,4 +392,8 @@ def calc_fom_confusion(
     ge_surv  = calc_ge_survival_confusion(_tp_w, _fn_w)
     deadtime = calc_deadtime_confusion(TP, FP, TN, FN, musun_rate)
     return figure_of_merit(ge_surv, 1.0 - deadtime)
+
+
+if __name__ == "__main__":
+    print_area_surfaces()
 
