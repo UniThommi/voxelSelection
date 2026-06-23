@@ -881,9 +881,9 @@ def _plot_ratio_histogram(
             edgecolor='black', linewidth=0.4, label=f"all PMTs  (N={len(all_ratios)})")
     ax.axvline(mean_r, color='darkorange', linestyle='-', linewidth=1.5,
                label=f'mean = {mean_r:.4f}')
-    ax.set_xlabel("(SSD hits/NC) / (PMT hits/NC)", fontsize=11)
+    ax.set_xlabel("(PMT hits/NC) / (SSD hits/NC)", fontsize=11)
     ax.set_ylabel("Number of PMT positions", fontsize=11)
-    ax.set_title("Per-PMT SSD/PMT photon detection ratio (NC-normalised)", fontsize=11)
+    ax.set_title("Per-PMT PMT/SSD photon detection ratio (NC-normalised)", fontsize=11)
     ax.legend(fontsize=9)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
@@ -916,10 +916,10 @@ def _plot_per_area_ratio_histograms(
                        label=f'mean = {mean_r:.4f}')
             ax.legend(fontsize=9)
         ax.set_title(f"{area}  (N={len(ratios)})", fontsize=11)
-        ax.set_xlabel("(SSD hits/NC) / (PMT hits/NC)", fontsize=9)
+        ax.set_xlabel("(PMT hits/NC) / (SSD hits/NC)", fontsize=9)
         ax.set_ylabel("Number of PMT positions", fontsize=9)
 
-    fig.suptitle("Per-PMT SSD/PMT ratio by detector area (NC-normalised)", fontsize=12)
+    fig.suptitle("Per-PMT PMT/SSD ratio by detector area (NC-normalised)", fontsize=12)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -933,15 +933,15 @@ def _save_ratio_txt(
 ) -> None:
     """Write per-PMT-position SSD/PMT ratios to a text file, sorted by layer then voxel_id."""
     with open(out_path, 'w') as f:
-        f.write("# Per-PMT SSD/PMT photon detection ratios\n")
+        f.write("# Per-PMT PMT/SSD photon detection ratios\n")
         f.write(f"# NC events: SSD={ssd_nc}, PMT={pmt_nc}\n")
-        f.write("# ratio = (ssd_hits/ssd_nc) / (pmt_hits/pmt_nc)\n")
+        f.write("# ratio = (pmt_hits/pmt_nc) / (ssd_hits/ssd_nc)\n")
         f.write(f"# {'voxel_id':<15} {'layer':<6} {'ssd_hits':>12} {'pmt_hits':>12} "
                 f"{'ssd_per_nc':>12} {'pmt_per_nc':>12} {'ratio':>12}\n")
         for r in sorted(records, key=lambda x: (x['layer'], x['voxel_id'])):
             ssd_pnc = r['ssd_hits'] / ssd_nc
             pmt_pnc = r['pmt_hits'] / pmt_nc
-            ratio   = ssd_pnc / pmt_pnc if pmt_pnc > 0 else float('nan')
+            ratio   = pmt_pnc / ssd_pnc if ssd_pnc > 0 else float('nan')
             f.write(f"  {r['voxel_id']:<15} {r['layer']:<6} {r['ssd_hits']:>12d} "
                     f"{r['pmt_hits']:>12d} {ssd_pnc:>12.6f} {pmt_pnc:>12.6f} "
                     f"{ratio:>12.6f}\n")
@@ -960,7 +960,7 @@ def analyze_per_pmt_ratio(
 ) -> None:
     """Per-PMT-position ratio analysis (independent of zone scan).
 
-    For each PMT position computes ratio_i = (ssd_hits[i]/ssd_nc) / (pmt_hits[i]/pmt_nc)
+    For each PMT position computes ratio_i = (pmt_hits[i]/pmt_nc) / (ssd_hits[i]/ssd_nc)
     and produces:
       - per_pmt_ratios.png       : overall histogram of all 300 ratios
       - per_pmt_ratios_by_area.png : 2x2 histogram, one subplot per area (pit/bot/top/wall)
@@ -974,7 +974,7 @@ def analyze_per_pmt_ratio(
     3. Load SSD postprocessed target_matrix (already time-filtered during
        simPostProcessing) -> sum over NC rows -> per-voxel photon count.
     4. For every PMT position i:
-            ratio_i = (ssd_hits[i] / ssd_nc) / (pmt_hits[i] / pmt_nc)
+            ratio_i = (pmt_hits[i] / pmt_nc) / (ssd_hits[i] / ssd_nc)
 
     Assumptions / uncertainties
     ---------------------------
@@ -1082,13 +1082,19 @@ def analyze_per_pmt_ratio(
     area_ratios: Dict[str, List[float]] = {a: [] for a in areas}
 
     for r in records:
-        ratio_i = (r['ssd_hits'] / ssd_nc) / (r['pmt_hits'] / pmt_nc)
+        # PMT/SSD ratio (inverse of the legacy SSD/PMT convention).
+        # ssd_hits may be 0 for a few positions (see n_no_ssd above); those
+        # yield NaN and are excluded from the summary and histograms.
+        ssd_per_nc_i = r['ssd_hits'] / ssd_nc
+        pmt_per_nc_i = r['pmt_hits'] / pmt_nc
+        ratio_i = pmt_per_nc_i / ssd_per_nc_i if ssd_per_nc_i > 0 else float('nan')
         r['ratio'] = ratio_i
-        all_ratios.append(ratio_i)
-        area_ratios[r['layer']].append(ratio_i)
+        if not np.isnan(ratio_i):
+            all_ratios.append(ratio_i)
+            area_ratios[r['layer']].append(ratio_i)
 
     print(f"\n  Ratio summary over {len(all_ratios)} PMT positions "
-          f"(ratio = (ssd/NC) / (pmt/NC)):")
+          f"(ratio = (pmt/NC) / (ssd/NC)):")
     print(f"    Global mean   = {np.mean(all_ratios):.6f}")
     print(f"    Global std    = {np.std(all_ratios):.6f}")
     print(f"    Global median = {np.median(all_ratios):.6f}")
@@ -1431,7 +1437,7 @@ def main() -> None:
     # Compute and print results
     # -------------------------------------------------------------------------
     print("\n" + "=" * 130)
-    print("RESULTS - ZONE RATIOS")
+    print("RESULTS - ZONE RATIOS  (RAW_RATIO, CORR_RATIO = PMT/SSD)")
     print("=" * 130)
 
     area_mean_density: Dict[str, float] = {}
@@ -1457,11 +1463,15 @@ def main() -> None:
 
         ssd_per_nc = ssd_ph / ssd_nc if ssd_nc > 0 else 0.0
         pmt_per_nc = pmt_ph / pmt_nc if pmt_nc > 0 else 0.0
-        raw_ratio  = ssd_per_nc / pmt_per_nc if pmt_per_nc > 0 else float('nan')
+        # PMT/SSD ratio (inverse of the legacy SSD/PMT convention)
+        raw_ratio  = pmt_per_nc / ssd_per_nc if ssd_per_nc > 0 else float('nan')
 
         mean_d = area_mean_density[zone.area_name]
+        # Density correction factor is inverted along with the ratio, so the
+        # corrected PMT/SSD ratio is the exact reciprocal of the old corrected
+        # SSD/PMT ratio.
         if mean_d > 0 and zone.pmt_density > 0 and not np.isnan(raw_ratio):
-            corr_ratio = raw_ratio * (zone.pmt_density / mean_d)
+            corr_ratio = raw_ratio * (mean_d / zone.pmt_density)
         else:
             corr_ratio = float('nan')
 
@@ -1488,7 +1498,7 @@ def main() -> None:
 
     # Per-area aggregates
     print(f"\n{'AREA':<10} {'SSD_TOTAL':>12} {'PMT_TOTAL':>12} {'PH/NC_SSD':>12} "
-          f"{'PH/NC_PMT':>12} {'RATIO':>10}")
+          f"{'PH/NC_PMT':>12} {'RATIO(P/S)':>10}")
     print("-" * 70)
     for area in ['pit', 'bot', 'top', 'wall']:
         ar     = [r for r in results if r['zone'].area_name == area]
@@ -1496,14 +1506,14 @@ def main() -> None:
         pmt_t  = sum(r['pmt_photons'] for r in ar)
         ssd_pnc = ssd_t / ssd_nc if ssd_nc > 0 else 0.0
         pmt_pnc = pmt_t / pmt_nc if pmt_nc > 0 else 0.0
-        ratio   = ssd_pnc / pmt_pnc if pmt_pnc > 0 else float('nan')
+        ratio   = pmt_pnc / ssd_pnc if ssd_pnc > 0 else float('nan')
         print(f"{area:<10} {ssd_t:>12d} {pmt_t:>12.1f} "
               f"{ssd_pnc:>12.6f} {pmt_pnc:>12.6f} {ratio:>10.4f}")
     g_ssd    = sum(r['ssd_photons'] for r in results)
     g_pmt    = sum(r['pmt_photons'] for r in results)
     g_ssd_pnc = g_ssd / ssd_nc if ssd_nc > 0 else 0.0
     g_pmt_pnc = g_pmt / pmt_nc if pmt_nc > 0 else 0.0
-    g_ratio   = g_ssd_pnc / g_pmt_pnc if g_pmt_pnc > 0 else float('nan')
+    g_ratio   = g_pmt_pnc / g_ssd_pnc if g_ssd_pnc > 0 else float('nan')
     print("-" * 70)
     print(f"{'TOTAL':<10} {g_ssd:>12d} {g_pmt:>12.1f} "
           f"{g_ssd_pnc:>12.6f} {g_pmt_pnc:>12.6f} {g_ratio:>10.4f}")

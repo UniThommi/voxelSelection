@@ -141,7 +141,8 @@ def save_results_txt(
 
     with open(output_file, 'w') as fout:
         fout.write("=" * 130 + "\n")
-        fout.write("Zone-based SSD vs. PMT Photon Detection Efficiency Ratio\n")
+        fout.write("Zone-based PMT vs. SSD Photon Detection Efficiency Ratio "
+                   "(RAW_RATIO, CORR_RATIO = PMT/SSD)\n")
         fout.write("=" * 130 + "\n\n")
         fout.write(f"Zone config: Pit={len(pit_zones)}, Wall={len(wall_zones)}, "
                    f"Top={len(top_zones)}, Bot=1\n")
@@ -226,8 +227,8 @@ def save_results_json(
             'pmt_photons':      float(r['pmt_photons']),
             'ssd_per_nc':       float(r['ssd_per_nc']),
             'pmt_per_nc':       float(r['pmt_per_nc']),
-            'raw_ratio':   float(r['ratio'])      if not np.isnan(r['ratio'])      else None,
-            'corr_ratio':  float(r['corr_ratio']) if not np.isnan(r['corr_ratio']) else None,
+            'raw_ratio_pmt_over_ssd':  float(r['ratio'])      if not np.isnan(r['ratio'])      else None,
+            'corr_ratio_pmt_over_ssd': float(r['corr_ratio']) if not np.isnan(r['corr_ratio']) else None,
             'dens_dev_pct': float(r['dens_dev']),
         })
 
