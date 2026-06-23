@@ -73,8 +73,7 @@ _HOMO_DEFAULTS = {
 }
 
 _PMT_JSON_DEFAULT = Path(
-    "/global/cfs/projectdirs/legend/users/tbuerger/sim/data/"
-    "optPhotonSensitiveSurface/homogeneous300PMTpositions_currentDist.json"
+    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs/homogeneous300PMTs.json"
 )
 
 FRACTION_TOLERANCE = 0.01
