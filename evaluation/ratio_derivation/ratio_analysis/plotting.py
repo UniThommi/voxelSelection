@@ -110,13 +110,12 @@ def plot_wall_zones(
 
     for pmt in pmts:
         phi_center = np.arctan2(pmt.center[1], pmt.center[0])
-        delta_phi  = PMT_CATHODE_RADIUS / r_zylinder
-        rect = mpatches.Rectangle(
-            (phi_center - delta_phi, pmt.z - PMT_CATHODE_RADIUS),
-            2 * delta_phi, 2 * PMT_CATHODE_RADIUS,
-            fill=False, edgecolor='blue', linewidth=0.5, alpha=0.7,
-        )
-        ax.add_patch(rect)
+        # The phi-z axes carry different units on very different scales, so a
+        # data-coordinate circle cannot render round here. Draw the cathode as a
+        # round marker with a fixed display size (cosmetic, not to geometric scale).
+        ax.plot(phi_center, pmt.z, marker='o', markersize=6,
+                markerfacecolor='none', markeredgecolor='blue',
+                markeredgewidth=0.5, alpha=0.7, linestyle='none')
         ax.plot(phi_center, pmt.z, 'b.', markersize=1)
 
     for zone in zones:
