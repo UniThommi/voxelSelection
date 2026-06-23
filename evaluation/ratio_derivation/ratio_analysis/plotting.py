@@ -63,12 +63,12 @@ def plot_radial_zones(
     ax.set_aspect('equal')
     ax.set_xlabel('x [mm]')
     ax.set_ylabel('y [mm]')
-    ax.set_title(f'{area_name.upper()} - SSD/PMT Ratio per Zone')
+    ax.set_title(f'{area_name.upper()} - PMT/SSD Ratio per Zone')
     ax.grid(True, alpha=0.3)
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=ax, shrink=0.7, label='SSD/PMT Ratio')
+    fig.colorbar(sm, ax=ax, shrink=0.7, label='PMT/SSD Ratio')
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -129,12 +129,12 @@ def plot_wall_zones(
     ax.set_ylim(min(all_z) - margin, max(all_z) + margin)
     ax.set_xlabel('φ [rad]')
     ax.set_ylabel('z [mm]')
-    ax.set_title('WALL - SSD/PMT Ratio per Zone (φ-z view)')
+    ax.set_title('WALL - PMT/SSD Ratio per Zone (φ-z view)')
     ax.grid(True, alpha=0.3)
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=ax, shrink=0.7, label='SSD/PMT Ratio')
+    fig.colorbar(sm, ax=ax, shrink=0.7, label='PMT/SSD Ratio')
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -204,7 +204,7 @@ def plot_comparison(
     """Bar chart comparison between new and reference corrected ratios (compare mode)."""
     ref_lookup: Dict[Tuple[str, int], float] = {}
     for z in ref_data['zones']:
-        cr = z['corr_ratio']
+        cr = z['corr_ratio_pmt_over_ssd']
         ref_lookup[(z['area'], z['zone_id'])] = cr if cr is not None else float('nan')
 
     areas_order = ['pit', 'bot', 'top', 'wall']
@@ -245,7 +245,7 @@ def plot_comparison(
         ax1.bar(x + width/2, new_ratios, width, label='Musun NCs',
                 color='coral',     alpha=0.8)
         ax1.set_xlabel('Zone')
-        ax1.set_ylabel('Corrected SSD/PMT Ratio')
+        ax1.set_ylabel('Corrected PMT/SSD Ratio')
         ax1.set_title(f'{area_name.upper()} — Corrected Ratio: Reference vs Musun NCs')
         ax1.set_xticks(x)
         ax1.set_xticklabels(labels, fontsize=7)
@@ -295,7 +295,7 @@ def plot_comparison(
 
     ax1.bar(x - 0.2, all_ref, 0.4, label='Reference', color='steelblue', alpha=0.8)
     ax1.bar(x + 0.2, all_new, 0.4, label='Musun NCs', color='coral',     alpha=0.8)
-    ax1.set_ylabel('Corrected SSD/PMT Ratio')
+    ax1.set_ylabel('Corrected PMT/SSD Ratio')
     ax1.set_title('All Zones — Corrected Ratio: Reference vs Musun NCs')
     ax1.set_xticks(x)
     ax1.set_xticklabels(all_labels, fontsize=7, rotation=45)
