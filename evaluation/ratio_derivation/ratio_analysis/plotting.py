@@ -13,22 +13,22 @@ from .zones import Zone
 from .photon_filters import PMT_CATHODE_RADIUS
 
 
-def plot_radial_zones(
+def _draw_radial_zones(
+    ax: plt.Axes,
     zones: List[Zone],
     pmts: List[PMTInfo],
     ratios: List[float],
     area_name: str,
-    r_min: float,
     r_max: float,
-    output_path: Path,
-    global_norm: Optional[plt.Normalize] = None,
+    cmap,
+    norm: plt.Normalize,
+    label_fontsize: int = 8,
 ) -> None:
-    """Plot radial zones (pit, top, bot) as x-y view with PMT circles and ratio heatmap."""
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    """Draw radial zones (pit, top, bot) as an x-y ratio heatmap onto ``ax``.
 
-    cmap = plt.cm.RdYlGn_r
-    norm = global_norm if global_norm is not None else plt.Normalize(0, 1)
-
+    Shared by :func:`plot_radial_zones` (standalone) and
+    :func:`plot_zone_ratio_summary` (combined panel). Does not add a colorbar.
+    """
     for zone, ratio in zip(zones, ratios):
         width = zone.boundary_high - zone.boundary_low
         color = cmap(norm(ratio)) if not np.isnan(ratio) else 'grey'
@@ -41,7 +41,7 @@ def plot_radial_zones(
                  f"r=[{zone.boundary_low:.0f},{zone.boundary_high:.0f}]\n"
                  f"eff_PMTs={zone.effective_n_pmts:.1f}\n")
         label += f"ratio={ratio:.3f}" if not np.isnan(ratio) else "ratio=NaN"
-        ax.text(0, r_mid, label, ha='center', va='center', fontsize=8,
+        ax.text(0, r_mid, label, ha='center', va='center', fontsize=label_fontsize,
                 fontweight='bold',
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
@@ -66,6 +66,25 @@ def plot_radial_zones(
     ax.set_title(f'{area_name.upper()} - PMT/SSD Ratio per Zone')
     ax.grid(True, alpha=0.3)
 
+
+def plot_radial_zones(
+    zones: List[Zone],
+    pmts: List[PMTInfo],
+    ratios: List[float],
+    area_name: str,
+    r_min: float,
+    r_max: float,
+    output_path: Path,
+    global_norm: Optional[plt.Normalize] = None,
+) -> None:
+    """Plot radial zones (pit, top, bot) as x-y view with PMT circles and ratio heatmap."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+    cmap = plt.cm.RdYlGn_r
+    norm = global_norm if global_norm is not None else plt.Normalize(0, 1)
+
+    _draw_radial_zones(ax, zones, pmts, ratios, area_name, r_max, cmap, norm)
+
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     fig.colorbar(sm, ax=ax, shrink=0.7, label='PMT/SSD Ratio')
@@ -76,20 +95,20 @@ def plot_radial_zones(
     print(f"  Plot saved: {output_path}")
 
 
-def plot_wall_zones(
+def _draw_wall_zones(
+    ax: plt.Axes,
     zones: List[Zone],
     pmts: List[PMTInfo],
     ratios: List[float],
-    r_zylinder: float,
-    output_path: Path,
-    global_norm: Optional[plt.Normalize] = None,
+    cmap,
+    norm: plt.Normalize,
+    label_fontsize: int = 8,
 ) -> None:
-    """Plot wall zones as phi-z view with PMT circles and ratio heatmap."""
-    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+    """Draw wall zones as a phi-z ratio heatmap onto ``ax``.
 
-    cmap = plt.cm.RdYlGn_r
-    norm = global_norm if global_norm is not None else plt.Normalize(0, 1)
-
+    Shared by :func:`plot_wall_zones` (standalone) and
+    :func:`plot_zone_ratio_summary` (combined panel). Does not add a colorbar.
+    """
     for zone, ratio in zip(zones, ratios):
         color = cmap(norm(ratio)) if not np.isnan(ratio) else 'grey'
         rect = mpatches.Rectangle(
@@ -104,7 +123,7 @@ def plot_wall_zones(
                  f"z=[{zone.boundary_low:.0f},{zone.boundary_high:.0f}]\n"
                  f"eff_PMTs={zone.effective_n_pmts:.1f}\n")
         label += f"ratio={ratio:.3f}" if not np.isnan(ratio) else "ratio=NaN"
-        ax.text(0, z_mid, label, ha='center', va='center', fontsize=8,
+        ax.text(0, z_mid, label, ha='center', va='center', fontsize=label_fontsize,
                 fontweight='bold',
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
@@ -131,6 +150,23 @@ def plot_wall_zones(
     ax.set_title('WALL - PMT/SSD Ratio per Zone (φ-z view)')
     ax.grid(True, alpha=0.3)
 
+
+def plot_wall_zones(
+    zones: List[Zone],
+    pmts: List[PMTInfo],
+    ratios: List[float],
+    r_zylinder: float,
+    output_path: Path,
+    global_norm: Optional[plt.Normalize] = None,
+) -> None:
+    """Plot wall zones as phi-z view with PMT circles and ratio heatmap."""
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+
+    cmap = plt.cm.RdYlGn_r
+    norm = global_norm if global_norm is not None else plt.Normalize(0, 1)
+
+    _draw_wall_zones(ax, zones, pmts, ratios, cmap, norm)
+
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     fig.colorbar(sm, ax=ax, shrink=0.7, label='PMT/SSD Ratio')
@@ -138,6 +174,56 @@ def plot_wall_zones(
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
+    print(f"  Plot saved: {output_path}")
+
+
+def plot_zone_ratio_summary(
+    pit_zones: List[Zone],
+    top_zones: List[Zone],
+    bot_zones: List[Zone],
+    wall_zones: List[Zone],
+    pit_pmts: List[PMTInfo],
+    top_pmts: List[PMTInfo],
+    bot_pmts: List[PMTInfo],
+    wall_pmts: List[PMTInfo],
+    pit_ratios: List[float],
+    top_ratios: List[float],
+    bot_ratios: List[float],
+    wall_ratios: List[float],
+    r_pit: float,
+    r_zylinder: float,
+    output_path: Path,
+    global_norm: Optional[plt.Normalize] = None,
+) -> None:
+    """Summary figure: all 4 detector-area ratio maps in a single 2×2 panel.
+
+    Combines the three radial views (pit, top, bot) and the wall φ-z view,
+    sharing one colormap and colorbar so the corrected PMT/SSD ratios are
+    directly comparable across areas.
+    """
+    cmap = plt.cm.RdYlGn_r
+    norm = global_norm if global_norm is not None else plt.Normalize(0, 1)
+
+    fig, axes = plt.subplots(2, 2, figsize=(20, 18))
+
+    _draw_radial_zones(axes[0, 0], pit_zones, pit_pmts, pit_ratios,
+                       'pit', r_pit, cmap, norm, label_fontsize=7)
+    _draw_radial_zones(axes[0, 1], top_zones, top_pmts, top_ratios,
+                       'top', r_zylinder, cmap, norm, label_fontsize=7)
+    _draw_radial_zones(axes[1, 0], bot_zones, bot_pmts, bot_ratios,
+                       'bot', r_zylinder, cmap, norm, label_fontsize=7)
+    _draw_wall_zones(axes[1, 1], wall_zones, wall_pmts, wall_ratios,
+                     cmap, norm, label_fontsize=7)
+
+    fig.suptitle('PMT/SSD Corrected Ratio per Zone — All Detector Areas',
+                 fontsize=16, fontweight='bold')
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=axes, shrink=0.6, label='PMT/SSD Ratio')
+
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
     print(f"  Plot saved: {output_path}")
 
 

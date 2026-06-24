@@ -46,7 +46,7 @@ from ratio_analysis.process_ssd import process_all_files_ssd
 from ratio_analysis.process_pmt import process_all_files_pmt
 from ratio_analysis.plotting import (
     plot_radial_zones, plot_wall_zones, plot_snr_scan,
-    plot_comparison, plot_area_flux,
+    plot_comparison, plot_area_flux, plot_zone_ratio_summary,
 )
 from ratio_analysis.io import scan_optimal_zones, save_results_txt, save_results_json
 
@@ -1544,28 +1544,40 @@ def main() -> None:
     else:
         global_norm = plt.Normalize(0, 1)
 
-    for area, zones_list, layer_pmts, r_min, r_max in [
-        ("pit",  pit_zones,  pmt_by_layer['pit'],  0.0,               geometry.r_pit),
-        ("top",  top_zones,  pmt_by_layer['top'],  geometry.r_zyl_top, geometry.r_zylinder),
-        ("bot",  bot_zones,  pmt_by_layer['bot'],  geometry.r_zyl_bot, geometry.r_zylinder),
-    ]:
-        ratios = [
+    def _corr_ratios(area: str, zones_list) -> List[float]:
+        return [
             next((r['corr_ratio'] for r in results
                   if r['zone'].area_name == area and r['zone'].zone_id == z.zone_id),
                  float('nan'))
             for z in zones_list
         ]
+
+    area_ratios_map: Dict[str, List[float]] = {}
+    for area, zones_list, layer_pmts, r_min, r_max in [
+        ("pit",  pit_zones,  pmt_by_layer['pit'],  0.0,               geometry.r_pit),
+        ("top",  top_zones,  pmt_by_layer['top'],  geometry.r_zyl_top, geometry.r_zylinder),
+        ("bot",  bot_zones,  pmt_by_layer['bot'],  geometry.r_zyl_bot, geometry.r_zylinder),
+    ]:
+        ratios = _corr_ratios(area, zones_list)
+        area_ratios_map[area] = ratios
         plot_radial_zones(zones_list, layer_pmts, ratios, area, r_min, r_max,
                           args.output_dir / f"zone_ratio_{area}.png", global_norm)
 
-    wall_ratios = [
-        next((r['corr_ratio'] for r in results
-              if r['zone'].area_name == 'wall' and r['zone'].zone_id == z.zone_id),
-             float('nan'))
-        for z in wall_zones
-    ]
+    wall_ratios = _corr_ratios('wall', wall_zones)
+    area_ratios_map['wall'] = wall_ratios
     plot_wall_zones(wall_zones, pmt_by_layer['wall'], wall_ratios,
                     geometry.r_zylinder, args.output_dir / "zone_ratio_wall.png", global_norm)
+
+    # Summary: all 4 detector-area ratio maps in one figure
+    plot_zone_ratio_summary(
+        pit_zones, top_zones, bot_zones, wall_zones,
+        pmt_by_layer['pit'], pmt_by_layer['top'],
+        pmt_by_layer['bot'], pmt_by_layer['wall'],
+        area_ratios_map['pit'], area_ratios_map['top'],
+        area_ratios_map['bot'], wall_ratios,
+        geometry.r_pit, geometry.r_zylinder,
+        args.output_dir / "zone_ratio_summary.png", global_norm,
+    )
 
     if compare_mode:
         print("\nGenerating comparison plots...")
