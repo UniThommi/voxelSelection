@@ -92,7 +92,7 @@ def load_and_binarize(
     m : int
         Minimum number of (rounded) hits per voxel for detection.
     area_ratios : dict[str, float]
-        SSD/PMT ratios per area.
+        PMT/SSD ratios per area (SSD hits are multiplied by these).
     seed : int
         Random seed for stochastic rounding.
     verbose : bool
@@ -649,7 +649,7 @@ def binarize_from_raw(
     layers : np.ndarray of str
         Layer labels per valid voxel.
     area_ratios : dict[str, float]
-        SSD/PMT ratios per area.
+        PMT/SSD ratios per area (SSD hits are multiplied by these).
     m : int
         Hit threshold for binarization.
     seed : int
@@ -665,9 +665,11 @@ def binarize_from_raw(
     rng = np.random.default_rng(seed)
     ratio_vec = build_ratio_vec(layers, area_ratios)
 
-    # Scale each non-zero entry by its column's ratio
+    # Adapt SSD hits to PMT-equivalent hits. Ratio convention is PMT/SSD
+    # (ratio = n_PMT / n_SSD), so MULTIPLY each entry by its column's ratio:
+    # n_PMT = n_SSD * ratio.
     ratios_per_entry = ratio_vec[raw_cols]
-    scaled = raw_vals.astype(np.float64) / ratios_per_entry
+    scaled = raw_vals.astype(np.float64) * ratios_per_entry
 
     # Stochastic rounding
     floor_vals = np.floor(scaled).astype(np.int32)

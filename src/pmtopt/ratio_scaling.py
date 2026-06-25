@@ -65,7 +65,7 @@ def build_ratio_vec(
     layer_labels : np.ndarray of str
         Layer label per voxel column.
     ratios : dict[str, float]
-        SSD/PMT ratio per area.
+        PMT/SSD ratio per area.
 
     Returns
     -------
@@ -84,26 +84,30 @@ def stochastic_round_block(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """
-    Scale a block of integer hits by area ratios and apply stochastic
+    Scale a block of SSD hits to PMT-equivalent hits and apply stochastic
     rounding.
 
-    For each element: floor(hits/ratio) + Bernoulli(fractional part).
+    Ratio convention is PMT/SSD (ratio = n_PMT / n_SSD, typically < 1), so the
+    SSD hit counts are MULTIPLIED by the ratio to adapt them to the PMT case:
+    n_PMT = n_SSD * ratio. For each element:
+    floor(hits * ratio) + Bernoulli(fractional part).
 
     Parameters
     ----------
     block : np.ndarray, shape (batch_len, num_voxels), dtype int32
         Raw hit counts from SSD simulation.
     ratio_vec : np.ndarray, shape (num_voxels,), dtype float64
-        Per-column ratio (SSD/PMT).
+        Per-column PMT/SSD ratio.
     rng : np.random.Generator
         Random number generator.
 
     Returns
     -------
     rounded : np.ndarray, shape (batch_len, num_voxels), dtype int32
-        Stochastically rounded hit counts.
+        Stochastically rounded PMT-equivalent hit counts.
     """
-    scaled = block.astype(np.float64) / ratio_vec
+    # Multiply SSD hits by the PMT/SSD ratio to obtain PMT-equivalent hits.
+    scaled = block.astype(np.float64) * ratio_vec
     floor_vals = np.floor(scaled).astype(np.int32)
     fractional = scaled - floor_vals
     coin = rng.random(fractional.shape) < fractional
@@ -119,8 +123,8 @@ def write_ratio_hdf5(
     verbose: bool = True,
 ) -> None:
     """
-    Copy HDF5 file, scale target_matrix hits by area ratios with
-    stochastic rounding, and recompute region_matrix.
+    Copy HDF5 file, scale target_matrix hits (SSD -> PMT equivalent) by area
+    ratios with stochastic rounding, and recompute region_matrix.
 
     Parameters
     ----------
@@ -129,7 +133,7 @@ def write_ratio_hdf5(
     output_path : str
         Path for the output HDF5 file.
     ratios : dict[str, float]
-        SSD/PMT ratios per area.
+        PMT/SSD ratios per area (SSD hits are multiplied by these).
     seed : int
         Random seed for stochastic rounding.
     batch_size : int
@@ -246,7 +250,8 @@ def write_ratio_hdf5(
                     continue
                 reg_col = region_col_map[area]
                 orig = original_region_sums[reg_col]
-                expected = orig / ratios[area]
+                # PMT/SSD convention: PMT-equivalent sum = SSD sum * ratio.
+                expected = orig * ratios[area]
                 actual = new_region_sums[reg_col]
                 rel_diff = (actual - expected) / expected if expected > 0 else 0.0
                 print(f"  {area:<6} {orig:>14,.0f} {expected:>14,.0f} "
