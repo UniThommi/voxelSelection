@@ -63,7 +63,10 @@ def _draw_radial_zones(
     ax.set_aspect('equal')
     ax.set_xlabel('x [mm]')
     ax.set_ylabel('y [mm]')
-    ax.set_title(f'{area_name.upper()} - PMT/SSD Ratio per Zone')
+    valid = [r for r in ratios if not np.isnan(r)]
+    mean_str = f"{np.mean(valid):.3f}" if valid else "NaN"
+    ax.set_title(f'{area_name.upper()} - PMT/SSD Ratio per Zone '
+                 f'(mean={mean_str})')
     ax.grid(True, alpha=0.3)
 
 
@@ -147,7 +150,9 @@ def _draw_wall_zones(
     ax.set_ylim(min(all_z) - margin, max(all_z) + margin)
     ax.set_xlabel('φ [rad]')
     ax.set_ylabel('z [mm]')
-    ax.set_title('WALL - PMT/SSD Ratio per Zone (φ-z view)')
+    valid = [r for r in ratios if not np.isnan(r)]
+    mean_str = f"{np.mean(valid):.3f}" if valid else "NaN"
+    ax.set_title(f'WALL - PMT/SSD Ratio per Zone (φ-z view, mean={mean_str})')
     ax.grid(True, alpha=0.3)
 
 
