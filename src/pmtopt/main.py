@@ -102,17 +102,19 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                              "Required for muon-ge77 mode.")
 
     # --- Area ratios ---
+    # Ratio convention: PMT/SSD (n_PMT / n_SSD, typically < 1). SSD hits are
+    # multiplied by these to obtain PMT-equivalent hits (n_PMT = n_SSD * ratio).
     parser.add_argument("--pit", type=float, default=None,
-                        help=f"SSD/PMT ratio for PIT "
+                        help=f"PMT/SSD ratio for PIT "
                              f"(default: {DEFAULT_AREA_RATIOS['pit']}).")
     parser.add_argument("--bot", type=float, default=None,
-                        help=f"SSD/PMT ratio for BOT "
+                        help=f"PMT/SSD ratio for BOT "
                              f"(default: {DEFAULT_AREA_RATIOS['bot']}).")
     parser.add_argument("--top", type=float, default=None,
-                        help=f"SSD/PMT ratio for TOP "
+                        help=f"PMT/SSD ratio for TOP "
                              f"(default: {DEFAULT_AREA_RATIOS['top']}).")
     parser.add_argument("--wall", type=float, default=None,
-                        help=f"SSD/PMT ratio for WALL "
+                        help=f"PMT/SSD ratio for WALL "
                              f"(default: {DEFAULT_AREA_RATIOS['wall']}).")
 
     # --- Area filter ---

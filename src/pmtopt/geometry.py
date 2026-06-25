@@ -26,13 +26,25 @@ MUON_TIME_WINDOW_MIN_NS: float = 1_000.0    # 1 µs
 MUON_TIME_WINDOW_MAX_NS: float = 200_000.0  # 200 µs
 
 # ---------------------------------------------------------------------------
-# Default area-dependent hit scaling ratios (SSD / PMT).
+# Default area-dependent hit scaling ratios (PMT / SSD).
+#
+# Convention: ratio = n_PMT / n_SSD  (per-NC photon hits, per area), i.e. the
+# PMT/SSD convention produced by evaluation/ratio_derivation/zone_ratio_analysis.py
+# (key `corr_ratio_pmt_over_ssd` in zone_ratio_results.json). Because a PMT
+# detects fewer photons than the fully sensitive surface, these are < 1.
+#
+# Usage: the SSD-simulated hit counts are MULTIPLIED by this ratio to obtain the
+# equivalent PMT hit counts (n_PMT = n_SSD * ratio). See stochastic_round_block
+# and binarize_from_raw. The values below are the reciprocals of the former
+# SSD/PMT defaults (1/2.0731, 1/2.3843, 1/2.2004, 1/1.8776), so multiplying by
+# them reproduces the former divide-by-SSD/PMT behaviour — only the convention
+# changed from division to multiplication.
 # ---------------------------------------------------------------------------
 DEFAULT_AREA_RATIOS: dict[str, float] = {
-    "pit":  2.0731,
-    "bot":  2.3843,
-    "top":  2.2004,
-    "wall": 1.8776,
+    "pit":  0.500,
+    "bot":  0.467,
+    "top":  0.467,
+    "wall": 0.545,
 }
 
 # ---------------------------------------------------------------------------
