@@ -26,6 +26,32 @@ import scipy.sparse as sp
 FLOAT_TOL_NS: float = -1.0     # tolerance for small negative times (float rounding)
 TIME_CUT_NC_NS: float = 200.0  # photon detection window after NC [ns]
 
+# ──────────────────────────────────────────────────────────────────────
+# PMT-cathode det_uid convention (LEGEND-1000 "detector" geometry).
+#
+# In the PMT+Tyvek optical simulation, /hit/optical records hits on EVERY
+# registered optical detector, not just the PMTs. Only the PMT cathodes may be
+# treated as PMT detections; all other surfaces must be filtered out.
+#
+# PMT optical detectors carry 8-digit det_uids beginning with '1' (>= 1e7),
+# e.g. PMT300132 -> 10300132, PMT3001118 -> 13001118. Every non-PMT optical
+# surface uses a small det_uid (<= 9002) and must NOT be counted as a PMT hit.
+# This matches DETECTOR_PMT_UID_MIN / pmt_cathode_mask in
+# efficiencyDerivationSSD/dataAnalysis/analyzeEfficiency.py.
+PMT_DET_UID_MIN: int = 10_000_000
+"""Smallest valid PMT-cathode det_uid (8-digit, leading '1')."""
+
+NON_PMT_OPTICAL_UIDS: frozenset[int] = frozenset({
+    1965,  # my_tyvek_zyl_foil  (wall)
+    1966,  # my_tyvek_pit_foil  (pit)
+    1967,  # my_tyvek_bot_foil  (bot)
+    1968,  # my_tyvek_top_foil  (top)
+    9000,  # outercryostat
+    9001,  # skirt
+    9002,  # foot
+})
+"""Known non-PMT optical surfaces that must be excluded from PMT detections."""
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Low-level I/O helpers
@@ -376,11 +402,16 @@ def build_pmt_matrix(
 
     Each row corresponds to one NC (same order as nc_truth; share the
     exact same DataFrame instance across all setups so row indices align).
-    Each column corresponds to one unique det_uid found in this setup's
+    Each column corresponds to one unique PMT det_uid found in this setup's
     optical data, sorted ascending.
 
-    det_uid is used as-is as the PMT column identifier — no additional
-    layer filter is applied (same convention as comparePMTCoverage.py).
+    PMT-cathode filter: /hit/optical also contains hits on the Tyvek foils
+    (my_tyvek_* = 1965/1966/1967/1968) and the steel volumes (outercryostat
+    9000, skirt 9001, foot 9002). Only true PMT-cathode hits — det_uid
+    >= PMT_DET_UID_MIN (8-digit, leading '1') — are kept; all other surfaces
+    are dropped before building B. If any dropped det_uid is not one of the
+    known NON_PMT_OPTICAL_UIDS, a ValueError is raised rather than silently
+    treating an unknown detector as a PMT. (See analyzeEfficiency.py.)
 
     Optical hits are matched to NC truth rows by (run_id, muon_track_id,
     nC_track_id) so that IDs from different runs are never conflated.
@@ -440,6 +471,35 @@ def build_pmt_matrix(
 
     if verbose:
         print(f"  Optical rows loaded: {len(optical):,}")
+
+    # ── PMT-cathode filter ────────────────────────────────────────────
+    # Drop optical hits on non-PMT surfaces (Tyvek foils + steel volumes);
+    # only det_uid >= PMT_DET_UID_MIN are genuine PMT cathodes. Refuse to run
+    # if an unknown non-PMT det_uid appears, so geometry changes can't silently
+    # leak a foreign detector into the PMT counts.
+    det_uid_all = optical["det_uid"].to_numpy()
+    pmt_hit_mask = det_uid_all >= PMT_DET_UID_MIN
+    if not pmt_hit_mask.all():
+        dropped_uids = sorted(int(u) for u in np.unique(det_uid_all[~pmt_hit_mask]))
+        unexpected = [u for u in dropped_uids if u not in NON_PMT_OPTICAL_UIDS]
+        if unexpected:
+            raise ValueError(
+                f"build_pmt_matrix: optical data in {sim_base_dir!r} contains "
+                f"unexpected non-PMT det_uid(s) {unexpected}. Known non-PMT "
+                f"surfaces are {sorted(NON_PMT_OPTICAL_UIDS)} (Tyvek foils "
+                f"1965-1968, steel volumes 9000-9002); PMT cathodes use "
+                f"det_uid >= {PMT_DET_UID_MIN}. Refusing to treat an unknown "
+                f"detector as a PMT."
+            )
+        if verbose:
+            n_dropped = int((~pmt_hit_mask).sum())
+            print(
+                f"  PMT filter: dropped {n_dropped:,} non-PMT optical hit(s) on "
+                f"det_uid(s) {dropped_uids} (Tyvek foils / cryostat / skirt / "
+                f"foot); kept {int(pmt_hit_mask.sum()):,} PMT-cathode hit(s)."
+            )
+        optical = optical.loc[pmt_hit_mask].reset_index(drop=True)
+    del det_uid_all, pmt_hit_mask
 
     # Empty result for degenerate case
     _empty_detect = {
