@@ -24,6 +24,23 @@ Additionally, at the optimal ratio, the script produces:
   - Recall comparison at PMT's best (M,W)
   - Best-(M,W) agreement table between PMT and SSD
 
+Ratio convention
+----------------
+The area ratios (--pit/--bot/--top/--wall and the swept value) follow the SAME
+**PMT/SSD** convention as ``pmtopt`` (``src/pmtopt/geometry.py`` and
+``data_loading.binarize_from_raw``):
+
+    ratio = n_PMT / n_SSD          (per-NC photon hits, per area)
+
+SSD-simulated hit counts are MULTIPLIED by this ratio to obtain PMT-equivalent
+hits (``n_PMT = n_SSD * ratio``).  Because a PMT detects fewer photons than the
+fully sensitive surface, the physical ratios are < 1 — the current
+``DEFAULT_AREA_RATIOS`` are pit 0.500, bot 0.467, top 0.467, wall 0.545.
+
+NOTE: this convention was previously the reciprocal SSD/PMT ratio (> 1, e.g.
+2.0731 …).  Do NOT pass the old > 1 values here — ``binarize_from_raw`` now
+multiplies (no longer divides), so > 1 ratios would inflate the hit counts.
+
 Usage
 -----
 Fixed-ratio mode (default) — evaluate at explicitly given per-layer ratios:
@@ -32,12 +49,12 @@ Fixed-ratio mode (default) — evaluate at explicitly given per-layer ratios:
         --muon-dir  /path/to/nc_truth/ \\
         --ssd-hdf5  /path/to/data.hdf5 \\
         --setup-dirs /path/A /path/B /path/C \\
-        --pit 2.0731 --bot 2.3843 --top 2.2004 --wall 1.8776 \\
+        --pit 0.500 --bot 0.467 --top 0.467 --wall 0.545 \\
         [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42]
 
-Ratio-sweep mode — sweep the ratio to maximise SSD–PMT correlation:
+Ratio-sweep mode — sweep the (PMT/SSD) ratio to maximise SSD–PMT correlation:
 
     python correlate_ssd_pmt.py \\
         --ratio-sweep \\
@@ -45,7 +62,7 @@ Ratio-sweep mode — sweep the ratio to maximise SSD–PMT correlation:
         --ssd-hdf5  /path/to/data.hdf5 \\
         --setup-dirs /path/A /path/B /path/C \\
         [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
-        [--ratio-min 1.0] [--ratio-max 6.0] [--ratio-step 0.1] \\
+        [--ratio-min 0.05] [--ratio-max 1.0] [--ratio-step 0.025] \\
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42] [--skip-per-layer]
 
@@ -591,7 +608,7 @@ def global_ratio_sweep(
     for ratio_factor in ratio_factors:
         ratio_factor = float(ratio_factor)
         area_ratios  = {lyr: ratio_factor for lyr in DEFAULT_AREA_RATIOS}
-        print(f"  ratio={ratio_factor:.2f}", end=" ... ", flush=True)
+        print(f"  ratio={ratio_factor:.3f}", end=" ... ", flush=True)
 
         for i, setup in enumerate(setups):
             setup.ssd_results[ratio_factor] = evaluate_ssd_at_ratio(
@@ -617,7 +634,7 @@ def global_ratio_sweep(
         recent_mean_abs.append(mean_abs)
 
         if patience_count >= early_stop_patience:
-            print(f"  Early stop at ratio={ratio_factor:.2f} (mean|r| down for "
+            print(f"  Early stop at ratio={ratio_factor:.3f} (mean|r| down for "
                   f"{early_stop_patience} steps)")
             break
 
@@ -628,7 +645,7 @@ def global_ratio_sweep(
     nc_df  = corr_df[corr_df["metric"] == "nc_coverage"]
     grp    = nc_df.groupby("ratio")["pearson_r"].mean().dropna()
     optimal_ratio = float(grp.idxmax()) if not grp.empty else float(ratio_factors[0])
-    print(f"  → Optimal global ratio: {optimal_ratio:.2f}")
+    print(f"  → Optimal global ratio: {optimal_ratio:.3f}")
     return corr_df, optimal_ratio
 
 
@@ -667,7 +684,7 @@ def per_layer_ratio_sweep(
             area_ratios  = {lyr: optimal_global_ratio for lyr in DEFAULT_AREA_RATIOS}
             area_ratios[layer] = ratio_factor
             temp_key = (layer, ratio_factor)
-            print(f"    ratio={ratio_factor:.2f}", end=" ... ", flush=True)
+            print(f"    ratio={ratio_factor:.3f}", end=" ... ", flush=True)
 
             for i, setup in enumerate(setups):
                 setup.ssd_results[temp_key] = evaluate_ssd_at_ratio(
@@ -699,7 +716,7 @@ def per_layer_ratio_sweep(
             recent_mean_abs.append(mean_abs)
 
             if patience_count >= early_stop_patience:
-                print(f"    Early stop at ratio={ratio_factor:.2f}")
+                print(f"    Early stop at ratio={ratio_factor:.3f}")
                 break
 
         all_rows.extend(layer_rows)
@@ -710,7 +727,7 @@ def per_layer_ratio_sweep(
             per_layer_optima[layer] = float(grp.idxmax()) if not grp.empty else optimal_global_ratio
         else:
             per_layer_optima[layer] = optimal_global_ratio
-        print(f"    → Optimal {layer} ratio: {per_layer_optima[layer]:.2f}")
+        print(f"    → Optimal {layer} ratio: {per_layer_optima[layer]:.3f}")
 
     return pd.DataFrame(all_rows), per_layer_optima
 
@@ -855,7 +872,7 @@ def plot_corr_vs_ratio(
         ax.axvspan(_DEFAULT_RATIO_RANGE[0], _DEFAULT_RATIO_RANGE[1],
                    color="gray", alpha=0.12, label="Default ratios")
         ax.axvline(optimal_ratio, color="#2ca02c", linewidth=1.2, linestyle="--",
-                   alpha=0.85, label=f"Optimal ({optimal_ratio:.2f})")
+                   alpha=0.85, label=f"Optimal ({optimal_ratio:.3f})")
         ax.plot(sub["ratio"], sub["pearson_r"],
                 color="blue", linewidth=1.2, label="Pearson r")
         ax.plot(sub["ratio"], sub["spearman_rho"],
@@ -933,9 +950,9 @@ def plot_scatter_ssd_pmt(
     for idx in range(len(M_values), n_rows * n_cols):
         axes[idx // n_cols][idx % n_cols].set_visible(False)
 
-    fig.suptitle(f"SSD vs PMT — {title_metric}  |  ratio={ratio_factor:.2f}", fontsize=12)
+    fig.suptitle(f"SSD vs PMT — {title_metric}  |  ratio={ratio_factor:.3f}", fontsize=12)
     fig.tight_layout()
-    fname = f"scatter_{metric}_ratio{ratio_factor:.1f}.png"
+    fname = f"scatter_{metric}_ratio{ratio_factor:.3f}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -987,7 +1004,7 @@ def plot_w2_comparison(
         if idx == 0:
             ax.legend(handles=[
                 Line2D([0], [0], marker="^", color="gray", linestyle="None",
-                       markersize=7, label=f"SSD (ratio={ratio_factor:.2f})"),
+                       markersize=7, label=f"SSD (ratio={ratio_factor:.3f})"),
                 Line2D([0], [0], marker="o", color="gray", linestyle="None",
                        markersize=7, label="PMT"),
             ], fontsize=8)
@@ -995,7 +1012,7 @@ def plot_w2_comparison(
     for idx in range(len(m_panels), n_rows * n_cols):
         axes[idx // n_cols][idx % n_cols].set_visible(False)
 
-    fig.suptitle(f"W2 vs NC Fraction — SSD vs PMT  |  ratio={ratio_factor:.2f}", fontsize=12)
+    fig.suptitle(f"W2 vs NC Fraction — SSD vs PMT  |  ratio={ratio_factor:.3f}", fontsize=12)
     fig.tight_layout()
     fname = "w2_coverage_comparison.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
@@ -1036,7 +1053,7 @@ def plot_scatter_ssd_pmt_fom(
 
     fig, ax = plt.subplots(figsize=(7, 6))
     _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   f"SSD FoM  (ratio={ratio_factor:.3f})", "PMT FoM",
                    force_origin=True)
     for x, y, mw in zip(x_arr, y_arr, mw_labels):
         if np.isfinite(x) and np.isfinite(y):
@@ -1044,11 +1061,11 @@ def plot_scatter_ssd_pmt_fom(
                         textcoords="offset points", fontsize=6, color="dimgray")
 
     ax.set_title(
-        f"SSD vs PMT — Figure of Merit  |  ratio={ratio_factor:.2f}\n"
+        f"SSD vs PMT — Figure of Merit  |  ratio={ratio_factor:.3f}\n"
         "(M,W) chosen per setup to maximise PMT FoM", fontsize=11,
     )
     fig.tight_layout()
-    fname = f"scatter_fom_ratio{ratio_factor:.1f}.png"
+    fname = f"scatter_fom_ratio{ratio_factor:.3f}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -1097,7 +1114,7 @@ def plot_w2_spearman_fom(
 
     for rhos, ps, label, color, marker in [
         (rho_pmt, p_pmt, "PMT FoM (best W per setup)", "#1f77b4", "o"),
-        (rho_ssd, p_ssd, f"SSD FoM (same W, ratio={optimal_ratio:.2f})", "#d62728", "s"),
+        (rho_ssd, p_ssd, f"SSD FoM (same W, ratio={optimal_ratio:.3f})", "#d62728", "s"),
     ]:
         rhos = np.array(rhos, dtype=float)
         ps   = np.array(ps,   dtype=float)
@@ -1155,7 +1172,7 @@ def plot_ssd_nc_vs_pmt_recall_at_best_fom(
 
     fig, ax = plt.subplots(figsize=(7, 6))
     _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD NC fraction  (M=1, ratio={ratio_factor:.2f})",
+                   f"SSD NC fraction  (M=1, ratio={ratio_factor:.3f})",
                    "PMT Recall at FoM-optimal (M,W)")
     for x, y, mw in zip(x_arr, y_arr, mw_labels):
         if np.isfinite(x) and np.isfinite(y):
@@ -1163,9 +1180,9 @@ def plot_ssd_nc_vs_pmt_recall_at_best_fom(
                         textcoords="offset points", fontsize=6, color="dimgray")
 
     ax.set_title(f"SSD NC fraction (M=1) vs PMT Recall at FoM-optimal (M,W)\n"
-                 f"ratio={ratio_factor:.2f}", fontsize=11)
+                 f"ratio={ratio_factor:.3f}", fontsize=11)
     fig.tight_layout()
-    fname = f"scatter_ssd_nc_vs_pmt_recall_best_fom_ratio{ratio_factor:.1f}.png"
+    fname = f"scatter_ssd_nc_vs_pmt_recall_best_fom_ratio{ratio_factor:.3f}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -1199,7 +1216,7 @@ def plot_ssd_recall_vs_pmt_recall_at_best_fom(
 
     fig, ax = plt.subplots(figsize=(7, 6))
     _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD Recall  (M=1, W=1, ratio={ratio_factor:.2f})",
+                   f"SSD Recall  (M=1, W=1, ratio={ratio_factor:.3f})",
                    "PMT Recall at FoM-optimal (M,W)")
     for x, y, mw in zip(x_arr, y_arr, mw_labels):
         if np.isfinite(x) and np.isfinite(y):
@@ -1207,9 +1224,9 @@ def plot_ssd_recall_vs_pmt_recall_at_best_fom(
                         textcoords="offset points", fontsize=6, color="dimgray")
 
     ax.set_title(f"SSD Recall (M=1,W=1) vs PMT Recall at FoM-optimal (M,W)\n"
-                 f"ratio={ratio_factor:.2f}", fontsize=11)
+                 f"ratio={ratio_factor:.3f}", fontsize=11)
     fig.tight_layout()
-    fname = f"scatter_ssd_recall_vs_pmt_recall_best_fom_ratio{ratio_factor:.1f}.png"
+    fname = f"scatter_ssd_recall_vs_pmt_recall_best_fom_ratio{ratio_factor:.3f}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -1283,7 +1300,7 @@ def plot_nc_ranking_consistency(
     ax.set_xlabel("Multiplicity threshold M", fontsize=13)
     ax.set_ylabel("Spearman ρ  (PMT rank vs SSD rank)", fontsize=13)
     ax.set_title(
-        f"NC Coverage Ranking Consistency — PMT vs SSD  |  ratio={ratio_factor:.2f}\n"
+        f"NC Coverage Ranking Consistency — PMT vs SSD  |  ratio={ratio_factor:.3f}\n"
         f"(ρ=1: SSD perfectly preserves PMT ranking; filled = 3σ significant)",
         fontsize=13,
     )
@@ -1349,7 +1366,7 @@ def plot_nc_ranking_consistency(
 
     fig.suptitle(
         f"Setup Ranking Comparison — PMT vs SSD (NC Coverage)\n"
-        f"ratio={ratio_factor:.2f}  |  diagonal = perfect agreement",
+        f"ratio={ratio_factor:.3f}  |  diagonal = perfect agreement",
         fontsize=13,
     )
     fig.tight_layout()
@@ -1422,7 +1439,7 @@ def plot_ranking_heatmap(
         ax.set_title(title, fontsize=13)
 
     fig.suptitle(
-        f"Setup Ranking Heatmap — NC Coverage  |  ratio={ratio_factor:.2f}\n"
+        f"Setup Ranking Heatmap — NC Coverage  |  ratio={ratio_factor:.3f}\n"
         f"(rank 1 = highest coverage; Δ > 0 means SSD ranks that setup lower)",
         fontsize=13,
     )
@@ -1500,12 +1517,12 @@ def plot_fom_bars_pmt_vs_ssd(
 
     # ── Right: scatter with diagonal ─────────────────────────────────
     _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   f"SSD FoM  (ratio={ratio_factor:.3f})", "PMT FoM",
                    force_origin=True)
     ax_sc.set_title("SSD vs PMT FoM", fontsize=12)
 
     fig.suptitle(
-        f"FoM Comparison — PMT vs SSD  |  ratio={ratio_factor:.2f}\n"
+        f"FoM Comparison — PMT vs SSD  |  ratio={ratio_factor:.3f}\n"
         f"(M,W) chosen to maximise PMT FoM; same (M,W) used for SSD",
         fontsize=13,
     )
@@ -1572,7 +1589,7 @@ def plot_fom_scatter_per_m(
             continue
 
         _scatter_panel(ax, ssd_arr, pmt_arr, c_valid, labels,
-                       f"SSD FoM (best W, ratio={ratio_factor:.2f})",
+                       f"SSD FoM (best W, ratio={ratio_factor:.3f})",
                        "PMT FoM (best W)")
         ax.set_title(f"M={M}", fontsize=11)
 
@@ -1581,7 +1598,7 @@ def plot_fom_scatter_per_m(
 
     fig.suptitle(
         f"SSD vs PMT — FoM per M  (each side optimises W independently)\n"
-        f"ratio={ratio_factor:.2f}",
+        f"ratio={ratio_factor:.3f}",
         fontsize=13,
     )
     fig.tight_layout()
@@ -1655,7 +1672,7 @@ def plot_fom_mge_comparison(
 
     # Panel A
     _scatter_panel(ax_a, ssd_a, pmt_a, c_valid, labels,
-                   f"SSD FoM  (ratio={ratio_factor:.2f})", "PMT FoM",
+                   f"SSD FoM  (ratio={ratio_factor:.3f})", "PMT FoM",
                    force_origin=True)
     for x, y, mw in zip(ssd_a, pmt_a, mw_a):
         if np.isfinite(x) and np.isfinite(y):
@@ -1679,7 +1696,7 @@ def plot_fom_mge_comparison(
     )
 
     fig.suptitle(
-        f"FoM Comparison — M ≥ {min_M} Constraint  |  ratio={ratio_factor:.2f}",
+        f"FoM Comparison — M ≥ {min_M} Constraint  |  ratio={ratio_factor:.3f}",
         fontsize=14,
     )
     fig.tight_layout()
@@ -1752,14 +1769,14 @@ def plot_recall_comparison(
 
     # ── Right: scatter ────────────────────────────────────────────────
     _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD Recall  (ratio={ratio_factor:.2f})", "PMT Recall",
+                   f"SSD Recall  (ratio={ratio_factor:.3f})", "PMT Recall",
                    force_origin=True)
     ax_sc.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
     ax_sc.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
     ax_sc.set_title("SSD vs PMT Recall", fontsize=12)
 
     fig.suptitle(
-        f"Recall Comparison — PMT vs SSD  |  ratio={ratio_factor:.2f}\n"
+        f"Recall Comparison — PMT vs SSD  |  ratio={ratio_factor:.3f}\n"
         f"(M,W) chosen to maximise PMT FoM per setup",
         fontsize=13,
     )
@@ -1843,7 +1860,7 @@ def plot_best_mw_agreement(
     n_agree_u = sum(agree_uncon)
     n_agree_c = sum(agree_con)
     ax.set_title(
-        f"Best (M,W) Agreement — PMT vs SSD  |  ratio={ratio_factor:.2f}\n"
+        f"Best (M,W) Agreement — PMT vs SSD  |  ratio={ratio_factor:.3f}\n"
         f"Unconstrained: {n_agree_u}/{n} agree   |   "
         f"M≥{min_M} constrained: {n_agree_c}/{n} agree",
         fontsize=13, pad=20,
@@ -1870,9 +1887,9 @@ def write_summary(
     W_default: int,
     total_primaries: int,
     output_dir: str,
-    ratio_min: float = 1.0,
-    ratio_max: float = 10.0,
-    ratio_step: float = 0.1,
+    ratio_min: float = 0.05,    # PMT/SSD convention (< 1); see module docstring
+    ratio_max: float = 1.0,
+    ratio_step: float = 0.025,
     min_M_fom: int = 6,
     area_ratios: Optional[dict[str, float]] = None,
 ) -> None:
@@ -1904,7 +1921,7 @@ def write_summary(
             _ratio_mode_lines.append(f"  {_lyr:>6} ratio     : {_r}")
     else:
         _ratio_mode_lines = [
-            f"  Ratio sweep        : [{ratio_min:.2f}, {ratio_max:.2f}]  step={ratio_step:.2f}"
+            f"  Ratio sweep        : [{ratio_min:.3f}, {ratio_max:.3f}]  step={ratio_step:.3f}  (PMT/SSD)"
         ]
     L += [
         "1. SIMULATION OVERVIEW", _hr(),
@@ -1948,9 +1965,9 @@ def write_summary(
         ]
         boundary_warnings: list[str] = []
         if abs(optimal_ratio - ratio_min) < 1e-9:
-            boundary_warnings.append(f"  *** GLOBAL optimum hit the LOWER boundary ({ratio_min:.2f}). ***")
+            boundary_warnings.append(f"  *** GLOBAL optimum hit the LOWER boundary ({ratio_min:.3f}). ***")
         if abs(optimal_ratio - ratio_max) < 1e-9:
-            boundary_warnings.append(f"  *** GLOBAL optimum hit the UPPER boundary ({ratio_max:.2f}). ***")
+            boundary_warnings.append(f"  *** GLOBAL optimum hit the UPPER boundary ({ratio_max:.3f}). ***")
         if per_layer_optima:
             L.append("  Per-layer optimal ratios:")
             for lyr, r in per_layer_optima.items():
@@ -2008,7 +2025,7 @@ def write_summary(
     # ── 6. Per-setup values at optimal ratio ──────────────────────────
     opt_results = [s.ssd_results.get(optimal_ratio) for s in setups]
     if any(v is not None for v in opt_results):
-        L += [f"6. PER-SETUP VALUES AT OPTIMAL RATIO  (ratio={optimal_ratio:.2f})", _hr()]
+        L += [f"6. PER-SETUP VALUES AT OPTIMAL RATIO  (ratio={optimal_ratio:.3f})", _hr()]
         L += [
             f"  A) NC coverage (M=1) and Recall (M=1, W={W_default})",
             f"  {'Setup':<30} {'SSD NC':>8}  {'PMT NC':>8}  {'SSD Rec':>9}  {'PMT Rec':>9}",
@@ -2067,7 +2084,7 @@ def write_summary(
     # ── 8. FoM best-(M,W) agreement ──────────────────────────────────
     if any(v is not None for v in opt_results):
         L += [
-            f"8. BEST (M,W) AGREEMENT — PMT vs SSD  (ratio={optimal_ratio:.2f})", _hr(),
+            f"8. BEST (M,W) AGREEMENT — PMT vs SSD  (ratio={optimal_ratio:.3f})", _hr(),
             f"  {'Setup':<30} {'PMT_best':>10} {'SSD_best':>10} {'Agree':>6}"
             f"  {'PMT_M≥'+str(min_M_fom):>12} {'SSD_M≥'+str(min_M_fom):>12} {'Agree':>6}",
             f"  {_hr('-', 80)}",
@@ -2222,12 +2239,17 @@ def _parse_args() -> argparse.Namespace:
                    help="W used for recall correlation plots (default: 1)")
     p.add_argument("--min-M-fom",      type=int, default=6,
                    help="Minimum M for constrained FoM analysis (default: 6)")
-    p.add_argument("--ratio-min",      type=float, default=1.0,
-                   help="Start of ratio sweep (default: 1.0)")
-    p.add_argument("--ratio-max",      type=float, default=100.0,
-                   help="Safety cap for ratio sweep; early stopping applies (default: 100.0)")
-    p.add_argument("--ratio-step",     type=float, default=0.1,
-                   help="Step size for ratio sweep (default: 0.1)")
+    # --- Ratio sweep range (PMT/SSD convention, < 1; see module docstring) ---
+    # The sweep applies one uniform PMT/SSD ratio to all layers and multiplies
+    # SSD hits by it. The physical optimum is ~0.5 (DEFAULT_AREA_RATIOS span
+    # 0.467–0.545), so the sweep brackets that region.
+    p.add_argument("--ratio-min",      type=float, default=0.05,
+                   help="Start of PMT/SSD ratio sweep (default: 0.05)")
+    p.add_argument("--ratio-max",      type=float, default=1.0,
+                   help="Safety cap for PMT/SSD ratio sweep; early stopping applies "
+                        "(default: 1.0)")
+    p.add_argument("--ratio-step",     type=float, default=0.025,
+                   help="Step size for ratio sweep (default: 0.025)")
     p.add_argument("--output-dir",     default="./correlation_results",
                    help="Output directory (default: ./correlation_results)")
     p.add_argument("--seed",           type=int, default=42,
@@ -2238,17 +2260,20 @@ def _parse_args() -> argparse.Namespace:
                    help="Enable the global+per-layer ratio sweep to find the optimal "
                         "ratio. When not set (default), --pit/--bot/--top/--wall must "
                         "all be provided and evaluation runs at those fixed ratios.")
+    # --- Fixed per-layer ratios (PMT/SSD convention, n_PMT/n_SSD, < 1) ---
+    # SSD hits are multiplied by these (see binarize_from_raw). Pass the < 1
+    # PMT/SSD values, NOT the old > 1 SSD/PMT reciprocals.
     p.add_argument("--pit",  type=float, default=None,
-                   help=f"Fixed pit  area ratio (required without --ratio-sweep; "
+                   help=f"Fixed pit  PMT/SSD area ratio (required without --ratio-sweep; "
                         f"physics default: {DEFAULT_AREA_RATIOS['pit']})")
     p.add_argument("--bot",  type=float, default=None,
-                   help=f"Fixed bot  area ratio (required without --ratio-sweep; "
+                   help=f"Fixed bot  PMT/SSD area ratio (required without --ratio-sweep; "
                         f"physics default: {DEFAULT_AREA_RATIOS['bot']})")
     p.add_argument("--top",  type=float, default=None,
-                   help=f"Fixed top  area ratio (required without --ratio-sweep; "
+                   help=f"Fixed top  PMT/SSD area ratio (required without --ratio-sweep; "
                         f"physics default: {DEFAULT_AREA_RATIOS['top']})")
     p.add_argument("--wall", type=float, default=None,
-                   help=f"Fixed wall area ratio (required without --ratio-sweep; "
+                   help=f"Fixed wall PMT/SSD area ratio (required without --ratio-sweep; "
                         f"physics default: {DEFAULT_AREA_RATIOS['wall']})")
     return p.parse_args()
 
@@ -2367,8 +2392,8 @@ def main() -> None:
         ratio_factors = np.arange(
             args.ratio_min, args.ratio_max + args.ratio_step / 2, args.ratio_step
         )
-        print(f"\nGlobal ratio sweep [{args.ratio_min:.2f}, {args.ratio_max:.2f}] "
-              f"step={args.ratio_step:.2f} ({len(ratio_factors)} steps) ...")
+        print(f"\nGlobal ratio sweep (PMT/SSD) [{args.ratio_min:.3f}, {args.ratio_max:.3f}] "
+              f"step={args.ratio_step:.3f} ({len(ratio_factors)} steps) ...")
         corr_df, optimal_ratio = global_ratio_sweep(
             setups, ssd_coo_data, setup_voxel_subsets, alignment,
             ratio_factors, args.m, M_values, W_values, args.W_default,
