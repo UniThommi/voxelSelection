@@ -2675,12 +2675,13 @@ def main() -> None:
 
     if not data_path.exists():
         raise RuntimeError(f"data path not found: {data_path}")
-    path_1e6 = data_path / "1e6"
-    path_1e7 = data_path / "1e7"
-    if not path_1e6.exists():
-        raise RuntimeError(f"1e6 dataset directory not found: {path_1e6}")
-    if not path_1e7.exists():
-        raise RuntimeError(f"1e7 dataset directory not found: {path_1e7}")
+    # --- MC uncertainty analysis (1e6/1e7/1e8) disabled — paths no longer required ---
+    # path_1e6 = data_path / "1e6"
+    # path_1e7 = data_path / "1e7"
+    # if not path_1e6.exists():
+    #     raise RuntimeError(f"1e6 dataset directory not found: {path_1e6}")
+    # if not path_1e7.exists():
+    #     raise RuntimeError(f"1e7 dataset directory not found: {path_1e7}")
 
     output_base = Path(args.output_path) if args.output_path else data_path
     out_dir = output_base / "musun_nc_analysis"
@@ -2765,12 +2766,13 @@ def main() -> None:
     plot_cut_nc_material(run_list, out_dir)
     _log_resources("plot_cut_nc_material", t_main)
 
-    print("\n--- Monte Carlo Uncertainty Analysis (muon level) ---")
-    mc_uncertainty_analysis_muon_level(
-        {"1e6": path_1e6, "1e7": path_1e7, "1e8": data_path},
-        out_dir,
-    )
-    _log_resources("mc_uncertainty_analysis_muon_level done", t_main)
+    # --- Monte Carlo uncertainty analysis (1e6/1e7/1e8 muons) disabled ---
+    # print("\n--- Monte Carlo Uncertainty Analysis (muon level) ---")
+    # mc_uncertainty_analysis_muon_level(
+    #     {"1e6": path_1e6, "1e7": path_1e7, "1e8": data_path},
+    #     out_dir,
+    # )
+    # _log_resources("mc_uncertainty_analysis_muon_level done", t_main)
 
     # write_statistics only needs 5 scalar counts from agg; extract them before freeing.
     agg_stats = {k: agg[k] for k in ("n_muons_total", "n_nc_total", "n_nc_ge77",
