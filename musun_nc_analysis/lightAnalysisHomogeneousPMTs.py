@@ -749,16 +749,27 @@ def plot_cut_comparison_all_muons(
     suptitle: str,
     out_name: str,
     bin_mode: str,  # "log" (photon yield) or "int" (PMT multiplicity)
+    muon_mask_attr: str | None = None,
 ) -> None:
-    """Two-panel comparison over ALL NC-producing muons: with 200 ns cut (left)
+    """Two-panel comparison over NC-producing muons: with 200 ns cut (left)
     vs without it (right).  The right (no-cut) panel uses a logarithmic y-axis.
 
     Each panel is annotated with mean and median (vertical lines) and a title
     line giving N, the zero-detected fraction, std, and max of the >0 values.
+
+    ``muon_mask_attr`` optionally names a per-run boolean attribute (e.g.
+    ``muon_is_ge77``) used to restrict the muons; when None all muons are used.
     """
     def _concat(attr: str) -> np.ndarray:
-        arrs = [getattr(rd, attr) for rd in light_run_list
-                if getattr(rd, attr).size > 0]
+        arrs = []
+        for rd in light_run_list:
+            vals = getattr(rd, attr)
+            if vals.size == 0:
+                continue
+            if muon_mask_attr is not None:
+                vals = vals[getattr(rd, muon_mask_attr)]
+            if vals.size > 0:
+                arrs.append(vals)
         return np.concatenate(arrs) if arrs else np.array([], dtype=np.int64)
 
     cut   = _concat(attr_cut)
@@ -1247,6 +1258,17 @@ def main() -> None:
         suptitle="PMT multiplicity per muon (all muons): 200 ns cut vs no cut",
         out_name="pmt_multiplicity_all_muons_cut_vs_nocut.png",
         bin_mode="int",
+    )
+    # Same comparison, restricted to Ge77 muons (muon with >=1 Ge77-flagged NC)
+    plot_cut_comparison_all_muons(
+        light_run_list, out_dir,
+        attr_cut="muon_pmt_counts",
+        attr_nocut="muon_pmt_counts_nocut",
+        xlabel="Distinct PMTs per muon",
+        suptitle="PMT multiplicity per muon (Ge77 muons): 200 ns cut vs no cut",
+        out_name="pmt_multiplicity_ge77_muons_cut_vs_nocut.png",
+        bin_mode="int",
+        muon_mask_attr="muon_is_ge77",
     )
     plot_ge77_muon_zero_photons(light_run_list, out_dir)
     plot_wavelength_all_ncs(all_wl_hist, out_dir)
