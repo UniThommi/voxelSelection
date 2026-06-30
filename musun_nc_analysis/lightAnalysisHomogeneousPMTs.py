@@ -740,6 +740,23 @@ def plot_pmt_multiplicity(
 # ---------------------------------------------------------------------------
 # All-muon cut vs no-cut comparison (photon yield / PMT multiplicity)
 # ---------------------------------------------------------------------------
+def _fmt_zero_pct(num: int, den: int, min_decimals: int = 3) -> str:
+    """Format num/den as a percentage with at least ``min_decimals`` decimals.
+
+    The zero-detection fraction for PMT multiplicity is tiny, so one decimal
+    rounds every variant to ``0.0%`` and the cut-vs-no-cut difference vanishes.
+    Start at ``min_decimals`` and add more digits until a non-zero (i.e.
+    distinguishable) value shows, capped so a genuine zero still terminates.
+    """
+    if den <= 0:
+        return "n/a"
+    pct = num / den * 100.0
+    decimals = min_decimals
+    while pct > 0.0 and round(pct, decimals) == 0.0 and decimals < 12:
+        decimals += 1
+    return f"{pct:.{decimals}f}%"
+
+
 def plot_cut_comparison_all_muons(
     light_run_list: list[LightRunData], out_dir: Path,
     *,
@@ -821,10 +838,16 @@ def plot_cut_comparison_all_muons(
 
         n      = data.size
         n_zero = int((data == 0).sum())
-        frac   = n_zero / n * 100 if n > 0 else 0.0
+        # PMT-multiplicity (int) plots have a tiny zero fraction — use dynamic
+        # precision so the cut-vs-no-cut difference stays visible; photon-yield
+        # (log) plots keep the single-decimal format.
+        if bin_mode == "int":
+            zero_pct = _fmt_zero_pct(n_zero, n)
+        else:
+            zero_pct = f"{(n_zero / n * 100) if n > 0 else 0.0:.1f}%"
         ax.set_title(
             f"{label}\n"
-            f"N = {n:,}  |  zero: {n_zero:,} ({frac:.1f}%)  |  "
+            f"N = {n:,}  |  zero: {n_zero:,} ({zero_pct})  |  "
             f"std = {std:.1f}  |  max = {mx:,}",
             fontsize=11,
         )
