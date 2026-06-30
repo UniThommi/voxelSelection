@@ -57,6 +57,11 @@ COLORS = {
     "purple": "#8172B2",
 }
 
+# Muon coincidence window for NCs (matches pmtopt.geometry):
+# an NC counts as in-window for 1 µs ≤ t ≤ 200 µs after the muon.
+MUON_WINDOW_MIN_NS = 1_000.0      # 1 µs
+MUON_WINDOW_MAX_NS = 200_000.0    # 200 µs
+
 _T0_GLOBAL = time.perf_counter()
 
 
@@ -970,6 +975,96 @@ def plot_nc_times(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_time_ge77_vs_noge77_panel.png",
         log_x=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# NCs outside the muon coincidence window
+# ---------------------------------------------------------------------------
+def _fmt_pct(frac: float) -> str:
+    """Percentage string with ≥3 significant figures.
+
+    Picks the number of decimal places from the magnitude so that small
+    fractions (e.g. 0.012 %) are not rounded down to 0.00 %.
+    """
+    pct = frac * 100.0
+    if pct <= 0.0:
+        return "0 %"
+    ndec = max(2, 2 - int(np.floor(np.log10(pct))))
+    return f"{pct:.{ndec}f} %"
+
+
+def plot_nc_outside_muon_window(agg: dict, out_dir: Path) -> None:
+    """NC capture-time histogram with the [1 µs, 200 µs] muon window shaded.
+
+    Two figures are produced — one for all NCs and one for NCs of Ge77-producing
+    muons — each annotating how many NCs fall below 1 µs, above 200 µs, and
+    outside the window in total (count + percentage of that population).
+
+    Counts are taken from the full time array; the log-scale histogram only
+    displays positive capture times.
+    """
+    nc_time      = agg["nc_time_ns"]
+    nc_is_ge77mu = agg["nc_is_ge77mu"]
+
+    if nc_time.size == 0:
+        return
+
+    populations = [
+        (np.ones(nc_time.size, dtype=bool), "all NCs",                     "all",       COLORS["blue"]),
+        (nc_is_ge77mu,                       "NCs of Ge77-producing muons", "ge77muons", COLORS["red"]),
+    ]
+
+    for mask, pop_label, tag, color in populations:
+        t = nc_time[mask]
+        n_tot = t.size
+        if n_tot == 0:
+            continue
+
+        n_below   = int((t < MUON_WINDOW_MIN_NS).sum())
+        n_above   = int((t > MUON_WINDOW_MAX_NS).sum())
+        n_outside = n_below + n_above
+        n_inside  = n_tot - n_outside
+
+        t_pos = t[t > 0]
+        if t_pos.size == 0:
+            continue
+        bins = make_log_bins(max(1.0, float(t_pos.min())), float(t_pos.max()))
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(t_pos, bins=bins, color=color, alpha=0.8,
+                edgecolor="black", linewidth=0.3)
+
+        # Shaded muon coincidence window with boundary lines
+        ax.axvspan(MUON_WINDOW_MIN_NS, MUON_WINDOW_MAX_NS,
+                   color=COLORS["green"], alpha=0.15,
+                   label="muon window [1 µs, 200 µs]")
+        for xb in (MUON_WINDOW_MIN_NS, MUON_WINDOW_MAX_NS):
+            ax.axvline(xb, color=COLORS["green"], linestyle="--", linewidth=1.3)
+
+        # Annotation box: the three required numbers (count + percentage)
+        txt = (
+            f"Total NCs : {n_tot:,}\n"
+            f"in window : {n_inside:,}  ({_fmt_pct(n_inside / n_tot)})\n"
+            f"< 1 µs    : {n_below:,}  ({_fmt_pct(n_below / n_tot)})\n"
+            f"> 200 µs  : {n_above:,}  ({_fmt_pct(n_above / n_tot)})\n"
+            f"outside   : {n_outside:,}  ({_fmt_pct(n_outside / n_tot)})"
+        )
+        ax.text(0.02, 0.97, txt, transform=ax.transAxes,
+                fontsize=10, va="top", ha="left", family="monospace",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.85,
+                          edgecolor="gray"))
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("NC capture time [ns]", fontsize=13)
+        ax.set_ylabel("Number of NCs", fontsize=13)
+        ax.set_title(
+            f"NC capture time vs muon window — {pop_label}  (N = {n_tot:,})",
+            fontsize=13,
+        )
+        ax.legend(fontsize=10, loc="upper right")
+        ax.tick_params(labelsize=11)
+        _save(fig, out_dir / f"nc_outside_muon_window_{tag}.png")
 
 
 # ---------------------------------------------------------------------------
@@ -2645,6 +2740,8 @@ def main() -> None:
     _log_resources("plot_ge77_per_ge77muon", t_main)
     plot_nc_times(agg, out_dir)
     _log_resources("plot_nc_times", t_main)
+    plot_nc_outside_muon_window(agg, out_dir)
+    _log_resources("plot_nc_outside_muon_window", t_main)
     plot_nc_positions(agg, out_dir)
     _log_resources("plot_nc_positions", t_main)
     plot_ge77_nc_positions_3d(agg, out_dir)
