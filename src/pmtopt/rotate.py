@@ -443,6 +443,7 @@ def compute_mean_actual_phi(mapping: list[tuple[dict, dict]]) -> float:
 def compute_config_metrics(
     mapping: list[tuple[dict, dict]],
     per_layer_refs: dict[str, np.ndarray] | None = None,
+    global_ref: np.ndarray | None = None,
 ) -> dict:
     """Compute quality metrics for one rotation configuration.
 
@@ -453,6 +454,9 @@ def compute_config_metrics(
       mean_delta_phi_deg        — mean |Δφ| per voxel (absolute angular shift)
       std_delta_phi_deg         — std of |Δφ| (uniformity of rotation)
       mean_radial_disp_mm       — mean 3-D Euclidean displacement per voxel
+      w2_global_before          — whole-setup W2 of the original positions
+      w2_global_after           — whole-setup W2 of the rotated positions
+      delta_w2_global_abs       — w2_global_after − w2_global_before
 
     Per layer (in ``per_layer[layer]``):
       count, self_overlap_count,
@@ -469,6 +473,9 @@ def compute_config_metrics(
     per_layer_refs : dict mapping layer name → pre-computed reference sample
         (shape (M, 3)).  If None, references are sampled on the fly
         (seed=42, M=3000) for each layer.
+    global_ref : pre-computed whole-setup reference sample (shape (M, 3)) over
+        all layers present in the mapping.  If None, it is sampled on the fly
+        (seed=42, M=3000) for the set of layers present.
     """
     original_indices = {orig["index"] for orig, _ in mapping}
     layers = sorted({orig["layer"] for orig, _ in mapping})
@@ -543,12 +550,29 @@ def compute_config_metrics(
         1 for _, tgt in mapping if tgt["index"] in original_indices
     )
 
+    # Global (whole-setup) W2 homogeneity — all areas combined vs a uniform
+    # reference sampled over the layers present in this setup.
+    all_before = np.array([o["center"] for o, _ in mapping])
+    all_after  = np.array([t["center"] for _, t in mapping])
+    w2_global_before = w2_global_after = delta_w2_global_abs = None
+    if len(all_before) >= 2:
+        gref = (
+            global_ref if global_ref is not None
+            else sample_reference_distribution(M=3000, seed=42, areas=layers)
+        )
+        w2_global_before = compute_wasserstein_homogeneity(all_before, reference=gref)["w2"]
+        w2_global_after  = compute_wasserstein_homogeneity(all_after,  reference=gref)["w2"]
+        delta_w2_global_abs = w2_global_after - w2_global_before
+
     return {
         "self_overlap_total":     self_overlap_total,
         "self_overlap_per_layer": {l: per_layer[l]["self_overlap_count"] for l in layers},
         "mean_delta_phi_deg":     float(np.degrees(np.mean(delta_phi_abs))),
         "std_delta_phi_deg":      float(np.degrees(np.std(delta_phi_abs))),
         "mean_radial_disp_mm":    float(np.mean(radial_disp)),
+        "w2_global_before":       w2_global_before,
+        "w2_global_after":        w2_global_after,
+        "delta_w2_global_abs":    delta_w2_global_abs,
         "per_layer":              per_layer,
     }
 
@@ -814,6 +838,118 @@ def plot_homogeneity_comparison(
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Homogeneity comparison plot saved to {out}")
+
+
+def aggregate_w2_deviation(
+    configs: list[dict],   # each: {"phi_frac", "phi_deg", "metrics"}
+    output_dir: Path,
+) -> Optional[dict]:
+    """Quantify how much the whole-setup W2 scatters across all valid rotations.
+
+    Collects the global W2 (``w2_global_after``) of every valid rotation config
+    and reduces it to a deviation summary: mean ± std, min/max, range, CV, and
+    deviation from the unrotated baseline (``w2_global_before``).  Because the
+    detector reference is azimuthally symmetric, an ideal continuous rotation
+    leaves W2 invariant; the scatter reported here originates entirely from each
+    rotated voxel snapping to a discrete valid grid position.
+
+    Writes ``w2_rotation_deviation.json`` and ``w2_rotation_deviation.png`` to
+    *output_dir* and prints a report.  Returns the summary dict, or None if no
+    global W2 values are available (e.g. setups with < 2 voxels).
+    """
+    pairs = [
+        (c, c["metrics"].get("w2_global_after"))
+        for c in configs
+        if c["metrics"].get("w2_global_after") is not None
+    ]
+    if not pairs:
+        return None
+
+    arr = np.array([w for _, w in pairs], dtype=float)
+    # Baseline (unrotated) W2 — identical across configs; take the first available.
+    baseline = next(
+        (c["metrics"].get("w2_global_before") for c in configs
+         if c["metrics"].get("w2_global_before") is not None),
+        None,
+    )
+
+    mean = float(arr.mean())
+    std  = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+    summary: dict = {
+        "n_configs":   int(len(arr)),
+        "w2_baseline": baseline,
+        "w2_mean":     mean,
+        "w2_std":      std,
+        "w2_min":      float(arr.min()),
+        "w2_max":      float(arr.max()),
+        "w2_range":    float(arr.max() - arr.min()),
+        "w2_cv":       (std / mean) if mean > 0 else None,
+        "mean_abs_dev_from_baseline": (
+            float(np.mean(np.abs(arr - baseline))) if baseline is not None else None
+        ),
+        "max_abs_dev_from_baseline": (
+            float(np.max(np.abs(arr - baseline))) if baseline is not None else None
+        ),
+        "per_config": [
+            {"phi_frac": c["phi_frac"], "phi_deg": c["phi_deg"], "w2_global_after": w}
+            for c, w in pairs
+        ],
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_json = output_dir / "w2_rotation_deviation.json"
+    with open(out_json, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    # --- Console report ---
+    print(f"\n{'=' * 62}")
+    print("Global W2 deviation under rotation  (whole setup, all areas)")
+    print(f"{'=' * 62}")
+    if baseline is not None:
+        print(f"  Baseline (unrotated) W2 : {baseline:.3f} mm")
+    print(f"  Valid rotations         : {summary['n_configs']}")
+    print(f"  W2 mean ± std           : {mean:.3f} ± {std:.3f} mm")
+    print(f"  W2 min / max            : {summary['w2_min']:.3f} / {summary['w2_max']:.3f} mm")
+    print(f"  W2 range                : {summary['w2_range']:.3f} mm")
+    if summary["w2_cv"] is not None:
+        print(f"  W2 CV (std/mean)        : {summary['w2_cv']:.4f}")
+    if summary["mean_abs_dev_from_baseline"] is not None:
+        print(f"  Mean |W2 − baseline|    : {summary['mean_abs_dev_from_baseline']:.3f} mm")
+        print(f"  Max  |W2 − baseline|    : {summary['max_abs_dev_from_baseline']:.3f} mm")
+    print(f"{'=' * 62}")
+    print(f"Saved to {out_json}")
+
+    # --- Plot: global W2 vs rotation angle, with baseline + mean ± std band ---
+    angles = np.array([c["phi_deg"] for c, _ in pairs])
+    order = np.argsort(angles)
+    ang_sorted = angles[order]
+    w2_sorted  = arr[order]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(arr) * 0.35 + 3), 5))
+    ax.axhspan(mean - std, mean + std, color="steelblue", alpha=0.15,
+               label=f"mean ± std = {mean:.2f} ± {std:.2f} mm")
+    ax.axhline(mean, color="steelblue", ls=":", lw=1.0)
+    if baseline is not None:
+        ax.axhline(baseline, color="black", ls="--", lw=1.2,
+                   label=f"baseline (unrotated) = {baseline:.2f} mm")
+    ax.plot(ang_sorted, w2_sorted, "o-", color="steelblue", lw=1.0, ms=5,
+            label="W2 after rotation")
+    ax.set_xlabel("Rotation angle (deg)", fontsize=11)
+    ax.set_ylabel("Global W2 (mm)", fontsize=11)
+    ax.set_title(
+        f"Whole-setup W2 homogeneity under rotation  "
+        f"({summary['n_configs']} valid angle(s))",
+        fontsize=12,
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out_png = output_dir / "w2_rotation_deviation.png"
+    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Deviation plot saved to {out_png}\n")
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1512,6 +1648,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
             plot_comparison_metrics(saved_configs, output_dir)
             plot_homogeneity_comparison(saved_configs, output_dir)
+            aggregate_w2_deviation(saved_configs, output_dir)
         print(f"\nAll done. Results in: {output_dir}")
         return
 
@@ -1556,6 +1693,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         plot_comparison_metrics(saved_configs, output_dir)
         plot_homogeneity_comparison(saved_configs, output_dir)
+        aggregate_w2_deviation(saved_configs, output_dir)
 
     # Final summary
     print(f"\n{'=' * 62}")
