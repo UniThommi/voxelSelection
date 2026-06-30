@@ -8,6 +8,7 @@ Subcommands:
   homogeneous      Generate all voxels or select N homogeneously distributed voxels
   rotate           Rotate an existing voxel selection by an azimuthal angle
   plot             Generate 3D plots for existing JSON voxel selection files
+  plot-homogeneity Per-area 2D position plot with per-area CV + global W2 from JSON
   plot-w2          W2 explanation visualizations (plots A–F) from JSON config files
   sample-w2-range  Generate configurations spanning the W2 homogeneity range
 
@@ -1013,6 +1014,89 @@ def run_plot_hits(argv: Optional[list[str]] = None) -> None:
     )
 
 
+def run_plot_homogeneity(argv: Optional[list[str]] = None) -> None:
+    """Per-area 2D PMT-position figure with per-area CV and global W2."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Per-area 2D homogeneity plot from JSON voxel selection file(s).\n"
+            "One figure per file: pit / bot / top / wall position panels, each "
+            "titled with its per-area coefficient of variation (CV = σ/μ of "
+            "nearest-neighbour distances); the suptitle carries the global W2 "
+            "for the whole setup."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "json_files", nargs="+", metavar="JSON",
+        help="One or more JSON voxel selection files (greedy wrapper or "
+             "bare-list homogeneous format).",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Directory for the output PNG(s). Default: next to each JSON file.",
+    )
+    parser.add_argument(
+        "--labels", nargs="*", default=None, metavar="LABEL",
+        help="Optional suptitle labels (same order as the JSON files). "
+             "Missing labels fall back to the file stem.",
+    )
+    args = parser.parse_args(argv)
+
+    from pmtopt.homogeneous import (
+        load_all_voxels_json, plot_homogeneity_from_selection, compute_cv_nnd,
+    )
+
+    if args.labels and len(args.labels) != len(args.json_files):
+        print(f"WARNING: got {len(args.labels)} labels for "
+              f"{len(args.json_files)} files; missing labels use the file stem.")
+
+    for i, json_path_str in enumerate(args.json_files):
+        json_path = Path(json_path_str)
+        if not json_path.exists():
+            print(f"ERROR: file not found: {json_path}", file=sys.stderr)
+            continue
+
+        voxels = load_all_voxels_json(str(json_path))
+        voxels = [v for v in voxels if isinstance(v, dict) and "center" in v]
+        if not voxels:
+            print(f"WARNING: no voxels in {json_path.name}, skipping.")
+            continue
+
+        centers = np.array([v["center"] for v in voxels], dtype=float)
+        layers = np.array([v.get("layer", "wall") for v in voxels])
+        label = (args.labels[i]
+                 if args.labels and i < len(args.labels)
+                 else json_path.stem)
+
+        if args.output_dir:
+            out_dir = Path(args.output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            out_dir = json_path.parent
+        out_path = out_dir / f"{json_path.stem}_homogeneity_cv.png"
+
+        print(f"\n{json_path.name}  (N={len(centers)})")
+        cv_by_area = plot_homogeneity_from_selection(
+            centers, layers, str(out_path), label=label,
+        )
+
+        # Console summary
+        g = cv_by_area.get("_global", {})
+        if g.get("w2") is not None:
+            print(f"  Global W2 = {g['w2']:.1f} mm")
+        print(f"  {'Area':<6} {'N':>4} {'CV':>8} {'mean NND':>12} {'std NND':>12}")
+        print(f"  " + "-" * 46)
+        for area in ["pit", "bot", "top", "wall"]:
+            res = cv_by_area.get(area)
+            if res is None:
+                continue
+            if res["cv"] is None:
+                print(f"  {area:<6} {res['n']:>4}   (too few points)")
+            else:
+                print(f"  {area:<6} {res['n']:>4} {res['cv']:>8.3f} "
+                      f"{res['mean_nnd']:>10.1f}mm {res['std_nnd']:>10.1f}mm")
+
+
 def run_plot_w2(argv: Optional[list[str]] = None) -> None:
     """Generate W2 explanation visualizations (plots A–F) from JSON config files."""
     parser = argparse.ArgumentParser(
@@ -1045,7 +1129,8 @@ def run_plot_w2(argv: Optional[list[str]] = None) -> None:
     )
 
 
-_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits", "plot-w2", "sample-w2-range")
+_SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits",
+                "plot-homogeneity", "plot-w2", "sample-w2-range")
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -1062,6 +1147,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "  rotate           Rotate an existing voxel selection azimuthally\n"
             "  plot             Plot existing JSON voxel selection file(s)\n"
             "  plot-hits        Heatmap of total photon hits per voxel (light distribution)\n"
+            "  plot-homogeneity Per-area 2D position plot with per-area CV + global W2 from JSON\n"
             "  plot-w2          W2 explanation visualizations (A–F) from JSON config files\n"
             "  sample-w2-range  Generate configurations spanning the W2 range\n\n"
             "Run 'main.py <subcommand> --help' for subcommand-specific help."
@@ -1082,6 +1168,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         run_plot(rest)
     elif mode == "plot-hits":
         run_plot_hits(rest)
+    elif mode == "plot-homogeneity":
+        run_plot_homogeneity(rest)
     elif mode == "plot-w2":
         run_plot_w2(rest)
     elif mode == "sample-w2-range":

@@ -562,6 +562,47 @@ def get_w2_ref() -> np.ndarray:
     return _W2_REF
 
 
+def compute_cv_nnd(centers: np.ndarray) -> dict:
+    """Coefficient of variation of the nearest-neighbour distances (NND).
+
+    For a point set ``P = {p_1, ..., p_n}`` the nearest-neighbour distance of
+    point ``p_i`` is ``NND(p_i) = min_{j != i} ||p_i - p_j||`` (Euclidean,
+    detector coordinates). The coefficient of variation is then
+
+        CV = sigma_NND / mu_NND,
+
+    the ratio of the standard deviation to the mean of the NNDs of all points.
+    If all NNDs are equal the point density is constant — a perfectly
+    homogeneous distribution gives ``CV = 0``; larger CV means less uniform.
+
+    Parameters
+    ----------
+    centers : np.ndarray, shape (n, 3)
+        3-D positions of the points in mm.
+
+    Returns
+    -------
+    dict with keys:
+        ``cv``        — coefficient of variation (None if n < 2).
+        ``mean_nnd``  — mean nearest-neighbour distance in mm (None if n < 2).
+        ``std_nnd``   — std of nearest-neighbour distances in mm (None if n < 2).
+        ``n``         — number of points.
+    """
+    centers = np.asarray(centers, dtype=np.float64)
+    n = len(centers)
+    if n < 2:
+        return {"cv": None, "mean_nnd": None, "std_nnd": None, "n": n}
+
+    d = _ssd.cdist(centers, centers)
+    np.fill_diagonal(d, np.inf)
+    nnd = d.min(axis=1)
+
+    mu = float(nnd.mean())
+    sigma = float(nnd.std())  # population std (ddof=0)
+    cv = sigma / mu if mu > 0 else float("inf")
+    return {"cv": cv, "mean_nnd": mu, "std_nnd": sigma, "n": n}
+
+
 def compute_wasserstein_homogeneity_with_baseline(
     centers: np.ndarray,
     fibonacci_centers: np.ndarray,
@@ -813,6 +854,133 @@ def plot_homogeneity(
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {output_path}")
+
+
+def plot_homogeneity_from_selection(
+    centers: np.ndarray,
+    layers: np.ndarray,
+    output_path: str,
+    label: str = "",
+    global_w2: float | None = None,
+) -> dict[str, dict]:
+    """Per-area 2D PMT-position figure with per-area CV and a global W2.
+
+    Renders the four detector areas (pit / bot / top / wall) as 2D position
+    panels in a single figure: x-y scatter with PMT-radius circles for the flat
+    surfaces, and an unrolled φ-z scatter for the wall. Each panel title carries
+    the per-area coefficient of variation of nearest-neighbour distances
+    (:func:`compute_cv_nnd`); the figure suptitle carries the global W2
+    homogeneity value for the whole setup.
+
+    Parameters
+    ----------
+    centers : np.ndarray, shape (N, 3)
+        PMT center coordinates in mm.
+    layers : np.ndarray, shape (N,)
+        Area label per PMT ("pit" / "bot" / "top" / "wall").
+    output_path : str
+        PNG output path.
+    label : str
+        Optional label for the figure suptitle (e.g. the config name).
+    global_w2 : float or None
+        Pre-computed global W2 (mm). If None, it is computed here from the
+        cached uniform-surface reference via :func:`get_w2_ref`.
+
+    Returns
+    -------
+    dict
+        ``{area: compute_cv_nnd(...)}`` for each populated area, plus a
+        ``"_global"`` entry holding ``{"w2": global_w2}``.
+    """
+    centers = np.asarray(centers, dtype=np.float64)
+    layers = np.asarray(layers)
+
+    if global_w2 is None and len(centers) >= 2:
+        global_w2 = compute_wasserstein_homogeneity(
+            centers, reference=get_w2_ref())["w2"]
+
+    area_order = [a for a in VALID_AREAS if np.any(layers == a)]
+    if not area_order:
+        print("  [SKIP] plot_homogeneity_from_selection: no voxels to plot.")
+        return {}
+
+    cv_by_area: dict[str, dict] = {}
+
+    ncols = 2
+    nrows = math.ceil(len(area_order) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 6 * nrows),
+                             squeeze=False)
+
+    for idx, area in enumerate(area_order):
+        ax = axes[idx // ncols][idx % ncols]
+        area_centers = centers[layers == area]
+
+        cv_res = compute_cv_nnd(area_centers)
+        cv_by_area[area] = cv_res
+        cv_str = (f"CV={cv_res['cv']:.3f}" if cv_res["cv"] is not None
+                  else "CV n/a")
+
+        color = AREA_COLORS[area]
+        if area == "wall":
+            phi = np.arctan2(area_centers[:, 1], area_centers[:, 0])
+            ax.scatter(phi, area_centers[:, 2], s=15, color=color, alpha=0.8)
+            for p, zv in zip(phi, area_centers[:, 2]):
+                ax.add_patch(plt.Circle(
+                    (p, zv), PMT_RADIUS / R_ZYLINDER,
+                    fill=False, edgecolor=color, linewidth=0.4, alpha=0.5,
+                ))
+            ax.set_xlim(-np.pi, np.pi)
+            ax.set_ylim(Z_BASE, Z_BASE + H_CYLINDER)
+            ax.set_xlabel("φ [rad]")
+            ax.set_ylabel("z [mm]")
+        else:
+            ax.scatter(area_centers[:, 0], area_centers[:, 1],
+                       s=15, color=color, alpha=0.8)
+            for c in area_centers:
+                ax.add_patch(plt.Circle(
+                    (c[0], c[1]), PMT_RADIUS,
+                    fill=False, edgecolor=color, linewidth=0.4, alpha=0.5,
+                ))
+            if area == "pit":
+                ax.add_patch(plt.Circle(
+                    (0, 0), R_PIT, fill=False, edgecolor="black",
+                    linewidth=1.5, linestyle="--"))
+                lim = R_PIT * 1.15
+            else:  # bot / top
+                r_inner = R_ZYL_BOT if area == "bot" else R_ZYL_TOP
+                for r in [r_inner, R_ZYLINDER]:
+                    ax.add_patch(plt.Circle(
+                        (0, 0), r, fill=False, edgecolor="black",
+                        linewidth=1.5, linestyle="--"))
+                lim = R_ZYLINDER * 1.15
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_aspect("equal")
+            ax.set_xlabel("x [mm]")
+            ax.set_ylabel("y [mm]")
+
+        ax.set_title(f"{area.capitalize()} (N={len(area_centers)}, {cv_str})")
+        ax.grid(True, alpha=0.3)
+
+    for idx in range(len(area_order), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    w2_str = (f"Global W2 = {global_w2:.1f} mm"
+              if global_w2 is not None else "Global W2 = n/a")
+    suptitle = f"PMT homogeneity per area"
+    if label:
+        suptitle += f" — {label}"
+    suptitle += (f"\n{w2_str}   ·   "
+                 f"CV = σ/μ of nearest-neighbour distances (per area, lower = more uniform)")
+    plt.suptitle(suptitle, fontsize=13, fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+    cv_by_area["_global"] = {"w2": global_w2}
+    return cv_by_area
 
 
 # ---------------------------------------------------------------------------
