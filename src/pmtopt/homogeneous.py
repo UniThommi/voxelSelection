@@ -394,7 +394,8 @@ def sample_reference_distribution(
     M: int = 3000,
     seed: int = 42,
     areas: list[str] | None = None,
-) -> np.ndarray:
+    return_layers: bool = False,
+) -> "np.ndarray | tuple[np.ndarray, np.ndarray]":
     """Sample M points uniformly from the detector surface.
 
     Points are distributed across the requested areas proportionally to
@@ -411,11 +412,17 @@ def sample_reference_distribution(
     areas : list of str or None
         Subset of ``["pit", "bot", "top", "wall"]``.  If None, all four
         areas are used.
+    return_layers : bool
+        If True, also return a per-point area-label array aligned with the
+        returned points.
 
     Returns
     -------
     ref : np.ndarray, shape (M, 3)
         3-D coordinates of the reference points in mm.
+    layers : np.ndarray, shape (M,)
+        Per-point area label ("pit"/"bot"/"top"/"wall"). Only returned when
+        ``return_layers`` is True.
     """
     _all_areas = ["pit", "bot", "top", "wall"]
     areas_to_use = areas if areas is not None else _all_areas
@@ -449,6 +456,7 @@ def sample_reference_distribution(
         m_per_area[sorted_by_rem[i]] += 1
 
     parts: list[np.ndarray] = []
+    layer_parts: list[np.ndarray] = []
 
     if "pit" in areas_to_use:
         m = m_per_area["pit"]
@@ -457,6 +465,7 @@ def sample_reference_distribution(
         r = np.sqrt(u) * R_PIT
         phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
         parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_pit)]))
+        layer_parts.append(np.full(m, "pit", dtype=object))
 
     if "bot" in areas_to_use:
         m = m_per_area["bot"]
@@ -464,6 +473,7 @@ def sample_reference_distribution(
         r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_BOT**2) + R_ZYL_BOT**2)
         phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
         parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_bot)]))
+        layer_parts.append(np.full(m, "bot", dtype=object))
 
     if "top" in areas_to_use:
         m = m_per_area["top"]
@@ -471,6 +481,7 @@ def sample_reference_distribution(
         r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_TOP**2) + R_ZYL_TOP**2)
         phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
         parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_top)]))
+        layer_parts.append(np.full(m, "top", dtype=object))
 
     if "wall" in areas_to_use:
         m = m_per_area["wall"]
@@ -478,8 +489,14 @@ def sample_reference_distribution(
         z = rng.uniform(z_wall_min, z_wall_max, size=m)
         r = float(R_ZYLINDER)
         parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), z]))
+        layer_parts.append(np.full(m, "wall", dtype=object))
 
-    return np.vstack(parts)
+    points = np.vstack(parts)
+    if return_layers:
+        layers = (np.concatenate(layer_parts) if layer_parts
+                  else np.empty(0, dtype=object))
+        return points, layers
+    return points
 
 
 def compute_wasserstein_homogeneity(
@@ -1128,6 +1145,49 @@ def run_select(geometry: str, N: int, areas: list, output_dir: str,
     print("Done.")
 
 
+def run_reference(output_dir: str = ".", M: int = 3000, seed: int = 42) -> None:
+    """Plot the homogeneously distributed W2 reference points themselves.
+
+    Samples the same uniform-surface reference used by the W2 metric
+    (``sample_reference_distribution(M, seed)`` — the points behind
+    :func:`get_w2_ref`) and renders them with the per-area CV + global-W2
+    figure used for PMT selections. The global W2 is the *self* W2 of the
+    reference against ``get_w2_ref()`` (≈ 0 by construction); the per-area
+    panel titles report the number of reference points and their CV.
+    """
+    print(f"Mode: reference | M={M} | seed={seed}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    ref, layers = sample_reference_distribution(
+        M=M, seed=seed, return_layers=True)
+
+    # Self W2: reference vs the cached W2 reference (identical sample) ≈ 0.
+    self_w2 = compute_wasserstein_homogeneity(ref, reference=get_w2_ref())["w2"]
+
+    out_path = os.path.join(
+        output_dir, f"reference_distribution_M{M}_seed{seed}_homogeneity.png")
+    cv_by_area = plot_homogeneity_from_selection(
+        ref, layers, out_path,
+        label=f"W2 reference points (M={M}, seed={seed})",
+        global_w2=self_w2,
+    )
+
+    # Console summary
+    print(f"\n  Self W2 (vs get_w2_ref) = {self_w2:.3f} mm")
+    print(f"  {'Area':<6} {'N_ref':>6} {'CV':>8} {'mean NND':>12} {'std NND':>12}")
+    print(f"  " + "-" * 48)
+    for area in VALID_AREAS:
+        res = cv_by_area.get(area)
+        if res is None:
+            continue
+        if res["cv"] is None:
+            print(f"  {area:<6} {res['n']:>6}   (too few points)")
+        else:
+            print(f"  {area:<6} {res['n']:>6} {res['cv']:>8.3f} "
+                  f"{res['mean_nnd']:>10.1f}mm {res['std_nnd']:>10.1f}mm")
+    print("Done.")
+
+
 # ---------------------------------------------------------------------------
 
 def main(argv=None) -> None:
@@ -1254,5 +1314,9 @@ if __name__ == "__main__":
             f"FAIL: W2_clustered ({_w2_clust:.1f}) should be > W2_fibonacci ({_w2_fib:.1f})"
         )
         print("  PASS: W2_clustered > W2_fibonacci — global imbalance correctly detected.")
+    elif len(sys.argv) == 1:
+        # Bare `python homogeneous.py`: plot the homogeneously distributed
+        # W2 reference points (per-area CV + self W2).
+        run_reference()
     else:
         main()
