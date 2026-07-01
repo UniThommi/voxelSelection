@@ -1986,6 +1986,191 @@ def plot_recall_at_best_fom(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Plots 27 / 27b — Recall metrics across setups (line + rank heatmap)
+# ──────────────────────────────────────────────────────────────────────
+def _recall_metric_table(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+) -> tuple[list[str], dict[str, list[float]]]:
+    """Return (metric_names, {label: [4 recall values]}).
+
+    The four metrics, in order:
+      0. best recall over all M (= the M=1, W=1 reference)
+      1. best recall over M ≥ min_m
+      2. recall at the FoM-optimal (M, W) over all M
+      3. recall at the FoM-optimal (M, W) over M ≥ min_m
+    """
+    m_all = M_values
+    m_ge  = [M for M in M_values if M >= min_m]
+
+    def _best_recall(r: "SetupResult", m_search: list[int]) -> float:
+        best = float("nan")
+        for M in m_search:
+            for W in W_values:
+                v = _cc_recall(r, M, W)
+                if np.isfinite(v) and (np.isnan(best) or v > best):
+                    best = v
+        return best
+
+    names = [
+        "Best recall (all M)",
+        f"Best recall (M ≥ {min_m})",
+        "Recall at best FoM (all M)",
+        f"Recall at best FoM (M ≥ {min_m})",
+    ]
+    table: dict[str, list[float]] = {}
+    for r in results:
+        table[r.label] = [
+            _best_recall(r, m_all),
+            _best_recall(r, m_ge) if m_ge else float("nan"),
+            _cc_recall_at_best_fom(r, m_all, W_values, total_primaries),
+            (_cc_recall_at_best_fom(r, m_ge, W_values, total_primaries)
+             if m_ge else float("nan")),
+        ]
+    return names, table
+
+
+def _recall_metric_order(
+    results: list["SetupResult"], table: dict[str, list[float]]
+) -> list["SetupResult"]:
+    """Order setups by best recall over all M (metric 0) descending."""
+    def _k(r):
+        v = table[r.label][0]
+        if not np.isfinite(v):
+            return (1, 0.0)
+        return (0, -float(v))
+    return sorted(results, key=_k)
+
+
+def plot_recall_metrics_across_setups(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    min_m: int = 6,
+) -> None:
+    """27 — Four recall metrics as curves across setups (x = setups, y = %).
+
+    Curves: best recall (all M), best recall (M ≥ min_m), recall at best FoM
+    (all M), recall at best FoM (M ≥ min_m).  Setups are sorted by best recall
+    over all M (descending), so the reference-best setup is leftmost.  A star
+    marks the leading setup of each curve — if all four stars sit on the
+    leftmost setup, the best-recall setup leads every metric.
+    Saved as 27_recall_metrics_across_setups.png.
+    """
+    if len(results) < 2:
+        print("  [SKIP] 27_recall_metrics_across_setups.png: fewer than 2 setups.")
+        return
+
+    names, table = _recall_metric_table(results, M_values, W_values,
+                                        total_primaries, min_m)
+    ordered = _recall_metric_order(results, table)
+    labels  = [r.label for r in ordered]
+    x       = np.arange(len(ordered))
+
+    curve_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+    markers      = ["o", "s", "^", "D"]
+
+    fig, ax = plt.subplots(figsize=(max(9, len(ordered) * 0.7), 6))
+    for mi, name in enumerate(names):
+        ys = np.array([table[lbl][mi] for lbl in labels], dtype=float)
+        ax.plot(x, ys, marker=markers[mi], color=curve_colors[mi],
+                linewidth=1.6, markersize=6, label=name)
+        if np.isfinite(ys).any():
+            imax = int(np.nanargmax(ys))
+            ax.scatter([x[imax]], [ys[imax]], marker="*", s=280,
+                       color=curve_colors[mi], edgecolors="black",
+                       linewidths=0.6, zorder=5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=10)
+    ax.set_ylabel("Ge-77 recall", fontsize=13)
+    ax.set_xlabel("Setup (sorted by best recall, all M — descending)", fontsize=13)
+    ax.set_title(
+        "Ge-77 Recall Metrics Across Setups\n"
+        "(★ marks the leading setup per metric)",
+        fontsize=14,
+    )
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.legend(fontsize=9, loc="best")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fname = "27_recall_metrics_across_setups.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+def plot_recall_metrics_rank_heatmap(
+    results: list["SetupResult"],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    min_m: int = 6,
+) -> None:
+    """27b — Rank of each setup within each recall metric (1 = best).
+
+    Rows = the four recall metrics; columns = setups (ordered by best recall
+    over all M, descending).  Each cell is the setup's rank in that metric
+    (1 = highest recall).  If the leftmost column is all 1's, the best-recall
+    setup also leads the other three metrics.
+    Saved as 27b_recall_metrics_rank_heatmap.png.
+    """
+    if len(results) < 2:
+        print("  [SKIP] 27b_recall_metrics_rank_heatmap.png: fewer than 2 setups.")
+        return
+
+    names, table = _recall_metric_table(results, M_values, W_values,
+                                        total_primaries, min_m)
+    ordered = _recall_metric_order(results, table)
+    labels  = [r.label for r in ordered]
+    n_metrics, n_setups = len(names), len(labels)
+
+    rank_matrix = np.full((n_metrics, n_setups), np.nan)
+    for mi in range(n_metrics):
+        vals = np.array([table[lbl][mi] for lbl in labels], dtype=float)
+        mask = np.isfinite(vals)
+        if mask.any():
+            ranks = np.full(n_setups, np.nan)
+            ranks[mask] = scipy_stats.rankdata(-vals[mask], method="min")
+            rank_matrix[mi] = ranks
+
+    fig, ax = plt.subplots(figsize=(max(8, n_setups * 0.7), 4.4))
+    im = ax.imshow(rank_matrix, aspect="auto", cmap=plt.cm.RdYlGn_r,
+                   vmin=1, vmax=max(n_setups, 2))
+    for i in range(n_metrics):
+        for j in range(n_setups):
+            v = rank_matrix[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{int(v)}", ha="center", va="center",
+                        fontsize=9, color="black")
+
+    ax.set_xticks(range(n_setups))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=10)
+    ax.set_yticks(range(n_metrics))
+    ax.set_yticklabels(names, fontsize=10)
+    ax.set_xlabel("Setup (sorted by best recall, all M — descending)", fontsize=12)
+    ax.set_title(
+        "Recall-Metric Rank per Setup  (1 = best)\n"
+        "(leftmost column all 1 ⇒ best-recall setup leads every metric)",
+        fontsize=13,
+    )
+    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+    cbar.set_label("Rank (1 = best)")
+    fig.tight_layout()
+    fname = "27b_recall_metrics_rank_heatmap.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Plots 26 — Pearson correlation scatters (one point per setup)
 # ──────────────────────────────────────────────────────────────────────
 def _cc_best_fom(
@@ -4158,6 +4343,12 @@ def main() -> None:
     plot_recall_at_best_fom(results, M_values, W_values, args.output_dir,
                             total_primaries=_total_primaries, color_map=color_map,
                             min_m=6)
+    # Plots 27 / 27b — four recall metrics across setups (line + rank heatmap)
+    plot_recall_metrics_across_setups(results, M_values, W_values, args.output_dir,
+                                      total_primaries=_total_primaries,
+                                      color_map=color_map, min_m=6)
+    plot_recall_metrics_rank_heatmap(results, M_values, W_values, args.output_dir,
+                                     total_primaries=_total_primaries, min_m=6)
     # Stat limit colour: use the baseline setup's colour so it's visually consistent.
     _bl_for_sl = _find_baseline_result(results)
     _sl_color  = color_map.get(_bl_for_sl.label, "tab:blue")
