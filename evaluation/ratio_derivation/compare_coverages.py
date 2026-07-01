@@ -3681,6 +3681,161 @@ def plot_ge_surv_best_fom(
     print(f"  Saved {fname}")
 
 
+def plot_ge_surv_best_fom_pearson(
+    results: list[SetupResult],
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+    total_primaries: int = 0,
+    color_map: dict[str, str] | None = None,
+    m_min: int = 1,
+    stat_limit_rows: "list[dict] | None" = None,
+    stat_limit_color: str = "tab:blue",
+) -> None:
+    """Like plot 25d/25e (Ge77 survival vs signal livetime at best FoM) but with
+    a Pearson/OLS fit across the setup points to test the correlation between
+    signal survival (1 − deadtime) and Ge77 survival.
+
+    An OLS regression line is drawn over the per-setup points and a box states
+    the Pearson r together with the 3σ and 5σ critical-|r| significance limits
+    (marker ``*`` = 3σ, ``**`` = 5σ).  The fit uses the setup points only — the
+    stat-limit curve is shown for context but excluded from the correlation.
+    Saved as 25f (all M) / 25g (M ≥ m_min).
+    """
+    if color_map is None:
+        _pal = _colors(len(results))
+        color_map = {r.label: _pal[i] for i, r in enumerate(results)}
+    colors = [color_map.get(r.label, "gray") for r in results]
+
+    m_search = [M for M in M_values if M >= m_min]
+    if not m_search:
+        print(f"  [SKIP] plot_ge_surv_best_fom_pearson(m_min={m_min}): no M values >= {m_min}.")
+        return
+
+    pts_x: list[float] = []
+    pts_y: list[float] = []
+    pt_labels: list[str] = []
+
+    for r in results:
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, m_search, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if not valid:
+            pts_x.append(float("nan"))
+            pts_y.append(float("nan"))
+            pt_labels.append("N/A")
+            continue
+        best_M, best_W = max(valid, key=valid.__getitem__)
+        cm = r.muon["confusion"].get((best_M, best_W))
+        TN = _tp - cm["TP"] - cm["FP"] - cm["FN"]
+        ge_surv  = calc_ge_survival_confusion(
+            cm.get("tp_ge77_nc_counts", np.ones(cm["TP"], dtype=np.int32)),
+            cm.get("fn_ge77_nc_counts", np.ones(cm["FN"], dtype=np.int32)),
+        )
+        deadtime = calc_deadtime_confusion(cm["TP"], cm["FP"], TN, cm["FN"])
+        pts_x.append(1.0 - deadtime)
+        pts_y.append(ge_surv)
+        pt_labels.append(f"M{best_M}W{best_W}")
+
+    sl_filt: list[dict] = []
+    if stat_limit_rows:
+        sl_filt = [r for r in stat_limit_rows if np.isfinite(r["sig_surv"])]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    pcm = _fom_colormap_background(
+        ax, [], [], normalize=False, cmap="YlOrBr", alpha=0.30,
+        x_range=(0.80, 1.0), y_range=(0.0, 1.0),
+    )
+    if pcm is not None:
+        fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
+
+    for r, c, x, y, lbl in zip(results, colors, pts_x, pts_y, pt_labels):
+        if np.isfinite(x):
+            ax.scatter([x], [y], color=c, s=60, zorder=4)
+            ax.annotate(lbl, xy=(x, y), xytext=(4, 3),
+                        textcoords="offset points", fontsize=7, color=c)
+
+    if sl_filt:
+        xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
+        ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
+        si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
+        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+                               color=stat_limit_color,
+                               label="Full Captures - stat. limit",
+                               linestyle=":", linewidth=1.5, zorder=4,
+                               alpha_inner=0.15, alpha_outer=0.07)
+
+    # ── Pearson / OLS fit over the setup points only ──────────────────
+    xs = np.array(pts_x, dtype=float)
+    ys = np.array(pts_y, dtype=float)
+    mask = np.isfinite(xs) & np.isfinite(ys)
+    fit_label = None
+    if mask.sum() >= 3 and np.std(xs[mask]) > 0 and np.std(ys[mask]) > 0:
+        slope, intercept, r_val, p_val, _se = scipy_stats.linregress(xs[mask], ys[mask])
+        x_fit = np.linspace(xs[mask].min(), xs[mask].max(), 100)
+        ax.plot(x_fit, slope * x_fit + intercept, "k--", linewidth=1.4,
+                zorder=6, label="OLS fit")
+        fit_label = "OLS fit"
+        n_fit = int(mask.sum())
+        rc3 = _pearson_rcrit(n_fit, sigma=3.0)
+        rc5 = _pearson_rcrit(n_fit, sigma=5.0)
+        stars = "**" if abs(r_val) >= rc5 else ("*" if abs(r_val) >= rc3 else "")
+        verdict = ("5σ significant" if abs(r_val) >= rc5
+                   else "3σ significant" if abs(r_val) >= rc3
+                   else "not 3σ significant")
+        ax.text(
+            0.98, 0.98,
+            f"Pearson r = {r_val:+.3f}{stars}\n"
+            f"p = {p_val:.2g}   (n = {n_fit} setups)\n"
+            f"3σ limit: |r| ≥ {rc3:.3f}\n"
+            f"5σ limit: |r| ≥ {rc5:.3f}\n"
+            f"→ {verdict}",
+            transform=ax.transAxes, fontsize=9, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                      edgecolor="gray", alpha=0.9),
+        )
+    else:
+        print(f"  [WARN] 25{'g' if m_min > 1 else 'f'} Pearson fit: "
+              "fewer than 3 finite setup points or zero variance.")
+
+    m_desc = f"M ≥ {m_min}" if m_min > 1 else "all M"
+    ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
+    ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
+    ax.set_title(
+        f"Ge77 Survival vs Signal Livetime — Best FoM Point per Setup  ({m_desc})\n"
+        "Pearson correlation across setups  (dashed = OLS fit; box = 3σ / 5σ limits)",
+        fontsize=14,
+    )
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map.get(r.label, "gray"),
+                   markersize=8, label=r.label)
+        for r in results
+    ]
+    if fit_label:
+        legend_handles.append(
+            plt.Line2D([0], [0], color="black", linestyle="--",
+                       linewidth=1.4, label="OLS fit")
+        )
+    if sl_filt:
+        legend_handles.append(
+            plt.Line2D([0], [0], color=stat_limit_color, linestyle=":",
+                       linewidth=1.5, label="Full Captures - stat. limit")
+        )
+    ax.legend(handles=legend_handles, fontsize=11, loc="upper left")
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0.80, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    fig.tight_layout()
+    fname = f"25{'g' if m_min > 1 else 'f'}_ge_surv_best_fom_pearson{'_M_ge6' if m_min > 1 else ''}.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 def write_plot25_fom_summary(
     results: list[SetupResult],
     M_values: list[int],
@@ -4393,6 +4548,15 @@ def main() -> None:
     plot_ge_surv_best_fom(results, M_values, W_values, args.output_dir,
                           total_primaries=_total_primaries, color_map=color_map, m_min=6,
                           stat_limit_rows=_stat_limit_rows, stat_limit_color=_sl_color)
+    # Plots 25f / 25g — Ge77 vs signal survival at best FoM with Pearson fit
+    plot_ge_surv_best_fom_pearson(results, M_values, W_values, args.output_dir,
+                                  total_primaries=_total_primaries, color_map=color_map,
+                                  m_min=1, stat_limit_rows=_stat_limit_rows,
+                                  stat_limit_color=_sl_color)
+    plot_ge_surv_best_fom_pearson(results, M_values, W_values, args.output_dir,
+                                  total_primaries=_total_primaries, color_map=color_map,
+                                  m_min=6, stat_limit_rows=_stat_limit_rows,
+                                  stat_limit_color=_sl_color)
     write_plot25_fom_summary(results, M_values, W_values, args.output_dir,
                              stat_limit_rows=_stat_limit_rows,
                              total_primaries=_total_primaries)
