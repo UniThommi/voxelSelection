@@ -396,19 +396,22 @@ def sample_reference_distribution(
     areas: list[str] | None = None,
     return_layers: bool = False,
 ) -> "np.ndarray | tuple[np.ndarray, np.ndarray]":
-    """Sample M points uniformly from the detector surface.
+    """Place M reference points on the detector surface via Fibonacci spirals.
 
     Points are distributed across the requested areas proportionally to
-    surface area using the largest-remainder method, then sampled with the
-    correct area-uniform distribution (inverse-CDF for flat disks, direct
-    uniform for the cylindrical wall).
+    surface area using the largest-remainder method, then placed
+    deterministically with area-uniform Fibonacci spirals (the same scheme
+    as the homogeneous PMT setup, :func:`fibonacci_disk` /
+    :func:`fibonacci_cylinder_wall`).  The spirals span the *full physical
+    surface* of each area (no ``PMT_RADIUS`` inset).
 
     Parameters
     ----------
     M : int
         Total number of reference points.
     seed : int
-        Seed for the random number generator (reproducible by default).
+        Accepted for API compatibility but unused: Fibonacci placement is
+        deterministic.
     areas : list of str or None
         Subset of ``["pit", "bot", "top", "wall"]``.  If None, all four
         areas are used.
@@ -427,7 +430,7 @@ def sample_reference_distribution(
     _all_areas = ["pit", "bot", "top", "wall"]
     areas_to_use = areas if areas is not None else _all_areas
 
-    rng = np.random.default_rng(seed)
+    del seed  # Fibonacci placement is deterministic; kept only for API compat.
 
     # z-coordinates of the flat surfaces (use homogeneous.py voxel conventions)
     z_pit = float(Z_BASE + DZ_PIT / 2)
@@ -460,35 +463,26 @@ def sample_reference_distribution(
 
     if "pit" in areas_to_use:
         m = m_per_area["pit"]
-        # Inverse-CDF for disk (r_in = 0): r = sqrt(u) * R_PIT
-        u = rng.uniform(0.0, 1.0, size=m)
-        r = np.sqrt(u) * R_PIT
-        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
-        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_pit)]))
+        # Full physical disk (r_in = 0 .. R_PIT)
+        fib_2d = fibonacci_disk(m, 0.0, float(R_PIT))
+        parts.append(np.column_stack([fib_2d, np.full(m, z_pit)]))
         layer_parts.append(np.full(m, "pit", dtype=object))
 
     if "bot" in areas_to_use:
         m = m_per_area["bot"]
-        u = rng.uniform(0.0, 1.0, size=m)
-        r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_BOT**2) + R_ZYL_BOT**2)
-        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
-        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_bot)]))
+        fib_2d = fibonacci_disk(m, float(R_ZYL_BOT), float(R_ZYLINDER))
+        parts.append(np.column_stack([fib_2d, np.full(m, z_bot)]))
         layer_parts.append(np.full(m, "bot", dtype=object))
 
     if "top" in areas_to_use:
         m = m_per_area["top"]
-        u = rng.uniform(0.0, 1.0, size=m)
-        r = np.sqrt(u * (R_ZYLINDER**2 - R_ZYL_TOP**2) + R_ZYL_TOP**2)
-        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
-        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), np.full(m, z_top)]))
+        fib_2d = fibonacci_disk(m, float(R_ZYL_TOP), float(R_ZYLINDER))
+        parts.append(np.column_stack([fib_2d, np.full(m, z_top)]))
         layer_parts.append(np.full(m, "top", dtype=object))
 
     if "wall" in areas_to_use:
         m = m_per_area["wall"]
-        phi = rng.uniform(0.0, 2.0 * np.pi, size=m)
-        z = rng.uniform(z_wall_min, z_wall_max, size=m)
-        r = float(R_ZYLINDER)
-        parts.append(np.column_stack([r * np.cos(phi), r * np.sin(phi), z]))
+        parts.append(fibonacci_cylinder_wall(m, float(R_ZYLINDER), z_wall_min, z_wall_max))
         layer_parts.append(np.full(m, "wall", dtype=object))
 
     points = np.vstack(parts)
