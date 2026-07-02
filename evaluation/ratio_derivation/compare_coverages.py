@@ -4485,8 +4485,9 @@ def main() -> None:
         if _W_fixed in W_values:
             plot_nc_recall_correlation(results, _heatmap_ms, args.output_dir,
                                        color_map=color_map, W_fixed=_W_fixed)
-    _w19_fixed = [W for W in [1, 2, 3, 5, 10] if W in W_values]
-    plot_nc_recall_correlation_summary(results, _heatmap_ms, _w19_fixed, args.output_dir,
+    # Plot 19b (NC fraction vs Ge-77 recall Pearson r): plot every W point up
+    # to W_max, matching correlate_ssd_pmt.py (not the discrete {1,2,3,5,10}).
+    plot_nc_recall_correlation_summary(results, _heatmap_ms, W_values, args.output_dir,
                                        color_map=color_map)
 
     # Plot 20 — recall at W=1 across M

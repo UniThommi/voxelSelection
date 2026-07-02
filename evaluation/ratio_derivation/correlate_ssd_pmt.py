@@ -51,7 +51,7 @@ Fixed-ratio mode (default, intended) — evaluate at explicitly given per-layer 
         --setup-dirs /path/A /path/B /path/C \\
         [--labels  Homogeneous Optimized1 Optimized2] \\
         --pit 0.500 --bot 0.467 --top 0.467 --wall 0.545 \\
-        [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
+        [--m 1] [--M-max 15] [--W-max 20] [--W-default 1] \\
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42]
 
@@ -65,7 +65,7 @@ requires an explicit confirmation flag; without it the run aborts with a warning
         --ssd-hdf5  /path/to/data.hdf5 \\
         --setup-dirs /path/A /path/B /path/C \\
         [--labels A B C] \\
-        [--m 1] [--M-max 10] [--W-max 20] [--W-default 1] \\
+        [--m 1] [--M-max 15] [--W-max 20] [--W-default 1] \\
         [--ratio-min 0.05] [--ratio-max 1.0] [--ratio-step 0.025] \\
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42] [--skip-per-layer]
@@ -2911,8 +2911,9 @@ def _parse_args() -> argparse.Namespace:
                         "Defaults to each setup directory's basename.")
     p.add_argument("--m",              type=int, default=1,
                    help="Photon threshold for binarisation (default: 1)")
-    p.add_argument("--M-max",          type=int, default=10,
-                   help="Maximum multiplicity threshold (default: 10)")
+    p.add_argument("--M-max",          type=int, default=15,
+                   help="Maximum multiplicity threshold (default: 15, matches "
+                        "compare_coverages.py)")
     p.add_argument("--W-max",          type=int, default=20,
                    help="Maximum W threshold (default: 20)")
     p.add_argument("--W-default",      type=int, default=1,
