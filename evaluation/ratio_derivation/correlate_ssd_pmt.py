@@ -2351,6 +2351,215 @@ def plot_nc_recall_corr_combined(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# SECTION 13p — Recall metrics across setups (PMT vs SSD) + text summary
+# ─────────────────────────────────────────────────────────────────────
+
+def _recall_metric_names(min_m: int) -> list[str]:
+    return [
+        "Best recall (all M)",
+        f"Best recall (M≥{min_m})",
+        "Recall at best FoM (all M)",
+        f"Recall at best FoM (M≥{min_m})",
+    ]
+
+
+def _recall_metrics_for_setup(
+    s: SetupData,
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+) -> dict:
+    """Return the four recall metrics (PMT & SSD) plus their (M,W) operating points.
+
+    Metrics (order matches _recall_metric_names):
+      0. best recall over all M           (operating point M1W1)
+      1. best recall over M ≥ min_m        (operating point M{min_m}W1)
+      2. recall at the FoM-optimal (M,W), all M
+      3. recall at the FoM-optimal (M,W), M ≥ min_m
+    """
+    res  = s.ssd_results[ratio_factor]
+    m_ge = [M for M in M_values if M >= min_m]
+
+    def _best_recall(recall_fn, m_search) -> tuple[float, tuple[int, int]]:
+        best, best_mw = float("nan"), (M_values[0], W_values[0])
+        for M in m_search:
+            for W in W_values:
+                v = recall_fn(M, W)
+                if np.isfinite(v) and (np.isnan(best) or v > best):
+                    best, best_mw = v, (M, W)
+        return best, best_mw
+
+    pmt_rec = lambda M, W: _pmt_recall(s, M, W)
+    ssd_rec = lambda M, W: _ssd_recall(res, M, W)
+
+    p_br_all, p_mw_br_all = _best_recall(pmt_rec, M_values)
+    s_br_all, s_mw_br_all = _best_recall(ssd_rec, M_values)
+    p_br_ge, p_mw_br_ge = _best_recall(pmt_rec, m_ge) if m_ge else (float("nan"), (min_m, 1))
+    s_br_ge, s_mw_br_ge = _best_recall(ssd_rec, m_ge) if m_ge else (float("nan"), (min_m, 1))
+
+    Mp1, Wp1 = _pmt_best_mw(s, M_values, W_values, total_primaries, min_M=1)
+    Ms1, Ws1 = _ssd_best_mw(res, M_values, W_values, total_primaries, min_M=1)
+    Mp6, Wp6 = _pmt_best_mw(s, M_values, W_values, total_primaries, min_M=min_m)
+    Ms6, Ws6 = _ssd_best_mw(res, M_values, W_values, total_primaries, min_M=min_m)
+
+    pmt = [p_br_all, p_br_ge, _pmt_recall(s, Mp1, Wp1),
+           _pmt_recall(s, Mp6, Wp6) if m_ge else float("nan")]
+    ssd = [s_br_all, s_br_ge, _ssd_recall(res, Ms1, Ws1),
+           _ssd_recall(res, Ms6, Ws6) if m_ge else float("nan")]
+    pmt_mw = [p_mw_br_all, p_mw_br_ge, (Mp1, Wp1), (Mp6, Wp6)]
+    ssd_mw = [s_mw_br_all, s_mw_br_ge, (Ms1, Ws1), (Ms6, Ws6)]
+    return {"pmt": pmt, "ssd": ssd, "pmt_mw": pmt_mw, "ssd_mw": ssd_mw}
+
+
+def plot_recall_metrics_across_setups(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+    output_dir: str,
+) -> None:
+    """SSD-vs-PMT version of compare_coverages plot 27.
+
+    Four Ge-77 recall metrics per setup (see _recall_metric_names), drawn for
+    both simulators: PMT solid, SSD dashed, colour = metric.  Setups on the
+    x-axis are sorted by PMT best recall (all M) descending; a star marks the
+    leading setup of each PMT (reference) curve.
+    Saved as 03m_recall_metrics_across_setups.png.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if len(valid) < 2:
+        print("  [SKIP] recall_metrics_across_setups: fewer than 2 setups.")
+        return
+
+    names   = _recall_metric_names(min_m)
+    metrics = {s.label: _recall_metrics_for_setup(
+                   s, ratio_factor, M_values, W_values, total_primaries, min_m)
+               for s in valid}
+
+    # Order setups by PMT best recall (all M), descending.
+    ordered = sorted(
+        valid,
+        key=lambda s: (not np.isfinite(metrics[s.label]["pmt"][0]),
+                       -(metrics[s.label]["pmt"][0] if np.isfinite(metrics[s.label]["pmt"][0]) else 0.0)),
+    )
+    labels = [s.label for s in ordered]
+    x      = np.arange(len(ordered))
+
+    curve_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+    markers      = ["o", "s", "^", "D"]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(ordered) * 0.8), 6.5))
+    for mi, name in enumerate(names):
+        pmt_ys = np.array([metrics[l]["pmt"][mi] for l in labels], dtype=float)
+        ssd_ys = np.array([metrics[l]["ssd"][mi] for l in labels], dtype=float)
+        ax.plot(x, pmt_ys, marker=markers[mi], color=curve_colors[mi],
+                linewidth=1.7, markersize=6, linestyle="-")
+        ax.plot(x, ssd_ys, marker=markers[mi], color=curve_colors[mi],
+                linewidth=1.5, markersize=5, linestyle="--", alpha=0.9)
+        # Star the leading setup of the PMT (reference) curve.
+        if np.isfinite(pmt_ys).any():
+            imax = int(np.nanargmax(pmt_ys))
+            ax.scatter([x[imax]], [pmt_ys[imax]], marker="*", s=280,
+                       color=curve_colors[mi], edgecolors="black",
+                       linewidths=0.6, zorder=5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=10)
+    ax.set_ylabel("Ge-77 recall", fontsize=13)
+    ax.set_xlabel("Setup (sorted by PMT best recall, all M — descending)", fontsize=13)
+    ax.set_title(
+        f"Ge-77 Recall Metrics Across Setups — PMT (solid) vs SSD (dashed)\n"
+        f"{_RATIO_TITLE}  (★ = leading setup per PMT metric)",
+        fontsize=13,
+    )
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%"))
+    ax.grid(True, alpha=0.3)
+
+    metric_handles = [Line2D([0], [0], color=curve_colors[mi], marker=markers[mi],
+                             linestyle="-", label=names[mi]) for mi in range(len(names))]
+    source_handles = [Line2D([0], [0], color="gray", linestyle="-",  label="PMT (solid)"),
+                      Line2D([0], [0], color="gray", linestyle="--", label="SSD (dashed)")]
+    ax.legend(handles=metric_handles + source_handles, loc="center left",
+              bbox_to_anchor=(1.01, 0.5), fontsize=9)
+
+    fig.tight_layout()
+    fname = "03m_recall_metrics_across_setups.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+def write_recall_summary(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+    output_dir: str,
+) -> None:
+    """Write all four Ge-77 recall metrics (PMT, SSD, deviation) to a text file.
+
+    Consolidates the values behind plot 03m and the recall-at-best-FoM tables
+    (03h / 03i): best recall (all M), best recall (M≥min_m), recall at best FoM
+    (all M), recall at best FoM (M≥min_m).  Saved as 03m_recall_summary.txt.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        print("  [SKIP] recall_summary: no setups.")
+        return
+
+    names   = _recall_metric_names(min_m)
+    metrics = {s.label: _recall_metrics_for_setup(
+                   s, ratio_factor, M_values, W_values, total_primaries, min_m)
+               for s in valid}
+    # Sort by PMT best recall (all M) descending, matching plot 03m.
+    ordered = sorted(
+        valid,
+        key=lambda s: (not np.isfinite(metrics[s.label]["pmt"][0]),
+                       -(metrics[s.label]["pmt"][0] if np.isfinite(metrics[s.label]["pmt"][0]) else 0.0)),
+    )
+
+    hr = "=" * 78
+    L: list[str] = [
+        hr,
+        "GE-77 RECALL SUMMARY — PMT vs SSD   (values behind plot 03m)",
+        f"  {_RATIO_TITLE}",
+        "  Dev = (SSD − PMT) / PMT ;  (M,W) = operating point where recall is taken",
+        "  Metrics 2–3 are the recall-at-best-FoM values from tables 03h / 03i.",
+        hr,
+        "",
+    ]
+
+    for mi, name in enumerate(names):
+        L.append(f"Metric {mi}: {name}")
+        L.append(f"  {'Setup':<28} {'PMT':>8} {'SSD':>8} {'Dev':>8}   "
+                 f"{'PMT(M,W)':>9} {'SSD(M,W)':>9}")
+        L.append("  " + "-" * 74)
+        for s in ordered:
+            m   = metrics[s.label]
+            pv  = m["pmt"][mi]
+            sv  = m["ssd"][mi]
+            pmw = m["pmt_mw"][mi]
+            smw = m["ssd_mw"][mi]
+            L.append(
+                f"  {s.label:<28} {_pct_str(pv):>8} {_pct_str(sv):>8} "
+                f"{_dev_str(sv, pv):>8}   "
+                f"{'M'+str(pmw[0])+'W'+str(pmw[1]):>9} {'M'+str(smw[0])+'W'+str(smw[1]):>9}"
+            )
+        L.append("")
+
+    path = os.path.join(output_dir, "03m_recall_summary.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved: 03m_recall_summary.txt")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # SECTION 14 — Text and CSV output
 # ─────────────────────────────────────────────────────────────────────
 
@@ -2978,6 +3187,10 @@ def main() -> None:
     plot_nc_recall_corr_ssd(setups, optimal_ratio, M_values, W_values, odir)                    # 03j
     plot_nc_recall_corr_ssd_heatmap(setups, optimal_ratio, M_values, W_values, odir)            # 03k
     plot_nc_recall_corr_combined(setups, optimal_ratio, M_values, W_values, odir)               # 03l
+    plot_recall_metrics_across_setups(setups, optimal_ratio, M_values, W_values,
+                                      total_primaries, args.min_M_fom, odir)                     # 03m
+    write_recall_summary(setups, optimal_ratio, M_values, W_values,
+                         total_primaries, args.min_M_fom, odir)                                  # 03m (txt)
 
     # ── 8. Summary ────────────────────────────────────────────────────
     print("\nWriting summary ...")
