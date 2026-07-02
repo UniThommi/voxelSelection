@@ -4074,6 +4074,222 @@ def write_nc_summary(
     print("  Saved nc_summary.txt")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Cross-config comparison tables (aligned; Δ vs baseline config)
+# ──────────────────────────────────────────────────────────────────────
+def _cc_pct(v: float) -> str:
+    return f"{v*100:.2f}%" if np.isfinite(v) else "—"
+
+
+def _cc_fomf(v: float) -> str:
+    return f"{v:.4g}" if np.isfinite(v) else "—"
+
+
+def _cc_dev_vs(value: float, base: float) -> str:
+    """Relative deviation (value − base) / base as a signed percentage."""
+    if not (np.isfinite(value) and np.isfinite(base)) or base == 0:
+        return "—"
+    return f"{100.0 * (value - base) / base:+.1f}%"
+
+
+def _cc_recall_metrics(
+    r: SetupResult, M_values: list[int], W_values: list[int],
+    total_primaries: int, min_m: int,
+) -> tuple[list[float], list[tuple[int, int]]]:
+    """Four recall metrics (values) and their (M,W) operating points for a config.
+
+    Order: best recall (all M), best recall (M≥min_m),
+           recall at best FoM (all M), recall at best FoM (M≥min_m).
+    """
+    m_ge = [M for M in M_values if M >= min_m]
+
+    def _best_recall(m_search):
+        best, mw = float("nan"), (M_values[0], W_values[0])
+        for M in m_search:
+            for W in W_values:
+                v = _cc_recall(r, M, W)
+                if np.isfinite(v) and (np.isnan(best) or v > best):
+                    best, mw = v, (M, W)
+        return best, mw
+
+    def _recall_at_fom(m_search):
+        _tp = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+        grid = _cc_fom_grid(r, m_search, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if not valid:
+            return float("nan"), (M_values[0], W_values[0])
+        bM, bW = max(valid, key=valid.__getitem__)
+        return _cc_recall(r, bM, bW), (bM, bW)
+
+    br_all, mw_br_all = _best_recall(M_values)
+    br_ge,  mw_br_ge  = _best_recall(m_ge) if m_ge else (float("nan"), (min_m, 1))
+    rf_all, mw_rf_all = _recall_at_fom(M_values)
+    rf_ge,  mw_rf_ge  = _recall_at_fom(m_ge) if m_ge else (float("nan"), (min_m, 1))
+    return ([br_all, br_ge, rf_all, rf_ge],
+            [mw_br_all, mw_br_ge, mw_rf_all, mw_rf_ge])
+
+
+def _cc_fom_metrics(
+    r: SetupResult, M_values: list[int], W_values: list[int],
+    total_primaries: int, min_m: int,
+) -> tuple[list[float], list[tuple[int, int]]]:
+    """Two FoM metrics (values) and (M,W): best FoM (all M), best FoM (M≥min_m)."""
+    _tp  = total_primaries if total_primaries > 0 else r.muon["muon_stats"]["total"]
+    m_ge = [M for M in M_values if M >= min_m]
+
+    def _best_fom(m_search):
+        grid = _cc_fom_grid(r, m_search, W_values, _tp)
+        valid = {k: v for k, v in grid.items() if np.isfinite(v)}
+        if not valid:
+            return float("nan"), (M_values[0], W_values[0])
+        bM, bW = max(valid, key=valid.__getitem__)
+        return valid[(bM, bW)], (bM, bW)
+
+    f_all, mw_all = _best_fom(M_values)
+    f_ge,  mw_ge  = _best_fom(m_ge) if m_ge else (float("nan"), (min_m, 1))
+    return [f_all, f_ge], [mw_all, mw_ge]
+
+
+def write_nc_coverage_table(
+    results: list[SetupResult], M_values: list[int], output_dir: str,
+) -> None:
+    """Cross-config NC detection-fraction table + Δ vs baseline (nc_coverage_table.txt)."""
+    if not results:
+        print("  [SKIP] nc_coverage_table: no setups.")
+        return
+    baseline = _find_baseline_result(results)
+    ordered  = _perf_sorted(results, lambda r: _cc_nc_frac(r, M_values[0]))
+
+    def _row_label(r):
+        return r.label + (" [base]" if r is baseline else "")
+
+    hdr = f"  {'Setup':<26}" + "".join(f"{'M='+str(M):>8}" for M in M_values)
+    sep = "  " + "-" * (26 + 8 * len(M_values))
+    L = [
+        "=" * len(sep),
+        "NC DETECTION FRACTION — cross-config comparison",
+        f"  Baseline: {baseline.label}",
+        "  Δ vs baseline = (config − baseline) / baseline",
+        "  Setups sorted by NC fraction at M=1 (descending).",
+        "=" * len(sep),
+        "",
+        "A) NC detection fraction",
+        hdr, sep,
+    ]
+    for r in ordered:
+        L.append(f"  {_row_label(r):<26}"
+                 + "".join(f"{_cc_nc_frac(r, M)*100:>7.2f}%" for M in M_values))
+    L += ["", f"B) Δ vs baseline ({baseline.label})", hdr, sep]
+    for r in ordered:
+        if r is baseline:
+            L.append(f"  {_row_label(r):<26}" + "".join(f"{'ref':>8}" for _ in M_values))
+        else:
+            L.append(f"  {_row_label(r):<26}"
+                     + "".join(f"{_cc_dev_vs(_cc_nc_frac(r, M), _cc_nc_frac(baseline, M)):>8}"
+                               for M in M_values))
+    L.append("")
+
+    path = os.path.join(output_dir, "nc_coverage_table.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved nc_coverage_table.txt")
+
+
+def write_recall_summary_table(
+    results: list[SetupResult], M_values: list[int], W_values: list[int],
+    output_dir: str, min_m: int = 6, total_primaries: int = 0,
+) -> None:
+    """Cross-config recall table (4 metrics) + Δ vs baseline (recall_summary_table.txt)."""
+    if not results:
+        print("  [SKIP] recall_summary_table: no setups.")
+        return
+    baseline = _find_baseline_result(results)
+    metrics  = {r.label: _cc_recall_metrics(r, M_values, W_values, total_primaries, min_m)
+                for r in results}
+    names = ["Best recall (all M)", f"Best recall (M≥{min_m})",
+             "Recall at best FoM (all M)", f"Recall at best FoM (M≥{min_m})"]
+    ordered = sorted(
+        results,
+        key=lambda r: (not np.isfinite(metrics[r.label][0][0]),
+                       -(metrics[r.label][0][0] if np.isfinite(metrics[r.label][0][0]) else 0.0)),
+    )
+
+    hr = "=" * 66
+    L = [
+        hr,
+        "GE-77 RECALL SUMMARY — cross-config comparison",
+        f"  Baseline: {baseline.label}",
+        "  Δ vs baseline = (config − baseline) / baseline ;  (M,W) = operating point",
+        "  Setups sorted by best recall (all M) descending.",
+        hr, "",
+    ]
+    for mi, name in enumerate(names):
+        base_val = metrics[baseline.label][0][mi]
+        L.append(f"Metric {mi}: {name}")
+        L.append(f"  {'Setup':<28} {'Recall':>9} {'Δ vs base':>11}  {'(M,W)':>9}")
+        L.append("  " + "-" * 62)
+        for r in ordered:
+            val = metrics[r.label][0][mi]
+            mw  = metrics[r.label][1][mi]
+            dev = "ref" if r is baseline else _cc_dev_vs(val, base_val)
+            lbl = r.label + (" [base]" if r is baseline else "")
+            L.append(f"  {lbl:<28} {_cc_pct(val):>9} {dev:>11}  "
+                     f"{'M'+str(mw[0])+'W'+str(mw[1]):>9}")
+        L.append("")
+
+    path = os.path.join(output_dir, "recall_summary_table.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved recall_summary_table.txt")
+
+
+def write_fom_summary_table(
+    results: list[SetupResult], M_values: list[int], W_values: list[int],
+    output_dir: str, min_m: int = 6, total_primaries: int = 0,
+) -> None:
+    """Cross-config FoM table (2 metrics) + Δ vs baseline (fom_summary_table.txt)."""
+    if not results:
+        print("  [SKIP] fom_summary_table: no setups.")
+        return
+    baseline = _find_baseline_result(results)
+    metrics  = {r.label: _cc_fom_metrics(r, M_values, W_values, total_primaries, min_m)
+                for r in results}
+    names = ["Best FoM (all M)", f"Best FoM (M≥{min_m})"]
+    ordered = sorted(
+        results,
+        key=lambda r: (not np.isfinite(metrics[r.label][0][0]),
+                       -(metrics[r.label][0][0] if np.isfinite(metrics[r.label][0][0]) else 0.0)),
+    )
+
+    hr = "=" * 66
+    L = [
+        hr,
+        "FIGURE-OF-MERIT SUMMARY — cross-config comparison",
+        f"  Baseline: {baseline.label}",
+        "  Δ vs baseline = (config − baseline) / baseline ;  (M,W) = FoM-optimal point",
+        "  Setups sorted by best FoM (all M) descending.",
+        hr, "",
+    ]
+    for mi, name in enumerate(names):
+        base_val = metrics[baseline.label][0][mi]
+        L.append(f"Metric {mi}: {name}")
+        L.append(f"  {'Setup':<28} {'FoM':>11} {'Δ vs base':>11}  {'(M,W)':>9}")
+        L.append("  " + "-" * 64)
+        for r in ordered:
+            val = metrics[r.label][0][mi]
+            mw  = metrics[r.label][1][mi]
+            dev = "ref" if r is baseline else _cc_dev_vs(val, base_val)
+            lbl = r.label + (" [base]" if r is baseline else "")
+            L.append(f"  {lbl:<28} {_cc_fomf(val):>11} {dev:>11}  "
+                     f"{'M'+str(mw[0])+'W'+str(mw[1]):>9}")
+        L.append("")
+
+    path = os.path.join(output_dir, "fom_summary_table.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved fom_summary_table.txt")
+
+
 def write_confusion_matrices(
     results: list[SetupResult],
     M_values: list[int],
@@ -4571,6 +4787,12 @@ def main() -> None:
                              total_primaries=_total_primaries)
     write_survival_table(results, M_values, W_values, args.output_dir,
                          total_primaries=_total_primaries)
+    # Compact cross-config comparison tables (Δ vs baseline)
+    write_nc_coverage_table(results, M_values, args.output_dir)
+    write_recall_summary_table(results, M_values, W_values, args.output_dir,
+                               min_m=6, total_primaries=_total_primaries)
+    write_fom_summary_table(results, M_values, W_values, args.output_dir,
+                            min_m=6, total_primaries=_total_primaries)
 
     print(f"\nAll outputs saved to: {args.output_dir}")
     print("Done.")
