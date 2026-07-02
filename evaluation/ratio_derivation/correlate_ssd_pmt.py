@@ -1062,57 +1062,6 @@ def plot_w2_comparison(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# SECTION 13b — FoM scatter: SSD vs PMT at optimal ratio
-# ─────────────────────────────────────────────────────────────────────
-
-def plot_scatter_ssd_pmt_fom(
-    setups: list[SetupData],
-    ratio_factor: float,
-    M_values: list[int],
-    W_values: list[int],
-    total_primaries: int,
-    output_dir: str,
-) -> None:
-    """Scatter of SSD-FoM vs PMT-FoM; (M,W) chosen per setup to maximise PMT FoM."""
-    valid = [s for s in setups if ratio_factor in s.ssd_results]
-    if not valid:
-        return
-
-    colors  = _colors(len(setups))
-    c_valid = [colors[setups.index(s)] for s in valid]
-    x_arr, y_arr, labels, mw_labels = [], [], [], []
-
-    for s in valid:
-        M_b, W_b = _pmt_best_mw(s, M_values, W_values, total_primaries)
-        x_arr.append(_ssd_fom(s.ssd_results[ratio_factor], M_b, W_b, total_primaries))
-        y_arr.append(_pmt_fom(s, M_b, W_b, total_primaries))
-        labels.append(s.label)
-        mw_labels.append(f"M{M_b}W{W_b}")
-
-    x_arr = np.array(x_arr, dtype=float)
-    y_arr = np.array(y_arr, dtype=float)
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD FoM  ({_RATIO_TITLE})", "PMT FoM",
-                   force_origin=True)
-    for x, y, mw in zip(x_arr, y_arr, mw_labels):
-        if np.isfinite(x) and np.isfinite(y):
-            ax.annotate(mw, xy=(x, y), xytext=(4, -9),
-                        textcoords="offset points", fontsize=6, color="dimgray")
-
-    ax.set_title(
-        f"SSD vs PMT — Figure of Merit  |  {_RATIO_TITLE}\n"
-        "(M,W) chosen per setup to maximise PMT FoM", fontsize=11,
-    )
-    fig.tight_layout()
-    fname = f"02b_scatter_fom_{_RATIO_TAG}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fname}")
-
-
-# ─────────────────────────────────────────────────────────────────────
 # SECTION 13c — W2 Spearman for FoM / Recall cross-plots (existing)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1179,7 +1128,7 @@ def plot_w2_spearman_fom(
                  "(filled = 3σ; W = argmax PMT FoM at that M)", fontsize=13)
     ax.set_xticks(M_values)
     ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=9, loc="upper right")
+    _legend_below(ax, ncol=4, fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fname = "02f_w2_spearman_fom.png"
@@ -1228,51 +1177,6 @@ def plot_ssd_nc_vs_pmt_recall_at_best_fom(
                  f"{_RATIO_TITLE}", fontsize=11)
     fig.tight_layout()
     fname = f"03f_scatter_ssd_nc_vs_pmt_recall_best_fom_{_RATIO_TAG}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fname}")
-
-
-def plot_ssd_recall_vs_pmt_recall_at_best_fom(
-    setups: list[SetupData],
-    ratio_factor: float,
-    M_values: list[int],
-    W_values: list[int],
-    total_primaries: int,
-    output_dir: str,
-) -> None:
-    valid = [s for s in setups if ratio_factor in s.ssd_results]
-    if not valid:
-        return
-
-    colors  = _colors(len(setups))
-    c_valid = [colors[setups.index(s)] for s in valid]
-    x_arr, y_arr, labels, mw_labels = [], [], [], []
-
-    for s in valid:
-        M_b, W_b = _pmt_best_mw(s, M_values, W_values, total_primaries)
-        x_arr.append(_ssd_recall(s.ssd_results[ratio_factor], 1, 1))
-        y_arr.append(_pmt_recall(s, M_b, W_b))
-        labels.append(s.label)
-        mw_labels.append(f"M{M_b}W{W_b}")
-
-    x_arr = np.array(x_arr, dtype=float)
-    y_arr = np.array(y_arr, dtype=float)
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    _scatter_panel(ax, x_arr, y_arr, c_valid, labels,
-                   f"SSD Recall  (M=1, W=1, {_RATIO_TITLE})",
-                   "PMT Recall at FoM-optimal (M,W)",
-                   force_origin=True)
-    for x, y, mw in zip(x_arr, y_arr, mw_labels):
-        if np.isfinite(x) and np.isfinite(y):
-            ax.annotate(mw, xy=(x, y), xytext=(4, -9),
-                        textcoords="offset points", fontsize=6, color="dimgray")
-
-    ax.set_title(f"SSD Recall (M=1,W=1) vs PMT Recall at FoM-optimal (M,W)\n"
-                 f"{_RATIO_TITLE}", fontsize=11)
-    fig.tight_layout()
-    fname = f"03g_scatter_ssd_recall_vs_pmt_recall_best_fom_{_RATIO_TAG}.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -1354,7 +1258,7 @@ def plot_nc_ranking_consistency(
     )
     ax.set_xticks(M_values)
     ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=11)
+    _legend_below(ax, ncol=4, fontsize=10)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fname_a = "01g_ranking_nc_spearman.png"
@@ -1493,89 +1397,6 @@ def plot_ranking_heatmap(
     )
     fig.tight_layout()
     fname = "01i_ranking_heatmap.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fname}")
-
-
-# ─────────────────────────────────────────────────────────────────────
-# SECTION 13f — FoM comparison bars: PMT vs SSD per setup
-# ─────────────────────────────────────────────────────────────────────
-
-def plot_fom_bars_pmt_vs_ssd(
-    setups: list[SetupData],
-    ratio_factor: float,
-    M_values: list[int],
-    W_values: list[int],
-    total_primaries: int,
-    output_dir: str,
-) -> None:
-    """Grouped horizontal bars: PMT best-FoM vs SSD FoM at PMT's best (M,W).
-
-    Each row = one setup.  The left sub-plot shows absolute FoM values;
-    the right sub-plot is a scatter (SSD vs PMT) with a diagonal reference.
-    Saved as fom_bars_pmt_vs_ssd.png.
-    """
-    valid = [s for s in setups if ratio_factor in s.ssd_results]
-    n     = len(valid)
-    if n < 2:
-        print("  [SKIP] fom_bars_pmt_vs_ssd: fewer than 2 setups.")
-        return
-
-    colors  = _colors(len(setups))
-    c_valid = [colors[setups.index(s)] for s in valid]
-
-    pmt_foms, ssd_foms, mw_labels = [], [], []
-    for s in valid:
-        M_b, W_b = _pmt_best_mw(s, M_values, W_values, total_primaries)
-        pmt_foms.append(_pmt_fom(s, M_b, W_b, total_primaries))
-        ssd_foms.append(_ssd_fom(s.ssd_results[ratio_factor], M_b, W_b, total_primaries))
-        mw_labels.append(f"M{M_b}W{W_b}")
-
-    pmt_arr = np.array(pmt_foms, dtype=float)
-    ssd_arr = np.array(ssd_foms, dtype=float)
-    labels  = [s.label for s in valid]
-
-    fig, (ax_bar, ax_sc) = plt.subplots(1, 2, figsize=(16, max(5, n * 0.6)))
-
-    # ── Left: grouped horizontal bars ────────────────────────────────
-    y      = np.arange(n)
-    h      = 0.35
-    bars_p = ax_bar.barh(y - h / 2, pmt_arr, h, label="PMT (best M,W)", color=c_valid, alpha=0.9)
-    bars_s = ax_bar.barh(y + h / 2, ssd_arr, h, label="SSD (PMT's best M,W)", color=c_valid,
-                          alpha=0.5, hatch="//")
-
-    finite_max = max((v for v in np.concatenate([pmt_arr, ssd_arr]) if np.isfinite(v)), default=1.0)
-    for bar, fom, mw in zip(bars_p, pmt_arr, mw_labels):
-        if np.isfinite(fom):
-            ax_bar.text(fom + 0.01 * finite_max, bar.get_y() + bar.get_height() / 2,
-                        f"{fom:.4g} [{mw}]", va="center", fontsize=7)
-
-    for bar, fom in zip(bars_s, ssd_arr):
-        if np.isfinite(fom):
-            ax_bar.text(fom + 0.01 * finite_max, bar.get_y() + bar.get_height() / 2,
-                        f"{fom:.4g}", va="center", fontsize=7, color="dimgray")
-
-    ax_bar.set_yticks(y)
-    ax_bar.set_yticklabels(labels, fontsize=11)
-    ax_bar.set_xlabel("Figure of Merit", fontsize=13)
-    ax_bar.set_title("FoM: PMT (best M,W) vs SSD (at PMT's best M,W)", fontsize=12)
-    ax_bar.legend(fontsize=10)
-    ax_bar.grid(True, axis="x", alpha=0.3)
-
-    # ── Right: scatter with diagonal ─────────────────────────────────
-    _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD FoM  ({_RATIO_TITLE})", "PMT FoM",
-                   force_origin=True)
-    ax_sc.set_title("SSD vs PMT FoM", fontsize=12)
-
-    fig.suptitle(
-        f"FoM Comparison — PMT vs SSD  |  {_RATIO_TITLE}\n"
-        f"(M,W) chosen to maximise PMT FoM; same (M,W) used for SSD",
-        fontsize=13,
-    )
-    fig.tight_layout()
-    fname = "02c_fom_bars_pmt_vs_ssd.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -1757,87 +1578,6 @@ def plot_fom_mge_comparison(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# SECTION 13i — Recall comparison at PMT's best (M,W)
-# ─────────────────────────────────────────────────────────────────────
-
-def plot_recall_comparison(
-    setups: list[SetupData],
-    ratio_factor: float,
-    M_values: list[int],
-    W_values: list[int],
-    total_primaries: int,
-    output_dir: str,
-) -> None:
-    """Grouped horizontal bars + scatter comparing PMT vs SSD Recall.
-
-    For each setup, Recall is evaluated at the (M,W) that maximises PMT FoM.
-    Saved as recall_pmt_vs_ssd.png.
-    """
-    valid = [s for s in setups if ratio_factor in s.ssd_results]
-    n     = len(valid)
-    if n < 2:
-        print("  [SKIP] recall_comparison: fewer than 2 setups.")
-        return
-
-    colors  = _colors(len(setups))
-    c_valid = [colors[setups.index(s)] for s in valid]
-    labels  = [s.label for s in valid]
-
-    pmt_recs, ssd_recs, mw_labels = [], [], []
-    for s in valid:
-        M_b, W_b = _pmt_best_mw(s, M_values, W_values, total_primaries)
-        pmt_recs.append(_pmt_recall(s, M_b, W_b))
-        ssd_recs.append(_ssd_recall(s.ssd_results[ratio_factor], M_b, W_b))
-        mw_labels.append(f"M{M_b}W{W_b}")
-
-    pmt_arr = np.array(pmt_recs, dtype=float)
-    ssd_arr = np.array(ssd_recs, dtype=float)
-
-    fig, (ax_bar, ax_sc) = plt.subplots(1, 2, figsize=(16, max(5, n * 0.6)))
-
-    # ── Left: grouped horizontal bars ────────────────────────────────
-    y      = np.arange(n)
-    h      = 0.35
-    bars_p = ax_bar.barh(y - h / 2, pmt_arr, h, label="PMT Recall", color=c_valid, alpha=0.9)
-    bars_s = ax_bar.barh(y + h / 2, ssd_arr, h, label="SSD Recall", color=c_valid,
-                          alpha=0.5, hatch="//")
-
-    for bar, rec, mw in zip(bars_p, pmt_arr, mw_labels):
-        ax_bar.text(rec + 0.005, bar.get_y() + bar.get_height() / 2,
-                    f"{rec*100:.1f}% [{mw}]", va="center", fontsize=7)
-    for bar, rec in zip(bars_s, ssd_arr):
-        ax_bar.text(rec + 0.005, bar.get_y() + bar.get_height() / 2,
-                    f"{rec*100:.1f}%", va="center", fontsize=7, color="dimgray")
-
-    ax_bar.set_yticks(y)
-    ax_bar.set_yticklabels(labels, fontsize=11)
-    ax_bar.set_xlabel("Recall", fontsize=13)
-    ax_bar.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-    ax_bar.set_title("Recall: PMT vs SSD at PMT's best (M,W)", fontsize=12)
-    ax_bar.legend(fontsize=10)
-    ax_bar.grid(True, axis="x", alpha=0.3)
-
-    # ── Right: scatter ────────────────────────────────────────────────
-    _scatter_panel(ax_sc, ssd_arr, pmt_arr, c_valid, labels,
-                   f"SSD Recall  ({_RATIO_TITLE})", "PMT Recall",
-                   force_origin=True)
-    ax_sc.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-    ax_sc.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
-    ax_sc.set_title("SSD vs PMT Recall", fontsize=12)
-
-    fig.suptitle(
-        f"Recall Comparison — PMT vs SSD  |  {_RATIO_TITLE}\n"
-        f"(M,W) chosen to maximise PMT FoM per setup",
-        fontsize=13,
-    )
-    fig.tight_layout()
-    fname = "03c_recall_pmt_vs_ssd.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fname}")
-
-
-# ─────────────────────────────────────────────────────────────────────
 # SECTION 13j — Best-(M,W) agreement tables (FoM + Recall)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1875,19 +1615,29 @@ def _render_table_figure(
     """
     n    = len(rows_data)
     ncol = len(col_labels)
-    fig, ax = plt.subplots(figsize=(max(16, ncol * 1.4), max(4, n * 0.6 + 2)))
+    # Size the canvas generously and let the table fill the axes (via bbox) so
+    # cells are large and readable; the title sits directly above with a small
+    # pad rather than floating far from the table.
+    fig_w = max(18.0, ncol * 2.0)
+    fig_h = max(3.5, (n + 1) * 0.62 + 1.4)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.set_axis_off()
 
     tbl = ax.table(cellText=rows_data, colLabels=col_labels,
-                   loc="center", cellLoc="center")
+                   cellLoc="center", bbox=[0, 0, 1, 1])
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(9)
-    tbl.auto_set_column_width(range(ncol))
+    tbl.set_fontsize(12)
+
+    # Bold, shaded header row for readability.
+    for j in range(ncol):
+        hdr = tbl[0, j]
+        hdr.set_text_props(fontweight="bold")
+        hdr.set_facecolor("#e8e8e8")
 
     for row_idx, col_idx, color in cell_colors:
         tbl[row_idx, col_idx].set_facecolor(color)
 
-    ax.set_title(title, fontsize=13, pad=20)
+    ax.set_title(title, fontsize=14, pad=8)
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -2084,6 +1834,16 @@ def _curve_ms(M_values: list[int]) -> list[int]:
     return [M for M in (1, 3, 5, 10) if M in M_values]
 
 
+def _legend_below(ax: plt.Axes, ncol: int, fontsize: int = 9) -> None:
+    """Place the axes legend in a horizontal row just beneath the plot.
+
+    Used for every Pearson/Spearman-vs-M or -vs-W line plot so the legend never
+    overlaps the correlation curves or the 3σ / 5σ threshold lines.
+    """
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16),
+              ncol=ncol, fontsize=fontsize, frameon=True)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # SECTION 13l — NC coverage SSD-vs-PMT parametric curves (per setup)
 # ─────────────────────────────────────────────────────────────────────
@@ -2230,7 +1990,7 @@ def plot_w2_nc_coverage_corr_ssd(
     )
     ax.set_xticks(M_values)
     ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=10, loc="upper right")
+    _legend_below(ax, ncol=4, fontsize=10)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fname = "01e_w2_nc_coverage_corr_ssd.png"
@@ -2287,7 +2047,7 @@ def plot_w2_nc_coverage_corr_combined(
     )
     ax.set_xticks(M_values)
     ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=9, loc="upper right", ncol=2)
+    _legend_below(ax, ncol=3, fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fname = "01f_w2_nc_coverage_corr_combined.png"
@@ -2299,57 +2059,6 @@ def plot_w2_nc_coverage_corr_combined(
 # ─────────────────────────────────────────────────────────────────────
 # SECTION 13n — Recall SSD-vs-PMT correlation plots
 # ─────────────────────────────────────────────────────────────────────
-
-def plot_recall_ssd_pmt_corr_fixedW(
-    setups: list[SetupData],
-    ratio_factor: float,
-    M_values: list[int],
-    output_dir: str,
-    W_fixed: int = 1,
-) -> None:
-    """SSD-vs-PMT Recall correlation at fixed W, Pearson r & Spearman ρ vs M.
-
-    Each point in a given M's correlation is one setup.  3σ and 5σ Pearson
-    thresholds drawn; filled markers are 3σ-significant.
-    Saved as 03d_recall_ssd_vs_pmt_corr_fixedW{W_fixed}.png.
-    """
-    valid = [s for s in setups if ratio_factor in s.ssd_results]
-    n = len(valid)
-    if n < 3:
-        print("  [SKIP] recall_ssd_vs_pmt_corr_fixedW: fewer than 3 setups.")
-        return
-
-    pr, sr, pp, sp = _corr_arrays(
-        M_values,
-        lambda M: np.array([_ssd_recall(s.ssd_results[ratio_factor], M, W_fixed) for s in valid]),
-        lambda M: np.array([_pmt_recall(s, M, W_fixed) for s in valid]),
-    )
-    x = np.array(M_values)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.axhline(0, color="black", linewidth=0.8)
-    _draw_pearson_rcrit(ax, n, sigma=3.0)
-    _draw_pearson_rcrit(ax, n, sigma=5.0, linestyle="-.")
-    _plot_corr_curve(ax, x, pr, pp, "Pearson r",  "#1f77b4", marker="o")
-    _plot_corr_curve(ax, x, sr, sp, "Spearman ρ", "#d62728", marker="s")
-
-    ax.set_xlabel("Multiplicity threshold M", fontsize=13)
-    ax.set_ylabel(f"Correlation (SSD vs PMT Recall, W={W_fixed})", fontsize=13)
-    ax.set_title(
-        f"SSD vs PMT Recall Correlation  (W = {W_fixed})  vs M\n"
-        f"{_RATIO_TITLE}  (filled = 3σ; dashed = 3σ / dash-dot = 5σ threshold)",
-        fontsize=13,
-    )
-    ax.set_xticks(M_values)
-    ax.set_ylim(-1.1, 1.1)
-    ax.legend(fontsize=10, loc="lower right")
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fname = f"03d_recall_ssd_vs_pmt_corr_fixedW{W_fixed}.png"
-    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fname}")
-
 
 def plot_recall_ssd_pmt_corr_4M(
     setups: list[SetupData],
@@ -2397,15 +2106,19 @@ def plot_recall_ssd_pmt_corr_4M(
         ax.set_title(corr_name, fontsize=12)
         ax.set_xticks(W_values)
         ax.set_ylim(-1.1, 1.1)
-        ax.legend(fontsize=9, loc="lower right")
         ax.grid(alpha=0.3)
+
+    # Single shared legend beneath both panels.
+    _h, _l = axes[0].get_legend_handles_labels()
+    fig.legend(_h, _l, loc="lower center", ncol=6, fontsize=9,
+               bbox_to_anchor=(0.5, -0.02))
 
     fig.suptitle(
         f"SSD vs PMT Recall Correlation vs W  |  {_RATIO_TITLE}\n"
         "(filled markers = 3σ significant; horizontal lines = 3σ / 5σ threshold)",
         fontsize=13,
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.07, 1, 1])
     fname = "03e_recall_ssd_vs_pmt_corr_4M.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -2413,7 +2126,7 @@ def plot_recall_ssd_pmt_corr_4M(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# SECTION 13o — NC coverage ↔ Recall correlation (SSD-only and combined)
+# SECTION 13o — NC coverage ↔ Recall correlation (SSD-only: curve + heatmap)
 # ─────────────────────────────────────────────────────────────────────
 
 def plot_nc_recall_corr_ssd(
@@ -2423,11 +2136,11 @@ def plot_nc_recall_corr_ssd(
     W_values: list[int],
     output_dir: str,
 ) -> None:
-    """SSD-only: NC coverage ↔ Ge-77 Recall correlation vs W, per M ∈ {1,3,5,10}.
+    """SSD-only: NC coverage ↔ Ge-77 Recall Pearson r vs W, per M ∈ {1,3,5,10}.
 
     SSD analogue of compare_coverages.py plot 19b.  For each M the SSD NC
     coverage (constant over W) is correlated across setups with the SSD recall
-    at each W.  Two-panel Pearson/Spearman; 3σ and 5σ thresholds drawn.
+    at each W.  Single Pearson-r panel; 3σ and 5σ thresholds drawn.
     Saved as 03j_nc_recall_corr_ssd.png.
     """
     valid = [s for s in setups if ratio_factor in s.ssd_results]
@@ -2442,37 +2155,133 @@ def plot_nc_recall_corr_ssd(
 
     m_colors = _colors(len(ms))
     x = np.array(W_values)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    for col_idx, (ax, corr_name) in enumerate(zip(axes, ["Pearson r", "Spearman ρ"])):
-        ax.axhline(0, color="black", linewidth=0.8)
-        _draw_pearson_rcrit(ax, n, sigma=3.0)
-        _draw_pearson_rcrit(ax, n, sigma=5.0, linestyle="-.")
-        for M, c in zip(ms, m_colors):
-            nc_arr = np.array([_ssd_nc_frac(s.ssd_results[ratio_factor], M) for s in valid])
-            pr, sr, pp, sp = _corr_arrays(
-                W_values,
-                lambda W, nc=nc_arr: nc,
-                lambda W, M=M: np.array([_ssd_recall(s.ssd_results[ratio_factor], M, W) for s in valid]),
-            )
-            vals = pr if col_idx == 0 else sr
-            ps   = pp if col_idx == 0 else sp
-            _plot_corr_curve(ax, x, vals, ps, f"M={M}", c, marker="o")
-        ax.set_xlabel("W — minimum NC detections per muon", fontsize=12)
-        ax.set_ylabel("Correlation (SSD NC coverage vs SSD Recall)", fontsize=12)
-        ax.set_title(corr_name, fontsize=12)
-        ax.set_xticks(W_values)
-        ax.set_ylim(-1.1, 1.1)
-        ax.legend(fontsize=9, loc="upper right")
-        ax.grid(alpha=0.3)
-
-    fig.suptitle(
-        f"SSD NC Coverage ↔ Ge-77 Recall Correlation vs W  |  {_RATIO_TITLE}\n"
+    ax.axhline(0, color="black", linewidth=0.8)
+    _draw_pearson_rcrit(ax, n, sigma=3.0)
+    _draw_pearson_rcrit(ax, n, sigma=5.0, linestyle="-.")
+    for M, c in zip(ms, m_colors):
+        nc_arr = np.array([_ssd_nc_frac(s.ssd_results[ratio_factor], M) for s in valid])
+        pr, _sr, pp, _sp = _corr_arrays(
+            W_values,
+            lambda W, nc=nc_arr: nc,
+            lambda W, M=M: np.array([_ssd_recall(s.ssd_results[ratio_factor], M, W) for s in valid]),
+        )
+        _plot_corr_curve(ax, x, pr, pp, f"M={M}", c, marker="o")
+    ax.set_xlabel("W — minimum NC detections per muon", fontsize=13)
+    ax.set_ylabel("Pearson r (SSD NC coverage vs SSD Recall)", fontsize=13)
+    ax.set_title(
+        f"SSD NC Coverage ↔ Ge-77 Recall — Pearson r vs W  |  {_RATIO_TITLE}\n"
         "(SSD data only; filled markers = 3σ; lines = 3σ / 5σ threshold)",
         fontsize=13,
     )
+    ax.set_xticks(W_values)
+    ax.set_ylim(-1.1, 1.1)
+    _legend_below(ax, ncol=6, fontsize=10)
+    ax.grid(alpha=0.3)
+
     fig.tight_layout()
     fname = "03j_nc_recall_corr_ssd.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+def plot_nc_recall_corr_ssd_heatmap(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    output_dir: str,
+) -> None:
+    """SSD-only: NC coverage ↔ Ge-77 Recall correlation as an M×W heatmap.
+
+    2-D grid over multiplicity M (rows, up to 10) and W (columns, up to 20).
+    Each cell holds the Pearson r and Spearman ρ between the SSD NC coverage at
+    that M (across setups) and the SSD recall at that (M,W) (across setups).
+    Cell background encodes Pearson significance: green = 5σ, yellow = 3σ,
+    white = neither (based on |r| vs the two-sided critical value).
+    Saved as 03k_nc_recall_corr_ssd_heatmap.png.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    n = len(valid)
+    if n < 3:
+        print("  [SKIP] nc_recall_corr_ssd_heatmap: fewer than 3 setups.")
+        return
+
+    M_heat = [M for M in M_values if M <= 10]
+    W_heat = [W for W in W_values if W <= 20]
+    if not M_heat or not W_heat:
+        print("  [SKIP] nc_recall_corr_ssd_heatmap: no M≤10 or W≤20 available.")
+        return
+
+    r_crit3 = _pearson_rcrit(n, sigma=3.0)
+    r_crit5 = _pearson_rcrit(n, sigma=5.0)
+
+    C_WHITE  = (1.0, 1.0, 1.0)
+    C_YELLOW = (1.0, 1.0, 0.55)   # 3σ
+    C_GREEN  = (0.60, 0.88, 0.60)  # 5σ
+
+    nrows, ncols = len(M_heat), len(W_heat)
+    rgb   = np.ones((nrows, ncols, 3), dtype=float)
+    texts = [[""] * ncols for _ in range(nrows)]
+
+    for i, M in enumerate(M_heat):
+        nc_arr = np.array([_ssd_nc_frac(s.ssd_results[ratio_factor], M) for s in valid])
+        for j, W in enumerate(W_heat):
+            rec_arr = np.array([_ssd_recall(s.ssd_results[ratio_factor], M, W) for s in valid])
+            r, _   = _safe_pearsonr(nc_arr, rec_arr)
+            rho, _ = _safe_spearmanr(nc_arr, rec_arr)
+            if np.isfinite(r):
+                if abs(r) >= r_crit5:
+                    rgb[i, j] = C_GREEN
+                elif abs(r) >= r_crit3:
+                    rgb[i, j] = C_YELLOW
+                else:
+                    rgb[i, j] = C_WHITE
+            r_s   = f"r={r:+.2f}"   if np.isfinite(r)   else "r=—"
+            rho_s = f"ρ={rho:+.2f}" if np.isfinite(rho) else "ρ=—"
+            texts[i][j] = f"{r_s}\n{rho_s}"
+
+    fig_w = max(12.0, 0.85 * ncols + 2.0)
+    fig_h = max(5.0, 0.85 * nrows + 2.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.imshow(rgb, aspect="auto", origin="upper")
+
+    for i in range(nrows):
+        for j in range(ncols):
+            ax.text(j, i, texts[i][j], ha="center", va="center",
+                    fontsize=6.5, color="black")
+
+    ax.set_xticks(range(ncols))
+    ax.set_xticklabels(W_heat)
+    ax.set_yticks(range(nrows))
+    ax.set_yticklabels(M_heat)
+    ax.set_xlabel("W — minimum NC detections per muon", fontsize=13)
+    ax.set_ylabel("M — minimum firing PMTs per NC", fontsize=13)
+
+    # Cell separator grid
+    ax.set_xticks(np.arange(-0.5, ncols, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, nrows, 1), minor=True)
+    ax.grid(which="minor", color="gray", linewidth=0.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    legend_handles = [
+        Line2D([0], [0], marker="s", color="w", markerfacecolor=C_YELLOW,
+               markeredgecolor="gray", markersize=13, label=f"3σ significant (|r|≥{r_crit3:.2f})"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor=C_GREEN,
+               markeredgecolor="gray", markersize=13, label=f"5σ significant (|r|≥{r_crit5:.2f})"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper left",
+              bbox_to_anchor=(1.01, 1.0), fontsize=10, borderaxespad=0.0)
+
+    ax.set_title(
+        f"SSD NC Coverage ↔ Ge-77 Recall — Pearson r & Spearman ρ per (M,W)\n"
+        f"{_RATIO_TITLE}  (n={n} setups; cell colour = Pearson significance)",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    fname = "03k_nc_recall_corr_ssd_heatmap.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -2489,9 +2298,8 @@ def plot_nc_recall_corr_combined(
 
     Overlays PMT (solid) and SSD (dashed) Pearson curves (colour = M) so the
     conservation of the NC-coverage ↔ recall relationship (shown for PMT in
-    compare_coverages.py) can be judged against the SSD surrogate.  Spearman is
-    provided separately in the SSD-only plot 03j.
-    Saved as 03k_nc_recall_corr_combined.png.
+    compare_coverages.py) can be judged against the SSD surrogate.
+    Saved as 03l_nc_recall_corr_combined.png.
     """
     valid = [s for s in setups if ratio_factor in s.ssd_results]
     n = len(valid)
@@ -2505,7 +2313,7 @@ def plot_nc_recall_corr_combined(
 
     m_colors = _colors(len(ms))
     x = np.array(W_values)
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(11, 6.5))
     ax.axhline(0, color="black", linewidth=0.8)
     _draw_pearson_rcrit(ax, n, sigma=3.0)
     _draw_pearson_rcrit(ax, n, sigma=5.0, linestyle="-.")
@@ -2524,14 +2332,6 @@ def plot_nc_recall_corr_combined(
         _plot_corr_curve(ax, x, pmt_pr, pmt_pp, f"PMT M={M}", c, "o", "-")
         _plot_corr_curve(ax, x, ssd_pr, ssd_pp, f"SSD M={M}", c, "o", "--")
 
-    src_handles = [
-        Line2D([0], [0], color="gray", linestyle="-",  label="PMT (solid)"),
-        Line2D([0], [0], color="gray", linestyle="--", label="SSD (dashed)"),
-    ]
-    leg1 = ax.legend(fontsize=9, loc="upper right", ncol=2, title="Pearson r by M")
-    ax.add_artist(leg1)
-    ax.legend(handles=src_handles, fontsize=9, loc="lower right")
-
     ax.set_xlabel("W — minimum NC detections per muon", fontsize=13)
     ax.set_ylabel("Pearson r (NC coverage vs Recall)", fontsize=13)
     ax.set_title(
@@ -2541,9 +2341,10 @@ def plot_nc_recall_corr_combined(
     )
     ax.set_xticks(W_values)
     ax.set_ylim(-1.1, 1.1)
+    _legend_below(ax, ncol=5, fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fname = "03k_nc_recall_corr_combined.png"
+    fname = "03l_nc_recall_corr_combined.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -3157,8 +2958,6 @@ def main() -> None:
     # ══ GROUP 02 — FIGURE OF MERIT ════════════════════════════════════
     print("\n[02] Figure-of-Merit plots ...")
     plot_corr_vs_ratio(corr_df, "fom", M_values, args.W_default, odir, optimal_ratio)           # 02a
-    plot_scatter_ssd_pmt_fom(setups, optimal_ratio, M_values, W_values, total_primaries, odir)  # 02b
-    plot_fom_bars_pmt_vs_ssd(setups, optimal_ratio, M_values, W_values, total_primaries, odir)  # 02c
     plot_fom_scatter_per_m(setups, optimal_ratio, M_values, W_values, total_primaries, odir)    # 02d
     plot_fom_mge_comparison(setups, optimal_ratio, M_values, W_values, total_primaries,
                             args.min_M_fom, odir)                                                # 02e
@@ -3169,20 +2968,16 @@ def main() -> None:
     # ══ GROUP 03 — RECALL ═════════════════════════════════════════════
     print("\n[03] Recall plots ...")
     plot_corr_vs_ratio(corr_df, "recall", M_values, args.W_default, odir, optimal_ratio)        # 03a
-    plot_scatter_ssd_pmt(setups, optimal_ratio, "recall", M_values, args.W_default, odir)       # 03b
-    plot_recall_comparison(setups, optimal_ratio, M_values, W_values, total_primaries, odir)    # 03c
-    plot_recall_ssd_pmt_corr_fixedW(setups, optimal_ratio, M_values, odir, W_fixed=1)           # 03d
     plot_recall_ssd_pmt_corr_4M(setups, optimal_ratio, M_values, W_values, odir)                # 03e
     plot_ssd_nc_vs_pmt_recall_at_best_fom(setups, optimal_ratio, M_values, W_values,
                                           total_primaries, odir)                                 # 03f
-    plot_ssd_recall_vs_pmt_recall_at_best_fom(setups, optimal_ratio, M_values, W_values,
-                                              total_primaries, odir)                             # 03g
     plot_recall_at_best_fom_agreement(setups, optimal_ratio, M_values, W_values,
                                       total_primaries, odir, min_M=1)                            # 03h
     plot_recall_at_best_fom_agreement(setups, optimal_ratio, M_values, W_values,
                                       total_primaries, odir, min_M=args.min_M_fom)               # 03i
     plot_nc_recall_corr_ssd(setups, optimal_ratio, M_values, W_values, odir)                    # 03j
-    plot_nc_recall_corr_combined(setups, optimal_ratio, M_values, W_values, odir)               # 03k
+    plot_nc_recall_corr_ssd_heatmap(setups, optimal_ratio, M_values, W_values, odir)            # 03k
+    plot_nc_recall_corr_combined(setups, optimal_ratio, M_values, W_values, odir)               # 03l
 
     # ── 8. Summary ────────────────────────────────────────────────────
     print("\nWriting summary ...")
