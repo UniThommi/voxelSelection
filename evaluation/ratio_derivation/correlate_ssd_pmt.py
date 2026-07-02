@@ -2410,7 +2410,11 @@ def _recall_metrics_for_setup(
            _ssd_recall(res, Ms6, Ws6) if m_ge else float("nan")]
     pmt_mw = [p_mw_br_all, p_mw_br_ge, (Mp1, Wp1), (Mp6, Wp6)]
     ssd_mw = [s_mw_br_all, s_mw_br_ge, (Ms1, Ws1), (Ms6, Ws6)]
-    return {"pmt": pmt, "ssd": ssd, "pmt_mw": pmt_mw, "ssd_mw": ssd_mw}
+    # Anchored SSD: SSD recall evaluated at PMT's optimal (M,W) for each metric.
+    # (Coincides with SSD-own for metrics 0/1 whose operating point is fixed.)
+    ssd_anchored = [_ssd_recall(res, mw[0], mw[1]) for mw in pmt_mw]
+    return {"pmt": pmt, "ssd": ssd, "pmt_mw": pmt_mw, "ssd_mw": ssd_mw,
+            "ssd_anchored": ssd_anchored}
 
 
 def plot_recall_metrics_across_setups(
@@ -2524,12 +2528,14 @@ def write_recall_summary(
                        -(metrics[s.label]["pmt"][0] if np.isfinite(metrics[s.label]["pmt"][0]) else 0.0)),
     )
 
-    hr = "=" * 78
+    hr = "=" * 104
     L: list[str] = [
         hr,
         "GE-77 RECALL SUMMARY — PMT vs SSD   (values behind plot 03m)",
         f"  {_RATIO_TITLE}",
-        "  Dev = (SSD − PMT) / PMT ;  (M,W) = operating point where recall is taken",
+        "  SSD_own  = SSD recall at SSD's own optimal (M,W);  Dev_own  = (SSD_own  − PMT) / PMT",
+        "  SSD_anch = SSD recall at PMT's optimal (M,W);      Dev_anch = (SSD_anch − PMT) / PMT",
+        "  (M,W) columns give each side's own operating point; SSD_anch is taken at PMT(M,W).",
         "  Metrics 2–3 are the recall-at-best-FoM values from tables 03h / 03i.",
         hr,
         "",
@@ -2537,18 +2543,19 @@ def write_recall_summary(
 
     for mi, name in enumerate(names):
         L.append(f"Metric {mi}: {name}")
-        L.append(f"  {'Setup':<28} {'PMT':>8} {'SSD':>8} {'Dev':>8}   "
-                 f"{'PMT(M,W)':>9} {'SSD(M,W)':>9}")
-        L.append("  " + "-" * 74)
+        L.append(f"  {'Setup':<26} {'PMT':>7} {'SSD_own':>8} {'Dev_own':>8} "
+                 f"{'SSD_anch':>9} {'Dev_anch':>9}   {'PMT(M,W)':>9} {'SSD(M,W)':>9}")
+        L.append("  " + "-" * 100)
         for s in ordered:
             m   = metrics[s.label]
             pv  = m["pmt"][mi]
             sv  = m["ssd"][mi]
+            sa  = m["ssd_anchored"][mi]
             pmw = m["pmt_mw"][mi]
             smw = m["ssd_mw"][mi]
             L.append(
-                f"  {s.label:<28} {_pct_str(pv):>8} {_pct_str(sv):>8} "
-                f"{_dev_str(sv, pv):>8}   "
+                f"  {s.label:<26} {_pct_str(pv):>7} {_pct_str(sv):>8} "
+                f"{_dev_str(sv, pv):>8} {_pct_str(sa):>9} {_dev_str(sa, pv):>9}   "
                 f"{'M'+str(pmw[0])+'W'+str(pmw[1]):>9} {'M'+str(smw[0])+'W'+str(smw[1]):>9}"
             )
         L.append("")
@@ -2631,6 +2638,188 @@ def plot_recall_deviation_histograms(
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fname = "03n_recall_deviation_histograms.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SECTION 13q — FoM metrics: text summary + deviation histograms
+# ─────────────────────────────────────────────────────────────────────
+
+def _fom_metric_names(min_m: int) -> list[str]:
+    return ["Best FoM (all M)", f"Best FoM (M≥{min_m})"]
+
+
+def _fom_metrics_for_setup(
+    s: SetupData,
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+) -> dict:
+    """Return the two FoM metrics (PMT & SSD) plus their (M,W) operating points.
+
+    Metrics (order matches _fom_metric_names):
+      0. best FoM over all M
+      1. best FoM over M ≥ min_m
+    ``ssd_anchored`` is the SSD FoM evaluated at PMT's own optimal (M,W).
+    """
+    res = s.ssd_results[ratio_factor]
+    Mp1, Wp1 = _pmt_best_mw(s, M_values, W_values, total_primaries, min_M=1)
+    Ms1, Ws1 = _ssd_best_mw(res, M_values, W_values, total_primaries, min_M=1)
+    Mp6, Wp6 = _pmt_best_mw(s, M_values, W_values, total_primaries, min_M=min_m)
+    Ms6, Ws6 = _ssd_best_mw(res, M_values, W_values, total_primaries, min_M=min_m)
+
+    pmt_mw = [(Mp1, Wp1), (Mp6, Wp6)]
+    ssd_mw = [(Ms1, Ws1), (Ms6, Ws6)]
+    pmt = [_pmt_fom(s, Mp1, Wp1, total_primaries), _pmt_fom(s, Mp6, Wp6, total_primaries)]
+    ssd = [_ssd_fom(res, Ms1, Ws1, total_primaries), _ssd_fom(res, Ms6, Ws6, total_primaries)]
+    ssd_anchored = [_ssd_fom(res, mw[0], mw[1], total_primaries) for mw in pmt_mw]
+    return {"pmt": pmt, "ssd": ssd, "pmt_mw": pmt_mw, "ssd_mw": ssd_mw,
+            "ssd_anchored": ssd_anchored}
+
+
+def write_fom_summary(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+    output_dir: str,
+) -> None:
+    """Write the FoM metrics (PMT, SSD-own, SSD-anchored, deviations) to text.
+
+    Parallels write_recall_summary: best FoM (all M) and best FoM (M≥min_m).
+    SSD_own is SSD's own FoM optimum; SSD_anch is SSD FoM at PMT's optimal (M,W).
+    Saved as 02h_fom_summary.txt.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        print("  [SKIP] fom_summary: no setups.")
+        return
+
+    names   = _fom_metric_names(min_m)
+    metrics = {s.label: _fom_metrics_for_setup(
+                   s, ratio_factor, M_values, W_values, total_primaries, min_m)
+               for s in valid}
+    # Sort by PMT best FoM (all M) descending.
+    ordered = sorted(
+        valid,
+        key=lambda s: (not np.isfinite(metrics[s.label]["pmt"][0]),
+                       -(metrics[s.label]["pmt"][0] if np.isfinite(metrics[s.label]["pmt"][0]) else 0.0)),
+    )
+
+    hr = "=" * 112
+    L: list[str] = [
+        hr,
+        "FIGURE-OF-MERIT SUMMARY — PMT vs SSD",
+        f"  {_RATIO_TITLE}",
+        "  SSD_own  = SSD FoM at SSD's own optimal (M,W);  Dev_own  = (SSD_own  − PMT) / PMT",
+        "  SSD_anch = SSD FoM at PMT's optimal (M,W);      Dev_anch = (SSD_anch − PMT) / PMT",
+        "  (M,W) columns give each side's own FoM-optimal operating point.",
+        hr,
+        "",
+    ]
+
+    for mi, name in enumerate(names):
+        L.append(f"Metric {mi}: {name}")
+        L.append(f"  {'Setup':<26} {'PMT':>11} {'SSD_own':>11} {'Dev_own':>9} "
+                 f"{'SSD_anch':>11} {'Dev_anch':>9}   {'PMT(M,W)':>9} {'SSD(M,W)':>9}")
+        L.append("  " + "-" * 106)
+        for s in ordered:
+            m   = metrics[s.label]
+            pv  = m["pmt"][mi]
+            sv  = m["ssd"][mi]
+            sa  = m["ssd_anchored"][mi]
+            pmw = m["pmt_mw"][mi]
+            smw = m["ssd_mw"][mi]
+            L.append(
+                f"  {s.label:<26} {_fom_str(pv):>11} {_fom_str(sv):>11} "
+                f"{_dev_str(sv, pv):>9} {_fom_str(sa):>11} {_dev_str(sa, pv):>9}   "
+                f"{'M'+str(pmw[0])+'W'+str(pmw[1]):>9} {'M'+str(smw[0])+'W'+str(smw[1]):>9}"
+            )
+        L.append("")
+
+    path = os.path.join(output_dir, "02h_fom_summary.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved: 02h_fom_summary.txt")
+
+
+def plot_fom_deviation_histograms(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+    output_dir: str,
+) -> None:
+    """Two histograms of the per-setup FoM deviation (SSD − PMT) / PMT.
+
+    One panel per FoM metric (best FoM all M, best FoM M≥min_m), each binning
+    the deviation (at each side's own best (M,W)) across setups.  0 % marks
+    perfect agreement; the mean deviation is drawn as a vertical line.
+    Saved as 02i_fom_deviation_histograms.png.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if len(valid) < 2:
+        print("  [SKIP] fom_deviation_histograms: fewer than 2 setups.")
+        return
+
+    names   = _fom_metric_names(min_m)
+    metrics = {s.label: _fom_metrics_for_setup(
+                   s, ratio_factor, M_values, W_values, total_primaries, min_m)
+               for s in valid}
+    curve_colors = ["#1f77b4", "#d62728"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    for mi, ax in enumerate(axes):
+        devs = []
+        for s in valid:
+            pv = metrics[s.label]["pmt"][mi]
+            sv = metrics[s.label]["ssd"][mi]
+            if np.isfinite(pv) and np.isfinite(sv) and pv != 0:
+                devs.append(100.0 * (sv - pv) / pv)
+        devs = np.array(devs, dtype=float)
+
+        ax.set_title(names[mi], fontsize=12)
+        ax.set_xlabel("Deviation (SSD − PMT) / PMT  [%]", fontsize=11)
+        ax.set_ylabel("Number of setups", fontsize=11)
+        ax.grid(alpha=0.3)
+
+        if devs.size == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11, color="gray")
+            continue
+
+        nbins = min(15, max(5, devs.size))
+        ax.hist(devs, bins=nbins, color=curve_colors[mi], edgecolor="black", alpha=0.8)
+        ax.axvline(0, color="black", linestyle="--", linewidth=1.0, label="no bias (0 %)")
+
+        mean = float(np.mean(devs))
+        med  = float(np.median(devs))
+        std  = float(np.std(devs, ddof=1)) if devs.size > 1 else 0.0
+        ax.axvline(mean, color="black", linestyle="-", linewidth=1.4,
+                   label=f"mean {mean:+.1f}%")
+        ax.text(0.97, 0.97,
+                f"n={devs.size}\nmean={mean:+.1f}%\nmedian={med:+.1f}%\nstd={std:.1f}%",
+                transform=ax.transAxes, ha="right", va="top", fontsize=9,
+                family="monospace",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                          edgecolor="gray", alpha=0.85))
+        ax.legend(fontsize=8, loc="upper left")
+
+    fig.suptitle(
+        f"SSD − PMT Figure-of-Merit Deviation Distributions  |  {_RATIO_TITLE}\n"
+        "(one entry per setup; Dev = (FoM_SSD − FoM_PMT) / FoM_PMT)",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fname = "02i_fom_deviation_histograms.png"
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {fname}")
@@ -3250,6 +3439,10 @@ def main() -> None:
     plot_w2_spearman_fom(setups, M_values, W_values, total_primaries, optimal_ratio, odir)      # 02f
     plot_best_mw_agreement(setups, optimal_ratio, M_values, W_values, total_primaries,
                            args.min_M_fom, odir)                                                 # 02g
+    write_fom_summary(setups, optimal_ratio, M_values, W_values,
+                      total_primaries, args.min_M_fom, odir)                                     # 02h (txt)
+    plot_fom_deviation_histograms(setups, optimal_ratio, M_values, W_values,
+                                  total_primaries, args.min_M_fom, odir)                         # 02i
 
     # ══ GROUP 03 — RECALL ═════════════════════════════════════════════
     print("\n[03] Recall plots ...")
