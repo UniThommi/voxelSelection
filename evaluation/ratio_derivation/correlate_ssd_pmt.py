@@ -2135,6 +2135,55 @@ def plot_nc_coverage_ssd_vs_pmt_curves(
     print(f"  Saved: {fname}")
 
 
+def write_nc_coverage_table(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    output_dir: str,
+) -> None:
+    """Write the plot-01c data to a text table.
+
+    For every setup and every M, tabulates the SSD NC coverage, the PMT NC
+    coverage and the relative deviation (SSD − PMT) / PMT.
+    Saved as 01c_nc_coverage_table.txt.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if not valid:
+        print("  [SKIP] 01c_nc_coverage_table: no setups.")
+        return
+
+    hr = "=" * 60
+    L: list[str] = [
+        hr,
+        "NC COVERAGE — SSD vs PMT per setup and M   (data behind plot 01c)",
+        f"  {_RATIO_TITLE}",
+        "  Coverage = detected-NC fraction;  Dev = (SSD − PMT) / PMT",
+        hr,
+        "",
+    ]
+
+    col_hdr = f"  {'M':>3}   {'SSD cov':>9}   {'PMT cov':>9}   {'Dev':>9}"
+    sep     = "  " + "-" * (len(col_hdr) - 2)
+
+    for s in valid:
+        res = s.ssd_results[ratio_factor]
+        L += [f"Setup: {s.label}", col_hdr, sep]
+        for M in M_values:
+            ssd = _ssd_nc_frac(res, M)
+            pmt = _pmt_nc_frac(s, M)
+            dev = ((ssd - pmt) / pmt) if pmt else float("nan")
+            ssd_s = f"{ssd * 100:8.2f}%"
+            pmt_s = f"{pmt * 100:8.2f}%"
+            dev_s = f"{dev * 100:+8.2f}%" if np.isfinite(dev) else f"{'—':>9}"
+            L.append(f"  {M:>3}   {ssd_s:>9}   {pmt_s:>9}   {dev_s:>9}")
+        L.append("")
+
+    path = os.path.join(output_dir, "01c_nc_coverage_table.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print("  Saved: 01c_nc_coverage_table.txt")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # SECTION 13m — W2 vs NC coverage correlation (SSD-only and combined)
 # ─────────────────────────────────────────────────────────────────────
@@ -3097,6 +3146,7 @@ def main() -> None:
     plot_corr_vs_ratio(corr_df, "nc_coverage", M_values, args.W_default, odir, optimal_ratio)  # 01a
     plot_scatter_ssd_pmt(setups, optimal_ratio, "nc_coverage", M_values, args.W_default, odir)  # 01b
     plot_nc_coverage_ssd_vs_pmt_curves(setups, optimal_ratio, M_values, odir)                   # 01c
+    write_nc_coverage_table(setups, optimal_ratio, M_values, odir)                              # 01c (txt)
     plot_w2_comparison(setups, optimal_ratio, M_values, args.W_default, odir)                   # 01d
     plot_w2_nc_coverage_corr_ssd(setups, optimal_ratio, M_values, odir)                         # 01e
     plot_w2_nc_coverage_corr_combined(setups, optimal_ratio, M_values, odir)                    # 01f
