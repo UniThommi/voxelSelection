@@ -2559,6 +2559,83 @@ def write_recall_summary(
     print("  Saved: 03m_recall_summary.txt")
 
 
+def plot_recall_deviation_histograms(
+    setups: list[SetupData],
+    ratio_factor: float,
+    M_values: list[int],
+    W_values: list[int],
+    total_primaries: int,
+    min_m: int,
+    output_dir: str,
+) -> None:
+    """Four histograms of the per-setup recall deviation (SSD − PMT) / PMT.
+
+    One panel per recall metric (best recall all M, best recall M≥min_m, recall
+    at best FoM all M, recall at best FoM M≥min_m).  Each histogram bins the
+    deviation across all setups; 0 % marks perfect SSD/PMT agreement and the
+    mean deviation is drawn as a vertical line.
+    Saved as 03n_recall_deviation_histograms.png.
+    """
+    valid = [s for s in setups if ratio_factor in s.ssd_results]
+    if len(valid) < 2:
+        print("  [SKIP] recall_deviation_histograms: fewer than 2 setups.")
+        return
+
+    names   = _recall_metric_names(min_m)
+    metrics = {s.label: _recall_metrics_for_setup(
+                   s, ratio_factor, M_values, W_values, total_primaries, min_m)
+               for s in valid}
+    curve_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+    for mi, ax in enumerate(axes.flat):
+        devs = []
+        for s in valid:
+            pv = metrics[s.label]["pmt"][mi]
+            sv = metrics[s.label]["ssd"][mi]
+            if np.isfinite(pv) and np.isfinite(sv) and pv != 0:
+                devs.append(100.0 * (sv - pv) / pv)
+        devs = np.array(devs, dtype=float)
+
+        ax.set_title(names[mi], fontsize=12)
+        ax.set_xlabel("Deviation (SSD − PMT) / PMT  [%]", fontsize=11)
+        ax.set_ylabel("Number of setups", fontsize=11)
+        ax.grid(alpha=0.3)
+
+        if devs.size == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11, color="gray")
+            continue
+
+        nbins = min(15, max(5, devs.size))
+        ax.hist(devs, bins=nbins, color=curve_colors[mi], edgecolor="black", alpha=0.8)
+        ax.axvline(0, color="black", linestyle="--", linewidth=1.0, label="no bias (0 %)")
+
+        mean = float(np.mean(devs))
+        med  = float(np.median(devs))
+        std  = float(np.std(devs, ddof=1)) if devs.size > 1 else 0.0
+        ax.axvline(mean, color="black", linestyle="-", linewidth=1.4,
+                   label=f"mean {mean:+.1f}%")
+        ax.text(0.97, 0.97,
+                f"n={devs.size}\nmean={mean:+.1f}%\nmedian={med:+.1f}%\nstd={std:.1f}%",
+                transform=ax.transAxes, ha="right", va="top", fontsize=9,
+                family="monospace",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                          edgecolor="gray", alpha=0.85))
+        ax.legend(fontsize=8, loc="upper left")
+
+    fig.suptitle(
+        f"SSD − PMT Recall Deviation Distributions  |  {_RATIO_TITLE}\n"
+        "(one entry per setup; Dev = (Recall_SSD − Recall_PMT) / Recall_PMT)",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fname = "03n_recall_deviation_histograms.png"
+    fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # SECTION 14 — Text and CSV output
 # ─────────────────────────────────────────────────────────────────────
@@ -3191,6 +3268,8 @@ def main() -> None:
                                       total_primaries, args.min_M_fom, odir)                     # 03m
     write_recall_summary(setups, optimal_ratio, M_values, W_values,
                          total_primaries, args.min_M_fom, odir)                                  # 03m (txt)
+    plot_recall_deviation_histograms(setups, optimal_ratio, M_values, W_values,
+                                     total_primaries, args.min_M_fom, odir)                      # 03n
 
     # ── 8. Summary ────────────────────────────────────────────────────
     print("\nWriting summary ...")
