@@ -812,6 +812,34 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         )
 
 
+def _parse_selection_json(data) -> tuple[list[dict], dict, "float | None"]:
+    """Normalize a loaded voxel-selection JSON into a common shape.
+
+    Accepts either of two on-disk formats:
+
+    * the standard greedy output, a dict
+      ``{"selected_voxels": [...], "config": {...}, "efficiency": ...}``;
+    * a plain list of voxel records ``[{index, center, corners, layer}, ...]``
+      with no wrapping dict and no config/efficiency metadata.
+
+    Returns ``(selected_voxels, config, efficiency)`` where ``config`` is ``{}``
+    and ``efficiency`` is ``None`` for the plain-list format.
+    """
+    if isinstance(data, list):
+        return data, {}, None
+    return (data.get("selected_voxels", []),
+            data.get("config", {}),
+            data.get("efficiency"))
+
+
+def _voxel_arrays(selected_voxels: list[dict]) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Extract (centers, layers, ids) arrays from voxel records."""
+    centers = np.array([v["center"] for v in selected_voxels], dtype=float)
+    layers = np.array([v["layer"] for v in selected_voxels])
+    ids = [str(v["index"]) for v in selected_voxels]
+    return centers, layers, ids
+
+
 def run_plot(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Generate 3D plots for existing JSON voxel selection files.",
@@ -861,23 +889,16 @@ def run_plot(argv: Optional[list[str]] = None) -> None:
         with open(json_path) as jf:
             data = json.load(jf)
 
-        selected_voxels = data.get("selected_voxels", [])
+        selected_voxels, cfg, eff = _parse_selection_json(data)
         if not selected_voxels:
             print(f"WARNING: no selected_voxels in {json_path.name}, skipping.")
             continue
 
-        centers_list = [v["center"] for v in selected_voxels]
-        layers_list = [v["layer"] for v in selected_voxels]
-        ids_list = [str(v["index"]) for v in selected_voxels]
-
-        centers = np.array(centers_list, dtype=float)
-        layers = np.array(layers_list)
+        centers, layers, ids_list = _voxel_arrays(selected_voxels)
 
         if args.title is not None:
             title_extra = args.title
         else:
-            cfg = data.get("config", {})
-            eff = data.get("efficiency")
             parts = [f"N={len(selected_voxels)}"]
             if cfg.get("optimize"):
                 parts.append(f"mode={cfg['optimize']}")
@@ -921,13 +942,12 @@ def _run_plot_grid(args) -> None:
         with open(json_path) as jf:
             data = json.load(jf)
 
-        selected_voxels = data.get("selected_voxels", [])
+        selected_voxels, _cfg, _eff = _parse_selection_json(data)
         if not selected_voxels:
             print(f"WARNING: no selected_voxels in {json_path.name}, skipping.")
             continue
 
-        centers = np.array([v["center"] for v in selected_voxels], dtype=float)
-        layers = np.array([v["layer"] for v in selected_voxels])
+        centers, layers, _ids = _voxel_arrays(selected_voxels)
         label = (args.labels[i]
                  if args.labels and i < len(args.labels)
                  else json_path.stem)
