@@ -4277,6 +4277,14 @@ def write_fom_summary_table(
             lbl = r.label + (" [base]" if r is baseline else "")
             L.append(f"  {lbl:<28} {_cc_fomf(val):>11} {dev:>11}  "
                      f"{'M'+str(mw[0])+'W'+str(mw[1]):>9}")
+        vals = [metrics[r.label][0][mi] for r in ordered
+                if np.isfinite(metrics[r.label][0][mi])]
+        mean = float(np.mean(vals)) if vals else float("nan")
+        std  = float(np.std(vals, ddof=1)) if len(vals) > 1 else float("nan")
+        L.append("  " + "-" * 64)
+        L.append(f"  {'mean':<28} {_cc_fomf(mean):>11} "
+                 f"{_cc_dev_vs(mean, base_val):>11}  {'':>9}")
+        L.append(f"  {'std':<28} {_cc_fomf(std):>11} {'':>11}  {'':>9}")
         L.append("")
 
     path = os.path.join(output_dir, "fom_summary_table.txt")
