@@ -41,8 +41,8 @@ from matplotlib.lines import Line2D
 sys.path.insert(0, str(Path(__file__).parent))
 from analyseMusunNCs import (
     read_nc_data_file, read_material_map,
-    COLORS, RANDOM_SEED,
-    _log_resources, _save,
+    COLORS, RANDOM_SEED, N_MUONS_PER_RUN, VERTICES_GROUP,
+    _log_resources, _save, plot_ratio,
 )
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,11 @@ WL_BINS = np.linspace(200.0, 800.0, 121)            # 5 nm bins, 200–800 nm
 class LightRunData:
     """Per-run optical photon data after all filters."""
     run_name: str = ""
+    # Total simulated primary muons in the sim 1 run (cross-checked against
+    # the unique muon count in /hit/vertices; must equal N_MUONS_PER_RUN).
+    # Muons without any NC do not appear in the per-muon arrays below but
+    # count in every per-muon normalisation (photon/PMT count 0).
+    n_muons_total: int = 0
     # One entry per NC from sim 1 (including 0-photon NCs)
     nc_photon_counts: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.int64))
@@ -215,6 +220,26 @@ def _load_nc_keys(sim1_run_dir: Path) -> tuple[
     return nc_ge77, nc_time, nc_pos, nc_is_water, nc_in_germanium, dict(muon_nc)
 
 
+def _count_sim1_muons(sim1_run_dir: Path) -> int:
+    """Count unique primary-muon evtids in the run's /hit/vertices data.
+
+    Used as a cross-check that the run really simulated N_MUONS_PER_RUN
+    muons — the all-muon per-muon normalisation relies on that number.
+    """
+    ids: list[np.ndarray] = []
+    for fp in sorted(sim1_run_dir.glob("output_t*.hdf5")):
+        try:
+            with h5py.File(fp, "r") as f:
+                if VERTICES_GROUP not in f:
+                    continue
+                ids.append(_pages(f[VERTICES_GROUP], "evtid").astype(np.int64))
+        except Exception as exc:
+            print(f"  ERROR reading vertices from {fp.name}: {exc}")
+    if not ids:
+        return 0
+    return int(np.unique(np.concatenate(ids)).size)
+
+
 # ---------------------------------------------------------------------------
 # Run loading
 # ---------------------------------------------------------------------------
@@ -244,6 +269,18 @@ def load_light_run(
     Mutates all passed-in accumulator arguments.
     """
     rd = LightRunData(run_name=sim2_run_dir.name)
+
+    # Cross-check: the sim 1 vertex data must contain exactly the number of
+    # simulated primary muons — the all-muon normalisation relies on it.
+    n_mu = _count_sim1_muons(sim1_run_dir)
+    if n_mu != N_MUONS_PER_RUN:
+        raise RuntimeError(
+            f"Muon count cross-check failed for {sim1_run_dir.name}: "
+            f"vertices contain {n_mu:,} unique muons, "
+            f"expected {N_MUONS_PER_RUN:,}."
+        )
+    rd.n_muons_total = n_mu
+    print(f"  Sim1 muon cross-check: {n_mu:,} unique vertex muons — OK")
 
     nc_ge77, nc_time, nc_pos, nc_is_water, nc_in_germanium, muon_nc = _load_nc_keys(sim1_run_dir)
     if not nc_ge77:
@@ -576,6 +613,19 @@ def plot_light_per_nc(light_run_list: list[LightRunData], out_dir: Path) -> None
 # ---------------------------------------------------------------------------
 # Photon count per muon: Ge77 muons vs non-Ge77 muons
 # ---------------------------------------------------------------------------
+def _muon_class_totals(light_run_list: list[LightRunData]) -> tuple[int, int, int]:
+    """Return (n_total, n_ge77, n_no_nc) summed over all loaded runs.
+
+    n_total — all simulated primary muons (N_MUONS_PER_RUN per run)
+    n_ge77  — Ge77-producing muons (always NC-producing)
+    n_no_nc — muons without any NC (always non-Ge77; photon/PMT count 0)
+    """
+    n_total  = sum(rd.n_muons_total for rd in light_run_list)
+    n_ge77   = sum(int(rd.muon_is_ge77.sum()) for rd in light_run_list)
+    n_ncprod = sum(rd.muon_is_ge77.size for rd in light_run_list)
+    return n_total, n_ge77, n_total - n_ncprod
+
+
 def plot_photon_count_comparison(
     light_run_list: list[LightRunData], out_dir: Path,
     *,
@@ -587,6 +637,13 @@ def plot_photon_count_comparison(
 
     A Ge77 muon is a muon with at least one Ge77-flagged NC; photon counts are
     summed over each muon's window NCs (per-muon aggregate).
+
+    Densities are normalised per muon: p_i = k_i / (N · Δx_i) with N the TOTAL
+    number of simulated muons of the class — including zero-photon muons AND
+    muons without any NC (which detect no light by construction).  Zeros
+    cannot be shown on the log axis but count in N and in the legend's zero
+    tally.  The ratio panel uses full Poisson error propagation from both
+    classes (see plot_ratio).
 
     ``attr`` selects which per-muon array to use — ``muon_photon_counts`` (with
     the 200 ns photon cut) or ``muon_photon_counts_nocut`` (200 ns cut removed).
@@ -601,59 +658,50 @@ def plot_photon_count_comparison(
     ge77_counts   = np.concatenate(parts_ge77)   if parts_ge77   else np.array([], dtype=np.int64)
     noge77_counts = np.concatenate(parts_noge77) if parts_noge77 else np.array([], dtype=np.int64)
 
+    # Class totals over ALL simulated muons; no-NC muons are non-Ge77 zeros
+    n_total, n_ge77_mu, n_no_nc = _muon_class_totals(light_run_list)
+    n_noge77_mu = n_total - n_ge77_mu
+
     all_pos = np.concatenate(
         [ge77_counts[ge77_counts > 0], noge77_counts[noge77_counts > 0]]
     )
     if all_pos.size == 0:
         return
     bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
+    bin_widths = np.diff(bins)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(title, fontsize=13)
 
-    for data, label, color in [
-        (noge77_counts, "Non-Ge77 muons", COLORS["blue"]),
-        (ge77_counts,   "Ge77 muons",     COLORS["red"]),
+    for data, n_class, extra_zero, label, color in [
+        (noge77_counts, n_noge77_mu, n_no_nc, "Non-Ge77 muons", COLORS["blue"]),
+        (ge77_counts,   n_ge77_mu,   0,       "Ge77 muons",     COLORS["red"]),
     ]:
         d_pos  = data[data > 0]
-        n_zero = int((data == 0).sum())
+        n_zero = int((data == 0).sum()) + extra_zero
         if d_pos.size == 0:
             continue
-        axes[0].hist(d_pos, bins=bins, density=True, color=color, alpha=0.70,
-                     edgecolor="black", linewidth=0.3,
-                     label=f"{label}  (N>0={d_pos.size:,}, zero={n_zero:,})")
+        # Normalise by ALL muons of the class (zeros and no-NC included)
+        k, _ = np.histogram(d_pos, bins=bins)
+        p = k / (max(n_class, 1) * bin_widths)
+        axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
+                    color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
+                    label=f"{label}  (N={n_class:,}, zero={n_zero:,})")
     axes[0].set_xscale("log")
     axes[0].set_yscale("log")
     axes[0].set_xlabel("Photon count per muon (>0)", fontsize=12)
-    axes[0].set_ylabel("Probability density", fontsize=12)
+    axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
     axes[0].set_title("Density comparison", fontsize=12)
     axes[0].legend(fontsize=10)
     axes[0].tick_params(labelsize=10)
 
-    bin_widths   = np.diff(bins)
-    h_ge77,   _  = np.histogram(ge77_counts[ge77_counts > 0],     bins=bins)
-    h_noge77, _  = np.histogram(noge77_counts[noge77_counts > 0], bins=bins)
-    n_ge77_pos   = max(int((ge77_counts   > 0).sum()), 1)
-    n_noge77_pos = max(int((noge77_counts > 0).sum()), 1)
-    p_ge77   = h_ge77   / (n_ge77_pos   * bin_widths)
-    p_noge77 = h_noge77 / (n_noge77_pos * bin_widths)
-    bc    = 0.5 * (bins[:-1] + bins[1:])
-    valid = p_noge77 > 0
-    ratio = np.where(valid, p_ge77 / np.where(valid, p_noge77, 1.0), np.nan)
-    sigma = np.where(valid & (h_ge77 > 0), ratio / np.sqrt(h_ge77.astype(float)), np.nan)
-    mask  = valid & np.isfinite(ratio)
-    if mask.any():
-        axes[1].errorbar(bc[mask], ratio[mask], yerr=sigma[mask],
-                         fmt="o-", color=COLORS["red"], markersize=4, linewidth=1.2,
-                         elinewidth=0.8, capsize=3)
-    axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
-    axes[1].set_xscale("log")
-    axes[1].set_yscale("log")
+    # Zeros (incl. no-NC muons) fall below the first bin edge but count in N
+    plot_ratio(axes[1], ge77_counts, noge77_counts,
+               "Ge77 muons", "Non-Ge77 muons", bins,
+               log_x=True, log_y=True,
+               n_num=n_ge77_mu, n_den=n_noge77_mu)
     axes[1].set_xlabel("Photon count per muon (>0)", fontsize=12)
-    axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
-    axes[1].legend(fontsize=10)
-    axes[1].tick_params(labelsize=10)
 
     plt.tight_layout()
     _save(fig, out_dir / out_name)
@@ -672,6 +720,13 @@ def plot_pmt_multiplicity(
     """Distinct PMTs per muon (det_uid count unioned over the muon's window NCs):
     Ge77 muons vs non-Ge77 muons, density + ratio panel.
 
+    One entry per simulated muon: the integer bins include 0, and muons
+    without any NC (which detect no light by construction) are added to the
+    non-Ge77 0-bin analytically (they are too many to materialise as an
+    array).  Densities are normalised over ALL simulated muons of each class.
+    The ratio panel uses full Poisson error propagation from both classes
+    (see plot_ratio).
+
     ``attr`` selects ``muon_pmt_counts`` (with the 200 ns photon cut) or
     ``muon_pmt_counts_nocut`` (200 ns cut removed)."""
     parts_ge77   = [getattr(rd, attr)[rd.muon_is_ge77]
@@ -687,51 +742,45 @@ def plot_pmt_multiplicity(
     if all_pmt.size == 0:
         return
 
+    # Class totals over ALL simulated muons; no-NC muons enter the 0-bin
+    n_total, n_ge77_mu, n_no_nc = _muon_class_totals(light_run_list)
+    n_noge77_mu = n_total - n_ge77_mu
+
     max_pmt = int(all_pmt.max())
     bins = np.arange(0, max_pmt + 2) - 0.5
+    bin_widths = np.diff(bins)
+    extra_noge77 = np.zeros(len(bins) - 1)
+    extra_noge77[0] = n_no_nc
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(title, fontsize=13)
 
-    for data, label, color in [
-        (noge77_pmt, "Non-Ge77 muons", COLORS["blue"]),
-        (ge77_pmt,   "Ge77 muons",     COLORS["red"]),
+    for data, n_class, extra, label, color in [
+        (noge77_pmt, n_noge77_mu, extra_noge77, "Non-Ge77 muons", COLORS["blue"]),
+        (ge77_pmt,   n_ge77_mu,   None,         "Ge77 muons",     COLORS["red"]),
     ]:
         if data.size == 0:
             continue
-        axes[0].hist(data, bins=bins, density=True, color=color, alpha=0.70,
-                     edgecolor="black", linewidth=0.3,
-                     label=f"{label}  (N={data.size:,})")
+        k, _ = np.histogram(data, bins=bins)
+        k = k.astype(float)
+        if extra is not None:
+            k += extra
+        p = k / (max(n_class, 1) * bin_widths)
+        axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
+                    color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
+                    label=f"{label}  (N={n_class:,})")
     axes[0].set_yscale("log")
     axes[0].set_xlabel("Distinct PMTs per muon", fontsize=12)
-    axes[0].set_ylabel("Probability density", fontsize=12)
+    axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
     axes[0].set_title("Density comparison", fontsize=12)
     axes[0].legend(fontsize=10)
     axes[0].tick_params(labelsize=10)
 
-    bin_widths = np.diff(bins)
-    h_ge77,   _ = np.histogram(ge77_pmt,   bins=bins)
-    h_noge77, _ = np.histogram(noge77_pmt, bins=bins)
-    n_ge77   = max(ge77_pmt.size,   1)
-    n_noge77 = max(noge77_pmt.size, 1)
-    p_ge77   = h_ge77   / (n_ge77   * bin_widths)
-    p_noge77 = h_noge77 / (n_noge77 * bin_widths)
-    bc    = 0.5 * (bins[:-1] + bins[1:])
-    valid = p_noge77 > 0
-    ratio = np.where(valid, p_ge77 / np.where(valid, p_noge77, 1.0), np.nan)
-    sigma = np.where(valid & (h_ge77 > 0), ratio / np.sqrt(h_ge77.astype(float)), np.nan)
-    mask  = valid & np.isfinite(ratio)
-    if mask.any():
-        axes[1].errorbar(bc[mask], ratio[mask], yerr=sigma[mask],
-                         fmt="o-", color=COLORS["red"], markersize=4, linewidth=1.2,
-                         elinewidth=0.8, capsize=3)
-    axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="R = 1")
-    axes[1].set_yscale("log")
+    plot_ratio(axes[1], ge77_pmt, noge77_pmt,
+               "Ge77 muons", "Non-Ge77 muons", bins, log_y=True,
+               n_num=n_ge77_mu, n_den=n_noge77_mu, extra_den=extra_noge77)
     axes[1].set_xlabel("Distinct PMTs per muon", fontsize=12)
-    axes[1].set_ylabel("Density ratio  Ge77 / non-Ge77", fontsize=12)
     axes[1].set_title("Density ratio", fontsize=12)
-    axes[1].legend(fontsize=10)
-    axes[1].tick_params(labelsize=10)
 
     plt.tight_layout()
     _save(fig, out_dir / out_name)
@@ -768,8 +817,13 @@ def plot_cut_comparison_all_muons(
     bin_mode: str,  # "log" (photon yield) or "int" (PMT multiplicity)
     muon_mask_attr: str | None = None,
 ) -> None:
-    """Two-panel comparison over NC-producing muons: with 200 ns cut (left)
-    vs without it (right).  The right (no-cut) panel uses a logarithmic y-axis.
+    """Two-panel comparison over muons: with 200 ns cut (left) vs without it
+    (right).  The right (no-cut) panel uses a logarithmic y-axis.
+
+    When all muons are shown (``muon_mask_attr`` is None) the population is
+    ALL simulated muons: muons without any NC detect no light by construction
+    and are added analytically as zero entries (0-bin in integer binning,
+    zero tally in log binning).
 
     Each panel is annotated with mean and median (vertical lines) and a title
     line giving N, the zero-detected fraction, std, and max of the >0 values.
@@ -793,6 +847,9 @@ def plot_cut_comparison_all_muons(
     nocut = _concat(attr_nocut)
     if cut.size == 0 and nocut.size == 0:
         return
+
+    # No-NC muons (zero light in every variant); only for the all-muon plots
+    n_no_nc = _muon_class_totals(light_run_list)[2] if muon_mask_attr is None else 0
 
     # Shared bins so the two panels are directly comparable
     if bin_mode == "log":
@@ -818,8 +875,13 @@ def plot_cut_comparison_all_muons(
         # Log-mode drops the zeros (no log-x bin for 0); int-mode keeps them.
         hist_data = pos if bin_mode == "log" else data
         if hist_data.size > 0:
-            ax.hist(hist_data, bins=bins, color=color, alpha=0.80,
-                    edgecolor="black", linewidth=0.3)
+            k, _ = np.histogram(hist_data, bins=bins)
+            k = k.astype(float)
+            if bin_mode == "int" and n_no_nc > 0:
+                # No-NC muons are zero entries — visible in the 0-bin
+                k[0] += n_no_nc
+            ax.bar(bins[:-1], k, width=np.diff(bins), align="edge",
+                   color=color, alpha=0.80, edgecolor="black", linewidth=0.3)
         if bin_mode == "log":
             ax.set_xscale("log")
         ax.set_yscale("log")
@@ -836,8 +898,8 @@ def plot_cut_comparison_all_muons(
         else:
             std, mx = 0.0, 0
 
-        n      = data.size
-        n_zero = int((data == 0).sum())
+        n      = data.size + n_no_nc
+        n_zero = int((data == 0).sum()) + n_no_nc
         # PMT-multiplicity (int) plots have a tiny zero fraction — use dynamic
         # precision so the cut-vs-no-cut difference stays visible; photon-yield
         # (log) plots keep the single-decimal format.
@@ -1145,15 +1207,25 @@ def write_statistics(
                 f"Median photons (>0):      {int(np.median(pos))}",
                 f"Max photons:              {pos.max():,}",
             ]
+    # All simulated muons (cross-checked N_MUONS_PER_RUN per run); muons
+    # without any NC detect no light and count as zero-photon muons.
+    n_mu_sim   = sum(rd.n_muons_total for rd in light_run_list)
+    n_mu_no_nc = n_mu_sim - mu_all.size
     lines += [
         "",
         "--- Per-muon photon statistics ---",
-        f"Total muons (incl. 0):    {mu_all.size:,}",
+        f"Simulated muons:          {n_mu_sim:,}",
+        f"NC-producing muons:       {mu_all.size:,}  ({_pct(mu_all.size, n_mu_sim)})",
+        f"Muons without NC:         {n_mu_no_nc:,}  ({_pct(n_mu_no_nc, n_mu_sim)})",
     ]
     if mu_all.size > 0:
-        n_pos_mu = int((mu_all > 0).sum())
-        lines.append(
-            f"Muons with >0 photons:    {n_pos_mu:,}  ({_pct(n_pos_mu, mu_all.size)})")
+        n_pos_mu  = int((mu_all > 0).sum())
+        n_zero_mu = n_mu_sim - n_pos_mu
+        lines += [
+            f"Muons with >0 photons:    {n_pos_mu:,}  ({_pct(n_pos_mu, n_mu_sim)})",
+            f"Muons with 0 photons:     {n_zero_mu:,}  ({_pct(n_zero_mu, n_mu_sim)})"
+            "  (incl. muons without NC)",
+        ]
         pos_mu = mu_all[mu_all > 0]
         if pos_mu.size > 0:
             lines += [

@@ -45,6 +45,9 @@ DEFAULT_DATA_PATH = (
     "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
 )
 NUM_RUNS_DEFAULT = 10
+# Every MUSUN run simulates exactly this many primary muons.  Cross-checked
+# against the unique muon count in /hit/vertices when loading each run.
+N_MUONS_PER_RUN = 10_000_000
 RANDOM_SEED = 42
 MC_N_DRAWS = 20            # random subsamples drawn per N grid point
 MC_N_SIZES = 20            # number of log-spaced N grid points
@@ -436,8 +439,11 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
     muon_nc_offset = 0
     nc_counts_all_l, nc_counts_ge77mu_l, nc_counts_noge77mu_l = [], [], []
     ge77_nc_per_mu_l = []
+    nc_weight_mu_l: list[np.ndarray] = []
     mu_nc_mean_energy_l: list[np.ndarray] = []
-    mu_nc_mean_energy_is_ge77_l: list[np.ndarray] = []
+    mu_nc_total_energy_l: list[np.ndarray] = []
+    mu_nc_total_gammas_l: list[np.ndarray] = []
+    mu_ncprod_is_ge77_l: list[np.ndarray] = []
     mu_ekin_l, mu_zen_l, mu_az_l = [], [], []
     mu_x_l, mu_y_l, mu_z_l = [], [], []
     mu_px_l, mu_py_l, mu_pz_l = [], [], []
@@ -465,12 +471,20 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
             # Per-NC global muon index (unique across all runs)
             local_muon_idx = np.searchsorted(rd.muon_nc_evtids, rd.nc_evtid)
             nc_muon_idx_l.append(local_muon_idx + muon_nc_offset)
-            # Per-muon mean gamma energy
+            # Per-muon gamma energy (mean per NC, and total) and total gamma count
             mu_ids_e, inv_e = np.unique(rd.nc_evtid, return_inverse=True)
             energy_sum = np.bincount(inv_e, weights=rd.nc_gamma_energy_kev, minlength=mu_ids_e.size)
             nc_cnt_e   = np.bincount(inv_e, minlength=mu_ids_e.size)
             mu_nc_mean_energy_l.append(energy_sum / np.maximum(nc_cnt_e, 1))
-            mu_nc_mean_energy_is_ge77_l.append(np.isin(mu_ids_e, rd.ge77_evtids))
+            mu_nc_total_energy_l.append(energy_sum)
+            gamma_sum = np.bincount(
+                inv_e, weights=rd.nc_n_gammas.astype(np.float64),
+                minlength=mu_ids_e.size)
+            mu_nc_total_gammas_l.append(np.rint(gamma_sum).astype(np.int64))
+            mu_ncprod_is_ge77_l.append(np.isin(mu_ids_e, rd.ge77_evtids))
+            # Per-NC muon weight: each NC carries 1/n_NC(muon), so every muon
+            # contributes total weight 1 to per-NC histograms.
+            nc_weight_mu_l.append(1.0 / nc_cnt_e[inv_e])
 
         if rd.nc_counts.size > 0:
             ge77_mu_mask = np.isin(rd.muon_nc_evtids, rd.ge77_evtids)
@@ -514,9 +528,13 @@ def aggregate_runs(run_list: list[RunData]) -> dict:
         "nc_is_water":  cat(nc_is_water_l,  bool),
         "nc_n_gammas":  cat(nc_n_gammas_l,  np.int32),
         "nc_muon_idx":  cat(nc_muon_idx_l,  np.int64),
-        # Per-muon mean gamma energy (one entry per NC-producing muon)
-        "mu_nc_mean_energy_kev":    cat(mu_nc_mean_energy_l,         np.float64),
-        "mu_nc_mean_energy_is_ge77": cat(mu_nc_mean_energy_is_ge77_l, bool),
+        # Per-NC muon weight (1/n_NC of the parent muon; sums to 1 per muon)
+        "nc_weight_mu": cat(nc_weight_mu_l, np.float64),
+        # Per-muon gamma aggregates (one entry per NC-producing muon)
+        "mu_nc_mean_energy_kev":  cat(mu_nc_mean_energy_l,  np.float64),
+        "mu_nc_total_energy_kev": cat(mu_nc_total_energy_l, np.float64),
+        "mu_nc_total_gammas":     cat(mu_nc_total_gammas_l, np.int64),
+        "mu_ncprod_is_ge77":      cat(mu_ncprod_is_ge77_l,  bool),
         # Per-muon NC counts
         "nc_counts": cat(nc_counts_all_l, np.int64),
         "nc_counts_ge77mu": cat(nc_counts_ge77mu_l, np.int64),
@@ -595,22 +613,45 @@ def _comparison_hist(
     title: str, xlabel: str, out_path: Path,
     bins: np.ndarray,
     log_x: bool = False, log_y: bool = False, normalized: bool = True,
+    w1: np.ndarray | None = None, w2: np.ndarray | None = None,
+    n1: float | None = None, n2: float | None = None,
+    pseudo1: float = 0.0, pseudo2: float = 0.0,
+    pseudo_label: str = "muons w/o NC",
 ) -> None:
+    """Overlay histogram for two classes.
+
+    With normalized=True the bin value is Σw / (N·Δx) where N is the total Σw
+    of the class including out-of-range entries — per-muon counting, identical
+    to plot_normalized_histogram.  Optional weights w = 1/n_NC(muon) make
+    per-NC observables count each muon once; ``n1``/``n2`` normalise over the
+    full simulated-muon population; ``pseudo1``/``pseudo2`` draw the no-NC
+    population as a hatched grey bar left of the distribution.
+    """
     if d1.size == 0 and d2.size == 0:
         return
     fig, ax = plt.subplots(figsize=(10, 6))
-    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
-        if data.size == 0:
-            continue
-        ax.hist(data, bins=bins, density=normalized, color=color, alpha=0.7,
-                edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
-    if log_x:
-        ax.set_xscale("log")
-    if log_y:
-        ax.set_yscale("log")
+    note = ""
+    if normalized:
+        note = plot_normalized_histogram(
+            ax, d1, d2, l1, l2, c1, c2, bins, log_x, log_y,
+            w1=w1, w2=w2, n1=n1, n2=n2,
+            pseudo1=pseudo1, pseudo2=pseudo2, pseudo_label=pseudo_label,
+        )
+        ax.set_ylabel("Probability density (per muon)", fontsize=13)
+    else:
+        for data, label, color, w in [(d1, l1, c1, w1), (d2, l2, c2, w2)]:
+            if data.size == 0:
+                continue
+            ax.hist(data, bins=bins, weights=w, color=color, alpha=0.7,
+                    edgecolor="black", linewidth=0.3,
+                    label=_entries_label(label, data, w))
+        if log_x:
+            ax.set_xscale("log")
+        if log_y:
+            ax.set_yscale("log")
+        ax.set_ylabel("Count", fontsize=13)
     ax.set_xlabel(xlabel, fontsize=13)
-    ax.set_ylabel("Probability density" if normalized else "Count", fontsize=13)
-    ax.set_title(title, fontsize=14)
+    ax.set_title(title + (f"\n{note}" if note else ""), fontsize=14)
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_path)
@@ -620,34 +661,168 @@ def _comparison_hist(
 # Publication-quality comparison utilities  (axis-level building blocks)
 # ---------------------------------------------------------------------------
 
+def _weighted_density(
+    data: np.ndarray,
+    bins: np.ndarray,
+    weights: np.ndarray | None = None,
+    n_norm: float | None = None,
+    extra: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Histogram *data* and return (k, v, p, n).
+
+    k — (weighted) bin contents Σw            (unweighted: raw counts)
+    v — per-bin variance Σw²                  (unweighted: v = k)
+    p — density  p_i = k_i / (n · Δx_i)
+    n — normalisation.  Defaults to the total Σw over ALL entries, including
+        entries outside the bin range (e.g. zero counts below a log axis).
+        ``n_norm`` overrides it explicitly — used to normalise per muon over
+        the FULL muon population (all simulated muons of the class), of which
+        the histogrammed entries may be only a subset.  With per-muon weights
+        w = 1/n_NC(muon), the default n equals the number of contributing
+        muons.
+    extra — optional per-bin unweighted Poisson counts added to k (and to v,
+        since Var = count for Poisson).  Used to inject muon populations that
+        are too large to materialise as arrays (e.g. 10⁸ zero-NC muons in the
+        0-bin).  Callers passing ``extra`` must pass an ``n_norm`` that
+        already includes those muons.
+    """
+    if weights is None:
+        k, _ = np.histogram(data, bins=bins)
+        k = k.astype(float)
+        v = k.copy()
+        n = float(data.size)
+    else:
+        k, _ = np.histogram(data, bins=bins, weights=weights)
+        v, _ = np.histogram(data, bins=bins, weights=weights**2)
+        n = float(weights.sum())
+    if extra is not None:
+        k = k + extra
+        v = v + extra
+    if n_norm is not None:
+        n = float(n_norm)
+    p = k / (max(n, 1.0) * np.diff(bins))
+    return k, v, p, n
+
+
+def _entries_label(label: str, data: np.ndarray,
+                   weights: np.ndarray | None,
+                   n_norm: float | None = None) -> str:
+    """Legend label with the entry count: muons if weighted, else raw entries.
+
+    With ``n_norm`` the label shows the full muon population the density is
+    normalised to (which may exceed the histogrammed entries).
+    """
+    if weights is None:
+        if n_norm is not None:
+            return f"{label}  (N={n_norm:,.0f})"
+        return f"{label}  (N={data.size:,})"
+    n_mu = n_norm if n_norm is not None else float(weights.sum())
+    return f"{label}  (N_mu={n_mu:,.0f}, N_NC={data.size:,})"
+
+
+def _draw_pseudo_bar(
+    ax: "plt.Axes",
+    bins: np.ndarray,
+    count: float,
+    n_norm: float,
+    label: str,
+    log_x: bool = False,
+    dist_max: float | None = None,
+) -> str:
+    """Draw a 'metric undefined' population (muons without any NC) as a
+    hatched grey bar left of the distribution.
+
+    The metric of these muons does not exist (no NC → no capture time, no
+    gamma energy, …), so they cannot enter the regular bins.  The bar sits one
+    pseudo-bin left of the first bin edge with the same (log-)width as the
+    first bin; its area equals the per-muon probability mass count/n_norm.
+    If it would tower above the tallest distribution bin it is scaled down by
+    a power of ten.  Returns a short note (with the scale factor if used) for
+    the plot title; '' if nothing was drawn.
+    """
+    if count <= 0 or n_norm <= 0:
+        return ""
+    if log_x:
+        f = bins[1] / bins[0]
+        x_left, x_right = bins[0] / f**2, bins[0] / f
+        xlim_left = x_left / f**0.5
+    else:
+        w0 = bins[1] - bins[0]
+        x_left, x_right = bins[0] - 2.0 * w0, bins[0] - w0
+        xlim_left = x_left - 0.5 * w0
+    width = x_right - x_left
+    h = count / (n_norm * width)
+    k_scale = 0
+    if dist_max is not None and dist_max > 0 and h > dist_max:
+        k_scale = int(np.ceil(np.log10(h / dist_max)))
+        h /= 10.0 ** k_scale
+    scale_txt = rf", scaled $\times 10^{{-{k_scale}}}$" if k_scale else ""
+    ax.bar([x_left], [h], width=width, align="edge",
+           color="dimgray", alpha=0.85, hatch="//",
+           edgecolor="black", linewidth=0.5,
+           label=f"{label}  (N={count:,.0f}{scale_txt})")
+    ax.set_xlim(left=xlim_left)
+    return f"grey bar: {label}{scale_txt}"
+
+
 def plot_normalized_histogram(
     ax: "plt.Axes",
     d1: np.ndarray, d2: np.ndarray,
     l1: str, l2: str, c1: str, c2: str,
     bins: np.ndarray,
     log_x: bool = False, log_y: bool = False,
-) -> None:
+    w1: np.ndarray | None = None, w2: np.ndarray | None = None,
+    n1: float | None = None, n2: float | None = None,
+    extra1: np.ndarray | None = None, extra2: np.ndarray | None = None,
+    pseudo1: float = 0.0, pseudo2: float = 0.0,
+    pseudo_label: str = "muons w/o NC",
+) -> str:
     """Overlay density-normalised histograms for two classes on *ax*.
 
-    Uses density=True: bin value = count / (N * Δx).  For variable-width bins
-    (e.g. log-spaced energy) this is the only correct normalisation — equal-
-    fraction weighting (1/N) would make wide bins appear falsely large because
-    the comparison is not per-unit-x.  Identical bin edges are applied to both
+    Bin value = Σw / (N · Δx) with N = total Σw of the class INCLUDING entries
+    outside the bin range, so every class is normalised per muon:
+      * per-muon metrics (w = None): one entry per muon, N = number of muons
+        of the class (zero-valued muons below a log axis still count in N);
+      * per-NC observables with w = 1/n_NC(muon): each muon contributes total
+        weight 1, N = number of contributing muons.
+    ``n1``/``n2`` override N with the full simulated-muon population of the
+    class (all-muon normalisation); ``extra1``/``extra2`` inject per-bin
+    counts for muon populations too large to materialise (see
+    _weighted_density).  ``pseudo1``/``pseudo2`` are muon counts for which the
+    metric does not exist (no NC): they are drawn as a hatched grey bar left
+    of the distribution (see _draw_pseudo_bar).  Returns the pseudo-bar title
+    note ('' if none).
+
+    For variable-width bins (e.g. log-spaced energy) dividing by Δx is the
+    only correct normalisation.  Identical bin edges are applied to both
     distributions so every bin represents the same x-interval.
     """
-    for data, label, color in [(d1, l1, c1), (d2, l2, c2)]:
-        if data.size == 0:
+    dist_max = 0.0
+    for data, label, color, w, n, extra in [
+        (d1, l1, c1, w1, n1, extra1),
+        (d2, l2, c2, w2, n2, extra2),
+    ]:
+        if data.size == 0 and extra is None:
             continue
-        ax.hist(data, bins=bins, density=True, color=color, alpha=0.7,
-                edgecolor="black", linewidth=0.3,
-                label=f"{label}  (N={data.size:,})")
+        _, _, p, _ = _weighted_density(data, bins, w, n, extra)
+        if p.size > 0:
+            dist_max = max(dist_max, float(p.max()))
+        ax.bar(bins[:-1], p, width=np.diff(bins), align="edge",
+               color=color, alpha=0.7, edgecolor="black", linewidth=0.3,
+               label=_entries_label(label, data, w, n))
+    note = ""
+    for count, n in [(pseudo1, n1), (pseudo2, n2)]:
+        if count > 0:
+            note = _draw_pseudo_bar(ax, bins, count, n if n is not None else count,
+                                    pseudo_label, log_x, dist_max)
     if log_x:
         ax.set_xscale("log")
     if log_y:
         ax.set_yscale("log")
-    ax.set_ylabel("Probability density", fontsize=11)
+    ax.set_ylabel("Probability density (per muon)", fontsize=11)
     ax.legend(fontsize=9)
     ax.tick_params(labelsize=9)
+    return note
 
 
 def plot_ratio(
@@ -657,30 +832,41 @@ def plot_ratio(
     bins: np.ndarray,
     log_x: bool = False,
     log_y: bool = False,
+    w_num: np.ndarray | None = None, w_den: np.ndarray | None = None,
+    n_num: float | None = None, n_den: float | None = None,
+    extra_num: np.ndarray | None = None, extra_den: np.ndarray | None = None,
 ) -> None:
     """Plot density ratio R(x) = p_num(x) / p_den(x) with Poisson error bars.
 
-    Density in bin i:  p_i = k_i / (N * Δx_i),  k_i = raw bin count.
-    Poisson uncertainty on the numerator counts: σ_k = √k_i.
-    Propagated to the ratio:  σ_R = R / √k_i  (numerator errors only, as the
-    denominator population is large enough to treat as a reference).
-    Bins where the denominator density is zero are skipped.  R > 1 means the
-    numerator class is enriched; R < 1 means it is depleted.
+    Density in bin i:  p_i = k_i / (N · Δx_i)  with  k_i = Σw  and
+    N = total Σw of the class including out-of-range entries (per-muon
+    normalisation, see plot_normalized_histogram).  ``n_num``/``n_den``
+    override N with the full simulated-muon population of the class;
+    ``extra_num``/``extra_den`` inject per-bin counts (see _weighted_density).
+    Muons whose metric does not exist (no NC) have no bin and therefore never
+    enter the ratio points — only the normalisation N.
+
+    Full Poisson error propagation from BOTH histograms:
+        (σ_R / R)² = v_num/k_num² + v_den/k_den²,   v = Σw² per bin
+    which for unweighted entries reduces to σ_R = R·√(1/k_num + 1/k_den).
+    Bins where either histogram is empty are skipped (no point drawn).
+    R > 1 means the numerator class is enriched; R < 1 means it is depleted.
+    NOTE: with all-muon normalisation R is an absolute per-muon probability
+    ratio, not a shape comparison — a constant offset ≫ 1 is expected when
+    the numerator class produces the metric far more often per muon.
     """
-    if d_num.size == 0 or d_den.size == 0:
+    if (d_num.size == 0 and extra_num is None) or \
+       (d_den.size == 0 and extra_den is None):
         return
-    bin_widths = np.diff(bins)
-    h_num, _ = np.histogram(d_num, bins=bins)
-    h_den, _ = np.histogram(d_den, bins=bins)
-    p_num = h_num / (d_num.size * bin_widths)
-    p_den = h_den / (d_den.size * bin_widths)
+    k_num, v_num, p_num, _ = _weighted_density(d_num, bins, w_num, n_num, extra_num)
+    k_den, v_den, p_den, _ = _weighted_density(d_den, bins, w_den, n_den, extra_den)
     bc = 0.5 * (bins[:-1] + bins[1:])
 
-    valid = p_den > 0
+    valid = (k_num > 0) & (k_den > 0)
     ratio = np.where(valid, p_num / np.where(valid, p_den, 1.0), np.nan)
-    sigma = np.where(
-        valid & (h_num > 0), ratio / np.sqrt(h_num.astype(float)), np.nan
-    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rel_var = np.where(valid, v_num / k_num**2 + v_den / k_den**2, np.nan)
+    sigma = ratio * np.sqrt(rel_var)
 
     mask = valid & np.isfinite(ratio)
     ax.errorbar(
@@ -705,25 +891,41 @@ def _analysis_panel(
     bins: np.ndarray,
     xlabel: str, title: str, out_path: Path,
     log_x: bool = False, log_y: bool = False, log_y_ratio: bool = False,
+    w_num: np.ndarray | None = None, w_den: np.ndarray | None = None,
+    n_num: float | None = None, n_den: float | None = None,
+    extra_num: np.ndarray | None = None, extra_den: np.ndarray | None = None,
+    pseudo_num: float = 0.0, pseudo_den: float = 0.0,
+    pseudo_label: str = "muons w/o NC",
 ) -> None:
     """Two-panel comparison figure: density histogram | ratio with errors.
 
     Combines plot_normalized_histogram and plot_ratio into a single
-    publication-quality figure.  The numerator class (d_num, typically Ge77)
-    carries Poisson error bars in the ratio panel; the denominator (d_den) is
-    treated as the reference distribution.
+    publication-quality figure.  The ratio panel carries full Poisson error
+    propagation from both classes.  Optional per-entry weights (w = 1/n_NC of
+    the parent muon) turn per-NC observables into per-muon-counted densities;
+    ``n_num``/``n_den`` normalise over the full simulated-muon population;
+    ``pseudo_num``/``pseudo_den`` draw the no-NC population as a hatched grey
+    bar in the density panel (excluded from the ratio, which has no bin for a
+    non-existing metric value).
     """
     if d_num.size == 0 and d_den.size == 0:
         return
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    fig.suptitle(title, fontsize=13)
 
-    plot_normalized_histogram(axes[0], d_num, d_den, l_num, l_den,
-                               c_num, c_den, bins, log_x, log_y)
+    note = plot_normalized_histogram(
+        axes[0], d_num, d_den, l_num, l_den,
+        c_num, c_den, bins, log_x, log_y,
+        w1=w_num, w2=w_den, n1=n_num, n2=n_den,
+        extra1=extra_num, extra2=extra_den,
+        pseudo1=pseudo_num, pseudo2=pseudo_den, pseudo_label=pseudo_label,
+    )
+    fig.suptitle(title + (f"\n{note}" if note else ""), fontsize=13)
     axes[0].set_xlabel(xlabel, fontsize=11)
     axes[0].set_title("Probability density", fontsize=12)
 
-    plot_ratio(axes[1], d_num, d_den, l_num, l_den, bins, log_x, log_y_ratio)
+    plot_ratio(axes[1], d_num, d_den, l_num, l_den, bins, log_x, log_y_ratio,
+               w_num=w_num, w_den=w_den, n_num=n_num, n_den=n_den,
+               extra_num=extra_num, extra_den=extra_den)
     axes[1].set_xlabel(xlabel, fontsize=11)
     axes[1].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
 
@@ -857,7 +1059,12 @@ def plot_ge77_fraction_bar(agg: dict, out_dir: Path) -> None:
 # NC count per muon
 # ---------------------------------------------------------------------------
 def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
-    """NC count per muon: comparison overlay (Ge77 vs non-Ge77) with log-spaced bins."""
+    """NC count per muon: comparison overlay (Ge77 vs non-Ge77) with log-spaced bins.
+
+    Classes cover ALL simulated muons: a muon without any NC simply has
+    NC count 0 and falls into the non-Ge77 class (invisible on the log axis
+    but counted in the density normalisation N).
+    """
     counts_all = agg["nc_counts"]
     counts_ge77 = agg["nc_counts_ge77mu"]
     counts_noge77 = agg["nc_counts_noge77mu"]
@@ -865,36 +1072,45 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
     if counts_all.size == 0:
         return
 
+    n_mu_ge77   = agg["n_muons_ge77"]
+    n_mu_noge77 = agg["n_muons_total"] - n_mu_ge77
+    n_zero_noge77 = n_mu_noge77 - counts_noge77.size
+
     max_count = int(counts_all.max())
     bins = np.logspace(0, np.log10(max(max_count, 10)), 50)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     for data, label, color in [
-        (counts_noge77, "Non-Ge77 NC-producing", COLORS["blue"]),
-        (counts_ge77, "Ge77-producing", COLORS["red"]),
+        (counts_noge77,
+         f"Non-Ge77 muons (N={n_mu_noge77:,}, 0 NCs: {n_zero_noge77:,})",
+         COLORS["blue"]),
+        (counts_ge77,
+         f"Ge77-producing muons (N={n_mu_ge77:,})",
+         COLORS["red"]),
     ]:
         if data.size == 0:
             continue
         ax.hist(data, bins=bins, color=color, alpha=0.7,
-                edgecolor="black", linewidth=0.3, label=f"{label} (N={len(data):,})")
+                edgecolor="black", linewidth=0.3, label=label)
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.xaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0]))
     ax.xaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10))
     ax.set_xlabel("NC count per muon", fontsize=13)
     ax.set_ylabel("Number of muons", fontsize=13)
-    ax.set_title("NC count per muon: Ge77 vs non-Ge77 NC-producing", fontsize=14)
+    ax.set_title("NC count per muon: Ge77-producing vs non-Ge77 muons", fontsize=14)
     ax.legend(fontsize=11)
     ax.tick_params(labelsize=11)
     _save(fig, out_dir / "nc_count_per_muon_comparison.png")
     _analysis_panel(
         counts_ge77, counts_noge77,
-        "Ge77-producing", "Non-Ge77 NC-producing",
+        "Ge77-producing muons", "Non-Ge77 muons",
         COLORS["red"], COLORS["blue"],
         bins, "NC count per muon",
-        "NC count per muon: Ge77-producing vs non-Ge77 NC-producing muons",
+        "NC count per muon: Ge77-producing vs non-Ge77 muons (all simulated)",
         out_dir / "nc_count_per_muon_comparison_panel.png",
         log_x=True, log_y=True, log_y_ratio=True,
+        n_num=n_mu_ge77, n_den=n_mu_noge77,
     )
 
 
@@ -941,16 +1157,31 @@ def plot_ge77_per_ge77muon(agg: dict, out_dir: Path) -> None:
 # NC time distributions
 # ---------------------------------------------------------------------------
 def plot_nc_times(agg: dict, out_dir: Path) -> None:
-    """NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs (muon-level split)."""
+    """NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs (muon-level split).
+
+    Per-NC observable counted per muon: each NC is weighted by 1/n_NC of its
+    parent muon, so every muon contributes total weight 1 and high-multiplicity
+    muons do not dominate the density.  A capture time does not exist for a
+    muon without NC, so no-NC muons appear as a hatched grey pseudo-bar left
+    of the distribution; densities are normalised over ALL simulated muons of
+    each class.
+    """
     nc_time      = agg["nc_time_ns"]
     nc_is_ge77mu = agg["nc_is_ge77mu"]
+    nc_w         = agg["nc_weight_mu"]
 
     if nc_time.size == 0:
         return
 
+    n_mu_ge77   = agg["n_muons_ge77"]
+    n_mu_noge77 = agg["n_muons_total"] - n_mu_ge77
+    n_no_nc     = agg["n_muons_total"] - agg["n_muons_with_nc"]
+
     pos = nc_time > 0
     t_ge77mu   = nc_time[pos & nc_is_ge77mu]
     t_noge77mu = nc_time[pos & ~nc_is_ge77mu]
+    w_ge77mu   = nc_w[pos & nc_is_ge77mu]
+    w_noge77mu = nc_w[pos & ~nc_is_ge77mu]
 
     t_all_pos = nc_time[pos]
     if t_all_pos.size == 0:
@@ -965,6 +1196,8 @@ def plot_nc_times(agg: dict, out_dir: Path) -> None:
         "NC capture time [ns]",
         out_dir / "nc_time_ge77_vs_noge77.png",
         bins, log_x=True, log_y=True,
+        w1=w_noge77mu, w2=w_ge77mu,
+        n1=n_mu_noge77, n2=n_mu_ge77, pseudo1=n_no_nc,
     )
     _analysis_panel(
         t_ge77mu, t_noge77mu,
@@ -973,7 +1206,9 @@ def plot_nc_times(agg: dict, out_dir: Path) -> None:
         bins, "NC capture time [ns]",
         "NC capture time: Ge77-muon NCs vs non-Ge77-muon NCs",
         out_dir / "nc_time_ge77_vs_noge77_panel.png",
-        log_x=True,
+        log_x=True, log_y=True, log_y_ratio=True,
+        w_num=w_ge77mu, w_den=w_noge77mu,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
     )
 
 
@@ -1074,14 +1309,28 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
     """
     1-D histograms of φ, z, and r (all NCs vs Ge77-muon NCs) with ratio plots.
     2-D heatmaps: φ vs z and r vs z per subset (shared colorbar scale within subset).
+
+    1-D densities are counted per muon: each NC is weighted by 1/n_NC of its
+    parent muon, so every muon contributes total weight 1.  An NC position
+    does not exist for a muon without NC, so no-NC muons appear as a hatched
+    grey pseudo-bar left of the distribution; densities are normalised over
+    ALL simulated muons of each class.
     """
     phi = np.degrees(agg["nc_phi_rad"])   # convert to degrees for readability
     z_mm = agg["nc_z_m"] * 1e3           # metres → mm
     r_mm = agg["nc_r_m"] * 1e3           # metres → mm
     is_ge77mu = agg["nc_is_ge77mu"]
+    nc_w      = agg["nc_weight_mu"]
 
     if phi.size == 0:
         return
+
+    n_mu_ge77   = agg["n_muons_ge77"]
+    n_mu_noge77 = agg["n_muons_total"] - n_mu_ge77
+    n_no_nc     = agg["n_muons_total"] - agg["n_muons_with_nc"]
+
+    w_ge77mu   = nc_w[is_ge77mu]
+    w_noge77mu = nc_w[~is_ge77mu]
 
     # ---- 1-D φ: Ge77-muon NCs vs non-Ge77-muon NCs ----
     bins_phi     = np.linspace(-180, 180, 73)
@@ -1094,7 +1343,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         "NC azimuthal position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC azimuth φ [°]",
         out_dir / "nc_phi_1d_comparison.png",
-        bins_phi,
+        bins_phi, log_y=True,
+        w1=w_noge77mu, w2=w_ge77mu,
+        n1=n_mu_noge77, n2=n_mu_ge77, pseudo1=n_no_nc,
     )
     _analysis_panel(
         phi_ge77mu, phi_noge77mu,
@@ -1103,6 +1354,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         bins_phi, "NC azimuth φ [°]",
         "NC azimuthal position: Ge77-muon NCs vs non-Ge77-muon NCs",
         out_dir / "nc_phi_1d_comparison_panel.png",
+        log_y=True, log_y_ratio=True,
+        w_num=w_ge77mu, w_den=w_noge77mu,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
     )
 
     # ---- 1-D z: Ge77-muon NCs vs non-Ge77-muon NCs ----
@@ -1116,7 +1370,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         "NC z position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC z position [mm]",
         out_dir / "nc_z_1d_comparison.png",
-        bins_z,
+        bins_z, log_y=True,
+        w1=w_noge77mu, w2=w_ge77mu,
+        n1=n_mu_noge77, n2=n_mu_ge77, pseudo1=n_no_nc,
     )
     _analysis_panel(
         z_ge77mu, z_noge77mu,
@@ -1125,6 +1381,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         bins_z, "NC z position [mm]",
         "NC z position: Ge77-muon NCs vs non-Ge77-muon NCs",
         out_dir / "nc_z_1d_comparison_panel.png",
+        log_y=True, log_y_ratio=True,
+        w_num=w_ge77mu, w_den=w_noge77mu,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
     )
 
     # ---- 1-D r: Ge77-muon NCs vs non-Ge77-muon NCs ----
@@ -1138,7 +1397,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         "NC radial position: Ge77-muon NCs vs non-Ge77-muon NCs",
         "NC radial position r [mm]",
         out_dir / "nc_r_1d_comparison.png",
-        bins_r,
+        bins_r, log_y=True,
+        w1=w_noge77mu, w2=w_ge77mu,
+        n1=n_mu_noge77, n2=n_mu_ge77, pseudo1=n_no_nc,
     )
     _analysis_panel(
         r_ge77mu, r_noge77mu,
@@ -1147,6 +1408,9 @@ def plot_nc_positions(agg: dict, out_dir: Path) -> None:
         bins_r, "NC radial position r [mm]",
         "NC radial position: Ge77-muon NCs vs non-Ge77-muon NCs",
         out_dir / "nc_r_1d_comparison_panel.png",
+        log_y=True, log_y_ratio=True,
+        w_num=w_ge77mu, w_den=w_noge77mu,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
     )
 
     # ---- 2-D φ vs z AND r vs z (separate colorbars, r-density correction) ----
@@ -1283,61 +1547,94 @@ def plot_ge77_nc_positions_3d(agg: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 def plot_nc_material_distribution(run_list: list[RunData], out_dir: Path) -> None:
     """Grouped bar chart of NC material fractions: Ge77-muon NCs vs non-Ge77-muon NCs,
-    plus a ratio panel. Materials are sorted by total NC count (descending)."""
-    counts_ge77:   dict[str, int] = {}
-    counts_noge77: dict[str, int] = {}
+    plus a ratio panel. Materials are sorted by total weight (descending).
+
+    Counted per muon: each NC is weighted by 1/n_NC of its parent muon, so
+    every muon contributes total weight 1 and the fractions are not dominated
+    by high-multiplicity muons.  Fractions are normalised over ALL simulated
+    muons of each class; a capture material does not exist for a muon without
+    NC, so no-NC muons appear as a hatched grey "No NC" category (scaled by an
+    annotated power of ten, as they are the vast majority).
+    """
+    counts_ge77:   dict[str, float] = {}
+    counts_noge77: dict[str, float] = {}
+    n_mu_total  = 0
+    n_mu_ge77   = 0
+    n_mu_ncprod = 0
 
     for rd in run_list:
+        n_mu_total  += rd.n_muons_total
+        n_mu_ge77   += rd.ge77_evtids.size
+        n_mu_ncprod += rd.muon_nc_evtids.size
         if rd.nc_evtid.size == 0 or rd.nc_material_name.size == 0:
             continue
         is_ge77mu = np.isin(rd.nc_evtid, rd.ge77_evtids)
+        # Per-NC muon weight: 1/n_NC(muon) via the sorted per-muon NC counts
+        w = 1.0 / rd.nc_counts[np.searchsorted(rd.muon_nc_evtids, rd.nc_evtid)]
         for name in np.unique(rd.nc_material_name):
             mat_mask = rd.nc_material_name == name
-            counts_ge77[name]   = counts_ge77.get(name, 0)   + int((mat_mask & is_ge77mu).sum())
-            counts_noge77[name] = counts_noge77.get(name, 0) + int((mat_mask & ~is_ge77mu).sum())
+            counts_ge77[name]   = counts_ge77.get(name, 0.0)   + float(w[mat_mask & is_ge77mu].sum())
+            counts_noge77[name] = counts_noge77.get(name, 0.0) + float(w[mat_mask & ~is_ge77mu].sum())
 
     all_names = sorted(
         set(counts_ge77) | set(counts_noge77),
-        key=lambda n: counts_ge77.get(n, 0) + counts_noge77.get(n, 0),
+        key=lambda n: counts_ge77.get(n, 0.0) + counts_noge77.get(n, 0.0),
         reverse=True,
     )
     if not all_names:
         return
 
-    n_ge77   = sum(counts_ge77.values())
-    n_noge77 = sum(counts_noge77.values())
-    ge77_f   = np.array([counts_ge77.get(n, 0)   / max(n_ge77,   1) for n in all_names])
-    noge77_f = np.array([counts_noge77.get(n, 0) / max(n_noge77, 1) for n in all_names])
+    # Denominators: ALL simulated muons of each class (no-NC muons included)
+    n_mu_noge77 = n_mu_total - n_mu_ge77
+    n_no_nc     = n_mu_total - n_mu_ncprod
+    ge77_f   = np.array([counts_ge77.get(n, 0.0)   / max(n_mu_ge77,   1) for n in all_names])
+    noge77_f = np.array([counts_noge77.get(n, 0.0) / max(n_mu_noge77, 1) for n in all_names])
 
-    x = np.arange(len(all_names))
+    # "No NC" pseudo-category (non-Ge77 only: every Ge77 muon has NCs),
+    # scaled down by a power of ten to the tallest material fraction
+    no_nc_f = n_no_nc / max(n_mu_noge77, 1)
+    f_max   = max(float(ge77_f.max()), float(noge77_f.max()), 1e-30)
+    k_scale = int(np.ceil(np.log10(no_nc_f / f_max))) if no_nc_f > f_max else 0
+    no_nc_f_draw = no_nc_f / 10.0 ** k_scale
+    scale_txt = rf" (scaled $\times 10^{{-{k_scale}}}$)" if k_scale else ""
+
+    x = np.arange(len(all_names)) + 1          # slot 0 is the No-NC category
     w = 0.35
-    fig_w = max(10, len(all_names) * 1.6 + 4)
+    fig_w = max(10, (len(all_names) + 1) * 1.6 + 4)
 
     fig, axes = plt.subplots(1, 2, figsize=(fig_w, 6))
-    fig.suptitle("NC material distribution: Ge77-muon NCs vs non-Ge77-muon NCs",
-                 fontsize=13)
+    fig.suptitle(
+        "NC material distribution: Ge77-muon NCs vs non-Ge77-muon NCs\n"
+        f"grey bar: non-Ge77 muons w/o NC{scale_txt}",
+        fontsize=13,
+    )
 
     # ---- Left: overlaid grouped bars (normalised fractions) ----
     ax = axes[0]
+    ax.bar([0.0], [no_nc_f_draw], w,
+           label=f"No NC (N={n_no_nc:,}{scale_txt})",
+           color="dimgray", hatch="//", edgecolor="black", linewidth=0.5,
+           alpha=0.85)
     ax.bar(x - w / 2, noge77_f, w,
-           label=f"Non-Ge77 muon NCs (N={n_noge77:,})",
+           label=f"Non-Ge77 muon NCs (N_mu={n_mu_noge77:,})",
            color=COLORS["blue"], edgecolor="black", linewidth=0.5, alpha=0.85)
     ax.bar(x + w / 2, ge77_f, w,
-           label=f"Ge77-muon NCs (N={n_ge77:,})",
+           label=f"Ge77-muon NCs (N_mu={n_mu_ge77:,})",
            color=COLORS["red"],  edgecolor="black", linewidth=0.5, alpha=0.85)
-    ax.set_xticks(x)
-    ax.set_xticklabels(all_names, rotation=45, ha="right", fontsize=9)
-    ax.set_ylabel("Fraction of NCs", fontsize=12)
+    ax.set_xticks(np.concatenate([[0], x]))
+    ax.set_xticklabels(["No NC"] + all_names, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("Fraction of muons (per-muon weighted)", fontsize=12)
     ax.set_title("Normalised fraction per material", fontsize=12)
     ax.legend(fontsize=10)
     ax.tick_params(labelsize=9)
 
     # ---- Right: ratio (Ge77 fraction / non-Ge77 fraction per material) ----
+    # The No-NC category is excluded: the metric does not exist there.
     ax2 = axes[1]
     valid = noge77_f > 0
     ratios = np.where(valid, ge77_f / np.where(valid, noge77_f, 1.0), np.nan)
-    bars = ax2.bar(x[valid], ratios[valid],
-                   color=COLORS["red"], edgecolor="black", linewidth=0.5, alpha=0.85)
+    ax2.bar(x[valid], ratios[valid],
+            color=COLORS["red"], edgecolor="black", linewidth=0.5, alpha=0.85)
     ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1.0, label="ratio = 1")
     ax2.set_xticks(x)
     ax2.set_xticklabels(all_names, rotation=45, ha="right", fontsize=9)
@@ -1354,35 +1651,50 @@ def plot_nc_material_distribution(run_list: list[RunData], out_dir: Path) -> Non
 # NC gamma count distribution
 # ---------------------------------------------------------------------------
 def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
-    """Normalised histogram of capture-gamma multiplicity: Ge77-muon NCs vs non-Ge77."""
-    n_gammas  = agg["nc_n_gammas"]
-    is_ge77mu = agg["nc_is_ge77mu"]
+    """Total capture gammas per muon: Ge77-producing vs non-Ge77 muons.
 
-    if n_gammas.size == 0:
+    One entry per NC-producing muon: the capture-gamma multiplicities of all
+    the muon's NCs are summed, so the density counts muons, not NCs.
+    Muon-based metric: a muon without NC simply has 0 capture gammas and
+    falls into the non-Ge77 class (invisible on the log axis but counted in
+    the density normalisation N, which covers ALL simulated muons per class).
+    """
+    totals  = agg["mu_nc_total_gammas"]
+    is_ge77 = agg["mu_ncprod_is_ge77"]
+
+    if totals.size == 0:
         return
 
-    ge77_g   = n_gammas[is_ge77mu]
-    noge77_g = n_gammas[~is_ge77mu]
+    n_mu_ge77   = agg["n_muons_ge77"]
+    n_mu_noge77 = agg["n_muons_total"] - n_mu_ge77
 
-    max_g = int(n_gammas.max())
-    bins  = np.arange(0, max_g + 2) - 0.5   # integer-centred half-open bins
+    ge77_g   = totals[is_ge77]
+    noge77_g = totals[~is_ge77]
+
+    pos = totals[totals > 0]
+    if pos.size == 0:
+        return
+    bins = make_log_bins(1.0, float(pos.max()))
 
     _comparison_hist(
         noge77_g, ge77_g,
-        "Non-Ge77 muon NCs", "Ge77-muon NCs",
+        "Non-Ge77 muons", "Ge77-producing muons",
         COLORS["blue"], COLORS["red"],
-        "Capture-gamma multiplicity: Ge77 vs non-Ge77 muons",
-        "Number of capture gammas per NC",
+        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons",
+        "Total capture gammas per muon",
         out_dir / "nc_gamma_count_ge77_vs_noge77.png",
-        bins, log_x=False, log_y=True,
+        bins, log_x=True, log_y=True,
+        n1=n_mu_noge77, n2=n_mu_ge77,
     )
     _analysis_panel(
         ge77_g, noge77_g,
-        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        "Ge77-producing muons", "Non-Ge77 muons",
         COLORS["red"], COLORS["blue"],
-        bins, "Number of capture gammas per NC",
-        "Capture-gamma multiplicity: Ge77-muon NCs vs non-Ge77-muon NCs",
+        bins, "Total capture gammas per muon",
+        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons",
         out_dir / "nc_gamma_count_ge77_vs_noge77_panel.png",
+        log_x=True, log_y=True, log_y_ratio=True,
+        n_num=n_mu_ge77, n_den=n_mu_noge77,
     )
 
 
@@ -1390,27 +1702,59 @@ def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
 # NC gamma energy distribution
 # ---------------------------------------------------------------------------
 def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
-    """Mean total gamma energy per NC per muon: Ge77 vs non-Ge77 panel."""
-    energies = agg["mu_nc_mean_energy_kev"]
-    is_ge77  = agg["mu_nc_mean_energy_is_ge77"]
+    """Capture-gamma energy per muon, Ge77 vs non-Ge77 — two panels:
 
+    nc_gamma_mean_energy.png              — mean total gamma energy per NC,
+                                            averaged over each muon's NCs
+    nc_gamma_energy_ge77_vs_noge77_panel.png — total gamma energy per muon
+                                            (summed over the muon's NCs)
+
+    Both plots have one entry per NC-producing muon.  Gamma energy does not
+    exist for a muon without NC, so no-NC muons appear as a hatched grey
+    pseudo-bar left of the distribution; densities are normalised over ALL
+    simulated muons of each class.
+    """
+    is_ge77 = agg["mu_ncprod_is_ge77"]
+
+    n_mu_ge77   = agg["n_muons_ge77"]
+    n_mu_noge77 = agg["n_muons_total"] - n_mu_ge77
+    n_no_nc     = agg["n_muons_total"] - agg["n_muons_with_nc"]
+
+    # ---- Mean total gamma energy per NC (per muon) ----
+    energies = agg["mu_nc_mean_energy_kev"]
     if energies.size == 0:
         return
-
-    ge77_e   = energies[is_ge77]
-    noge77_e = energies[~is_ge77]
 
     vmin = max(float(energies[energies > 0].min()) if (energies > 0).any() else 1e-1, 1e-1)
     bins = make_log_bins(vmin, float(energies.max()))
 
     _analysis_panel(
-        ge77_e, noge77_e,
-        "Ge77-muon NCs", "Non-Ge77-muon NCs",
+        energies[is_ge77], energies[~is_ge77],
+        "Ge77-producing muons", "Non-Ge77 muons",
         COLORS["red"], COLORS["blue"],
         bins, "Mean total gamma energy per NC per muon [keV]",
-        r"Mean total $\gamma$ energy per NC: Ge77-muon NCs vs non-Ge77-muon NCs",
+        r"Mean total $\gamma$ energy per NC: Ge77-producing vs non-Ge77 muons",
+        out_dir / "nc_gamma_mean_energy.png",
+        log_x=True, log_y=True, log_y_ratio=True,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
+    )
+
+    # ---- Total gamma energy per muon (sum over all the muon's NCs) ----
+    tot_e = agg["mu_nc_total_energy_kev"]
+    pos_e = tot_e[tot_e > 0]
+    if pos_e.size == 0:
+        return
+    bins_tot = make_log_bins(max(float(pos_e.min()), 1e-1), float(tot_e.max()))
+
+    _analysis_panel(
+        tot_e[is_ge77], tot_e[~is_ge77],
+        "Ge77-producing muons", "Non-Ge77 muons",
+        COLORS["red"], COLORS["blue"],
+        bins_tot, "Total gamma energy per muon [keV]",
+        r"Total $\gamma$ energy per muon: Ge77-producing vs non-Ge77 muons",
         out_dir / "nc_gamma_energy_ge77_vs_noge77_panel.png",
-        log_x=True,
+        log_x=True, log_y=True, log_y_ratio=True,
+        n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
     )
 
 
@@ -2601,6 +2945,8 @@ def write_statistics(
         f"Total muons:               {agg['n_muons_total']:,}",
         f"Muons producing NCs:       {agg['n_muons_with_nc']:,}"
         f"  ({agg['n_muons_with_nc'] / max(agg['n_muons_total'], 1) * 100:.3f}%)",
+        f"Muons without NC:          {agg['n_muons_total'] - agg['n_muons_with_nc']:,}"
+        f"  ({(agg['n_muons_total'] - agg['n_muons_with_nc']) / max(agg['n_muons_total'], 1) * 100:.3f}%)",
         f"Ge77-producing muons:      {agg['n_muons_ge77']:,}"
         f"  ({agg['n_muons_ge77'] / max(agg['n_muons_total'], 1) * 100:.3f}%)",
         f"Total NCs:                 {agg['n_nc_total']:,}",
@@ -2703,6 +3049,14 @@ def main() -> None:
         print(f"Loading {rd_path.name} ...", flush=True)
         t_run = time.perf_counter()
         rd = load_run(rd_path)
+        # Cross-check: the vertex data must contain exactly the number of
+        # simulated primary muons — the all-muon normalisation relies on it.
+        if rd.n_muons_total != N_MUONS_PER_RUN:
+            raise RuntimeError(
+                f"Muon count cross-check failed for {rd_path.name}: "
+                f"vertices contain {rd.n_muons_total:,} unique muons, "
+                f"expected {N_MUONS_PER_RUN:,}."
+            )
         run_list.append(rd)
         elapsed = time.perf_counter() - t_run
         print(

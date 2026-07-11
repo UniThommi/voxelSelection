@@ -288,10 +288,10 @@ def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float
         FoM value, or np.nan when the formula is undefined (s ≤ 0 or b ≤ 0).
     """
     s = (np.log(2) * N_a / m_76) * epsilon_tot * exposure * (1.0 / T_half) * signal_survival_eff
-    b = (exposure * delta_E * signal_survival_eff
+    b = (exposure * delta_E
          * (r_prod * (a_rel * ge_survival_eff * c_ge77m
-                      + (1.0 - a_rel * (1.0 - 0.19)) * c_ge77)
-            + BI_other))
+                      + signal_survival_eff ((1.0 - a_rel * (1.0 - 0.19)) * c_ge77)
+            + BI_other)))
     if b <= 0 or s <= 0:
         return np.nan
     return float(np.sqrt(2.0 * ((s + b) * np.log(1.0 + s / b) - s)))

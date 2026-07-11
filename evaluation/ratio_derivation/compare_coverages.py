@@ -2600,12 +2600,11 @@ def plot_ge_surv_vs_livetime(
         xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
         ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
         si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
-        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
-        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, None,
                                color=stat_limit_color,
                                label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=4,
-                               alpha_inner=0.15, alpha_outer=0.07)
+                               alpha_inner=0.15)
 
     ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
     ax.set_ylabel("Ge77 survival  (Σ FN Ge77 NCs / Σ all Ge77 NCs)", fontsize=13)
@@ -2659,7 +2658,7 @@ def _plot_curve_with_bands(
     xs: np.ndarray,
     ys: np.ndarray,
     stat_dy: np.ndarray,
-    comb_dy: np.ndarray,
+    comb_dy: "np.ndarray | None",
     color: str,
     label: str,
     linestyle: str = "-",
@@ -2675,6 +2674,7 @@ def _plot_curve_with_bands(
     Points are sorted by x (sig_surv) so fill_between renders cleanly.
     Only the main line gets a legend entry; band fills are unlabelled.
     Inner band = statistical; outer band = stat ⊕ systematic.
+    ``comb_dy=None`` skips the outer (systematic) band entirely.
 
     ``point_labels`` — optional array of W-value labels (same order as xs
     before sorting).  When provided, discrete markers are drawn at every
@@ -2687,10 +2687,12 @@ def _plot_curve_with_bands(
         return
     order = np.argsort(xs)
     xs_s  = xs[order];       ys_s  = ys[order]
-    si_dy = stat_dy[order];  co_dy = comb_dy[order]
+    si_dy = stat_dy[order]
 
-    ax.fill_between(xs_s, ys_s - co_dy, ys_s + co_dy,
-                    color=color, alpha=alpha_outer, linewidth=0, zorder=zorder - 1)
+    if comb_dy is not None:
+        co_dy = comb_dy[order]
+        ax.fill_between(xs_s, ys_s - co_dy, ys_s + co_dy,
+                        color=color, alpha=alpha_outer, linewidth=0, zorder=zorder - 1)
     ax.fill_between(xs_s, ys_s - si_dy, ys_s + si_dy,
                     color=color, alpha=alpha_inner, linewidth=0, zorder=zorder - 1)
     ax.plot(xs_s, ys_s, color=color, linestyle=linestyle,
@@ -3304,18 +3306,18 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
         return np.array([rows[i]["x_cut"] for i in order])
 
     if setup_filt:
-        xs, ys, si, co = _rows_to_band_arrays(setup_filt)
-        _plot_curve_with_bands(ax, xs, ys, si, co,
+        xs, ys, si, _ = _rows_to_band_arrays(setup_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, None,
                                color=c, label=disp_label,
                                linestyle="-", linewidth=2.0, zorder=4,
                                point_labels=_w_labels(setup_filt))
 
     if sl_filt:
-        xs, ys, si, co = _rows_to_band_arrays(sl_filt)
-        _plot_curve_with_bands(ax, xs, ys, si, co,
+        xs, ys, si, _ = _rows_to_band_arrays(sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, None,
                                color=c, label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=3,
-                               alpha_inner=0.15, alpha_outer=0.07,
+                               alpha_inner=0.15,
                                point_labels=_w_labels(sl_filt))
 
     from matplotlib.patches import Patch as _Patch
@@ -3323,8 +3325,6 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     handles += [
         _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
                label="Statistical uncertainty"),
-        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
-               label="Stat. ⊕ 35 % systematic"),
     ]
     ax.legend(handles=handles, fontsize=10, loc="upper left")
 
@@ -3333,7 +3333,7 @@ def plot_ge_surv_vs_livetime_nc_truth_baseline(
     ax.set_title(
         f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — {disp_label} + NC-truth limit\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
-        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        f"(band: statistical uncertainty  ·  signal survival ≥ 80 %)",
         fontsize=12,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -3419,19 +3419,19 @@ def plot_ge_surv_setups_only(
         sr = [row for row in _compute_setup_curve_25b(r, W_range, M_fixed, _tp)
               if row["sig_surv"] >= 0.80]
         if sr:
-            xs, ys, si, co = _rows_to_band_arrays(sr)
-            _plot_curve_with_bands(ax, xs, ys, si, co,
+            xs, ys, si, _ = _rows_to_band_arrays(sr)
+            _plot_curve_with_bands(ax, xs, ys, si, None,
                                    color=c, label=disp_label,
                                    linestyle="-", linewidth=1.5, zorder=3,
                                    point_labels=_w_labels_sorted(sr))
 
     if shared_sl_filt:
-        xs, ys, si, co = _rows_to_band_arrays(shared_sl_filt)
-        _plot_curve_with_bands(ax, xs, ys, si, co,
+        xs, ys, si, _ = _rows_to_band_arrays(shared_sl_filt)
+        _plot_curve_with_bands(ax, xs, ys, si, None,
                                color=_sl_color,
                                label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=4,
-                               alpha_inner=0.15, alpha_outer=0.07,
+                               alpha_inner=0.15,
                                point_labels=_w_labels_sorted(shared_sl_filt))
 
     from matplotlib.patches import Patch as _Patch
@@ -3439,8 +3439,6 @@ def plot_ge_surv_setups_only(
     handles += [
         _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
                label="Statistical uncertainty"),
-        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
-               label="Stat. ⊕ 35 % systematic"),
     ]
     ax.legend(handles=handles, fontsize=10, loc="upper left")
 
@@ -3449,7 +3447,7 @@ def plot_ge_surv_setups_only(
     ax.set_title(
         f"Ge-77 Survival vs Signal Livetime  [M = {M_fixed}]  — all setups\n"
         f"M = min. firing PMTs per NC  ·  W = min. detected NCs per muon to tag as Ge-77\n"
-        f"(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        f"(band: statistical uncertainty  ·  signal survival ≥ 80 %)",
         fontsize=12,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -3474,7 +3472,8 @@ def plot_stat_limit_only(
 ) -> None:
     """Plot 25_stat_limit_only: only the NC-truth statistical limit curve.
 
-    Shows the theoretical upper bound (W up to 50) with uncertainty bands.
+    Shows the theoretical upper bound (W up to 50) with the statistical
+    uncertainty band.
     x: 80–100%, y: 0–100%. FoM colormap covers full axes.
     """
     sl_filt = [r for r in stat_limit_rows if r["sig_surv"] >= 0.80]
@@ -3496,12 +3495,12 @@ def plot_stat_limit_only(
     if pcm is not None:
         fig.colorbar(pcm, ax=ax, label="FoM", pad=0.04)
 
-    xs, ys, si, co = _rows_to_band_arrays(sl_filt)
-    _plot_curve_with_bands(ax, xs, ys, si, co,
+    xs, ys, si, _ = _rows_to_band_arrays(sl_filt)
+    _plot_curve_with_bands(ax, xs, ys, si, None,
                            color=stat_limit_color,
                            label="Full Captures - stat. limit",
                            linestyle=":", linewidth=2.0, zorder=4,
-                           alpha_inner=0.15, alpha_outer=0.07,
+                           alpha_inner=0.15,
                            point_labels=_w_labels_sorted(sl_filt))
 
     # Mark the FoM-optimal operating point (highest discovery FoM = best).
@@ -3535,8 +3534,6 @@ def plot_stat_limit_only(
     handles += [
         _Patch(facecolor="gray", alpha=0.25, edgecolor="none",
                label="Statistical uncertainty"),
-        _Patch(facecolor="gray", alpha=0.12, edgecolor="none",
-               label="Stat. ⊕ 35 % systematic"),
     ]
     ax.legend(handles=handles, fontsize=10, loc="upper left")
 
@@ -3545,7 +3542,7 @@ def plot_stat_limit_only(
     ax.set_title(
         "NC-Truth Statistical Limit\n"
         "W = min. detected NCs per muon (truth level, up to W = 50)\n"
-        "(inner band: stat.  outer band: stat. ⊕ 35 % syst.  ·  signal survival ≥ 80 %)",
+        "(band: statistical uncertainty  ·  signal survival ≥ 80 %)",
         fontsize=12,
     )
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v*100:.2f}%"))
@@ -3642,12 +3639,11 @@ def plot_ge_surv_best_fom(
         xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
         ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
         si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
-        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
-        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, None,
                                color=stat_limit_color,
                                label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=4,
-                               alpha_inner=0.15, alpha_outer=0.07)
+                               alpha_inner=0.15)
 
     m_desc = f"M ≥ {m_min}" if m_min > 1 else "all M"
     ax.set_xlabel("1 − Deadtime  (signal livetime fraction)", fontsize=13)
@@ -3759,12 +3755,11 @@ def plot_ge_surv_best_fom_pearson(
         xs_sl = np.array([r["sig_surv"]       for r in sl_filt])
         ys_sl = np.array([r["ge_77_surv"]     for r in sl_filt])
         si_sl = np.array([r["ge_77_surv_unc"] for r in sl_filt])
-        co_sl = np.array([_combined_unc_25b(s, v) for s, v in zip(si_sl, ys_sl)])
-        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, co_sl,
+        _plot_curve_with_bands(ax, xs_sl, ys_sl, si_sl, None,
                                color=stat_limit_color,
                                label="Full Captures - stat. limit",
                                linestyle=":", linewidth=1.5, zorder=4,
-                               alpha_inner=0.15, alpha_outer=0.07)
+                               alpha_inner=0.15)
 
     # ── Pearson / OLS fit over the setup points only ──────────────────
     xs = np.array(pts_x, dtype=float)
