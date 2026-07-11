@@ -42,8 +42,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from analyseMusunNCs import (
     read_nc_data_file, read_material_map,
     COLORS, RANDOM_SEED, N_MUONS_PER_RUN, VERTICES_GROUP,
-    _log_resources, _save, plot_ratio,
+    _log_resources, _save, plot_ratio, _annotate_ge77_quantiles,
 )
+
+# Title note for the *_quantiles.png plot variants
+QUANTILE_NOTE = ("dashed lines: thresholds keeping 80/50/20/10/5/1% "
+                 "of Ge77 muons at or right of the line")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -670,41 +674,51 @@ def plot_photon_count_comparison(
     bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
     bin_widths = np.diff(bins)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(title, fontsize=13)
+    # Two variants: the original, and one with Ge77-quantile threshold lines
+    for with_quantiles in (False, True):
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(title + (f"\n{QUANTILE_NOTE}" if with_quantiles else ""),
+                     fontsize=13)
 
-    for data, n_class, extra_zero, label, color in [
-        (noge77_counts, n_noge77_mu, n_no_nc, "Non-Ge77 muons", COLORS["blue"]),
-        (ge77_counts,   n_ge77_mu,   0,       "Ge77 muons",     COLORS["red"]),
-    ]:
-        d_pos  = data[data > 0]
-        n_zero = int((data == 0).sum()) + extra_zero
-        if d_pos.size == 0:
-            continue
-        # Normalise by ALL muons of the class (zeros and no-NC included)
-        k, _ = np.histogram(d_pos, bins=bins)
-        p = k / (max(n_class, 1) * bin_widths)
-        axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
-                    color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
-                    label=f"{label}  (N={n_class:,}, zero={n_zero:,})")
-    axes[0].set_xscale("log")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Photon count per muon (>0)", fontsize=12)
-    axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
-    axes[0].set_title("Density comparison", fontsize=12)
-    axes[0].legend(fontsize=10)
-    axes[0].tick_params(labelsize=10)
+        for data, n_class, extra_zero, label, color in [
+            (noge77_counts, n_noge77_mu, n_no_nc, "Non-Ge77 muons", COLORS["blue"]),
+            (ge77_counts,   n_ge77_mu,   0,       "Ge77 muons",     COLORS["red"]),
+        ]:
+            d_pos  = data[data > 0]
+            n_zero = int((data == 0).sum()) + extra_zero
+            if d_pos.size == 0:
+                continue
+            # Normalise by ALL muons of the class (zeros and no-NC included)
+            k, _ = np.histogram(d_pos, bins=bins)
+            p = k / (max(n_class, 1) * bin_widths)
+            axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
+                        color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
+                        label=f"{label}  (N={n_class:,}, zero={n_zero:,})")
+        axes[0].set_xscale("log")
+        axes[0].set_yscale("log")
+        axes[0].set_xlabel("Photon count per muon (>0)", fontsize=12)
+        axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
+        axes[0].set_title("Density comparison", fontsize=12)
+        axes[0].legend(fontsize=10)
+        axes[0].tick_params(labelsize=10)
 
-    # Zeros (incl. no-NC muons) fall below the first bin edge but count in N
-    plot_ratio(axes[1], ge77_counts, noge77_counts,
-               "Ge77 muons", "Non-Ge77 muons", bins,
-               log_x=True, log_y=True,
-               n_num=n_ge77_mu, n_den=n_noge77_mu)
-    axes[1].set_xlabel("Photon count per muon (>0)", fontsize=12)
-    axes[1].set_title("Density ratio", fontsize=12)
+        # Zeros (incl. no-NC muons) fall below the first bin edge but count in N
+        plot_ratio(axes[1], ge77_counts, noge77_counts,
+                   "Ge77 muons", "Non-Ge77 muons", bins,
+                   log_x=True, log_y=True,
+                   n_num=n_ge77_mu, n_den=n_noge77_mu)
+        axes[1].set_xlabel("Photon count per muon (>0)", fontsize=12)
+        axes[1].set_title("Density ratio", fontsize=12)
 
-    plt.tight_layout()
-    _save(fig, out_dir / out_name)
+        if with_quantiles:
+            _annotate_ge77_quantiles(axes, ge77_counts, noge77_counts,
+                                     n_ge77_mu, n_noge77_mu)
+            name = out_name.replace(".png", "_quantiles.png")
+        else:
+            name = out_name
+
+        plt.tight_layout()
+        _save(fig, out_dir / name)
 
 
 # ---------------------------------------------------------------------------
@@ -752,38 +766,48 @@ def plot_pmt_multiplicity(
     extra_noge77 = np.zeros(len(bins) - 1)
     extra_noge77[0] = n_no_nc
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(title, fontsize=13)
+    # Two variants: the original, and one with Ge77-quantile threshold lines
+    for with_quantiles in (False, True):
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(title + (f"\n{QUANTILE_NOTE}" if with_quantiles else ""),
+                     fontsize=13)
 
-    for data, n_class, extra, label, color in [
-        (noge77_pmt, n_noge77_mu, extra_noge77, "Non-Ge77 muons", COLORS["blue"]),
-        (ge77_pmt,   n_ge77_mu,   None,         "Ge77 muons",     COLORS["red"]),
-    ]:
-        if data.size == 0:
-            continue
-        k, _ = np.histogram(data, bins=bins)
-        k = k.astype(float)
-        if extra is not None:
-            k += extra
-        p = k / (max(n_class, 1) * bin_widths)
-        axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
-                    color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
-                    label=f"{label}  (N={n_class:,})")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Distinct PMTs per muon", fontsize=12)
-    axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
-    axes[0].set_title("Density comparison", fontsize=12)
-    axes[0].legend(fontsize=10)
-    axes[0].tick_params(labelsize=10)
+        for data, n_class, extra, label, color in [
+            (noge77_pmt, n_noge77_mu, extra_noge77, "Non-Ge77 muons", COLORS["blue"]),
+            (ge77_pmt,   n_ge77_mu,   None,         "Ge77 muons",     COLORS["red"]),
+        ]:
+            if data.size == 0:
+                continue
+            k, _ = np.histogram(data, bins=bins)
+            k = k.astype(float)
+            if extra is not None:
+                k += extra
+            p = k / (max(n_class, 1) * bin_widths)
+            axes[0].bar(bins[:-1], p, width=bin_widths, align="edge",
+                        color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
+                        label=f"{label}  (N={n_class:,})")
+        axes[0].set_yscale("log")
+        axes[0].set_xlabel("Distinct PMTs per muon", fontsize=12)
+        axes[0].set_ylabel("Probability density (per muon)", fontsize=12)
+        axes[0].set_title("Density comparison", fontsize=12)
+        axes[0].legend(fontsize=10)
+        axes[0].tick_params(labelsize=10)
 
-    plot_ratio(axes[1], ge77_pmt, noge77_pmt,
-               "Ge77 muons", "Non-Ge77 muons", bins, log_y=True,
-               n_num=n_ge77_mu, n_den=n_noge77_mu, extra_den=extra_noge77)
-    axes[1].set_xlabel("Distinct PMTs per muon", fontsize=12)
-    axes[1].set_title("Density ratio", fontsize=12)
+        plot_ratio(axes[1], ge77_pmt, noge77_pmt,
+                   "Ge77 muons", "Non-Ge77 muons", bins, log_y=True,
+                   n_num=n_ge77_mu, n_den=n_noge77_mu, extra_den=extra_noge77)
+        axes[1].set_xlabel("Distinct PMTs per muon", fontsize=12)
+        axes[1].set_title("Density ratio", fontsize=12)
 
-    plt.tight_layout()
-    _save(fig, out_dir / out_name)
+        if with_quantiles:
+            _annotate_ge77_quantiles(axes, ge77_pmt, noge77_pmt,
+                                     n_ge77_mu, n_noge77_mu)
+            name = out_name.replace(".png", "_quantiles.png")
+        else:
+            name = out_name
+
+        plt.tight_layout()
+        _save(fig, out_dir / name)
 
 
 # ---------------------------------------------------------------------------

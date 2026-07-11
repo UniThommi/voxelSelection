@@ -765,6 +765,58 @@ def _draw_pseudo_bar(
     return f"grey bar: {label}{scale_txt}"
 
 
+# Ge77-survival fractions used by the quantile-threshold annotation
+QUANTILE_FRACTIONS = (0.80, 0.50, 0.20, 0.10, 0.05, 0.01)
+
+
+def _annotate_ge77_quantiles(
+    axes,
+    ge77_vals: np.ndarray, other_vals: np.ndarray,
+    n_ge77: int, n_other: int,
+    fractions: tuple = QUANTILE_FRACTIONS,
+    l_ge77: str = "Ge77", l_other: str = "non-Ge77",
+) -> None:
+    """Draw vertical Ge77-quantile threshold lines on every axis in *axes*.
+
+    For each fraction f the threshold t_f is the (1-f) quantile of the Ge77
+    values, i.e. approximately a fraction f of all Ge77 muons lies at or
+    right of the line (metric >= t_f).  The first axis gets an annotation box
+    with, per line, the threshold and the explicit count and percentage of
+    muons >= t_f for both classes.  Percentages are relative to ALL simulated
+    muons of the class (``n_ge77`` / ``n_other``).  ``other_vals`` holds only
+    the muons present in the distribution; muons without an entry (no NC / no
+    detected light) have value 0 and pass a threshold only if t_f <= 0.
+    Lines left of the axis range (e.g. t = 0 on a log axis) are listed in the
+    box but not drawn.
+    """
+    if ge77_vals.size == 0:
+        return
+    txt_lines = ["Ge77-quantile thresholds (frac. of Ge77 muons ≥ line):"]
+    for f in fractions:
+        t = float(np.quantile(ge77_vals, 1.0 - f))
+        k_ge = int((ge77_vals >= t).sum())
+        k_ot = int((other_vals >= t).sum()) if t > 0 else int(n_other)
+        for ax in axes:
+            if t > ax.get_xlim()[0]:
+                ax.axvline(t, color="dimgray", linestyle="--",
+                           linewidth=1.0, alpha=0.9)
+        if t > axes[0].get_xlim()[0]:
+            axes[0].text(t, 0.985, f"{f * 100:g}%",
+                         transform=axes[0].get_xaxis_transform(),
+                         rotation=90, va="top", ha="right",
+                         fontsize=7, color="dimgray")
+        txt_lines.append(
+            f"{f * 100:>4g}%  ≥{t:,.0f}: "
+            f"{l_ge77} {k_ge:,} ({_fmt_pct(k_ge / max(n_ge77, 1))}), "
+            f"{l_other} {k_ot:,} ({_fmt_pct(k_ot / max(n_other, 1))})"
+        )
+    axes[0].text(0.02, 0.02, "\n".join(txt_lines),
+                 transform=axes[0].transAxes,
+                 fontsize=8, va="bottom", ha="left", family="monospace",
+                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.85,
+                           edgecolor="gray"))
+
+
 def plot_normalized_histogram(
     ax: "plt.Axes",
     d1: np.ndarray, d2: np.ndarray,
@@ -896,8 +948,12 @@ def _analysis_panel(
     extra_num: np.ndarray | None = None, extra_den: np.ndarray | None = None,
     pseudo_num: float = 0.0, pseudo_den: float = 0.0,
     pseudo_label: str = "muons w/o NC",
+    annotate_fn=None,
 ) -> None:
     """Two-panel comparison figure: density histogram | ratio with errors.
+
+    ``annotate_fn(axes)`` is an optional callback invoked after both panels
+    are drawn (e.g. _annotate_ge77_quantiles for threshold lines).
 
     Combines plot_normalized_histogram and plot_ratio into a single
     publication-quality figure.  The ratio panel carries full Poisson error
@@ -928,6 +984,9 @@ def _analysis_panel(
                extra_num=extra_num, extra_den=extra_den)
     axes[1].set_xlabel(xlabel, fontsize=11)
     axes[1].set_title(f"Density ratio: {l_num} / {l_den}", fontsize=12)
+
+    if annotate_fn is not None:
+        annotate_fn(axes)
 
     plt.tight_layout()
     _save(fig, out_path)
@@ -1111,6 +1170,20 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_count_per_muon_comparison_panel.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77,
+    )
+    # Same panel with Ge77-quantile threshold lines (original kept above)
+    _analysis_panel(
+        counts_ge77, counts_noge77,
+        "Ge77-producing muons", "Non-Ge77 muons",
+        COLORS["red"], COLORS["blue"],
+        bins, "NC count per muon",
+        "NC count per muon: Ge77-producing vs non-Ge77 muons (all simulated)\n"
+        "dashed lines: thresholds keeping 80/50/20/10/5/1% of Ge77 muons at or right of the line",
+        out_dir / "nc_count_per_muon_comparison_panel_quantiles.png",
+        log_x=True, log_y=True, log_y_ratio=True,
+        n_num=n_mu_ge77, n_den=n_mu_noge77,
+        annotate_fn=lambda axes: _annotate_ge77_quantiles(
+            axes, counts_ge77, counts_noge77, n_mu_ge77, n_mu_noge77),
     )
 
 
