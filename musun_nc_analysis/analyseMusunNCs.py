@@ -1014,6 +1014,8 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             "log_x": True,
             "log_y_ratio": True,
             "bins_fn": lambda d: make_log_bins(max(1.0, float(d.min())), float(d.max())),
+            # Ge77-quantile threshold lines on the Ge77-vs-non-Ge77 panel
+            "quantiles": True,
         },
         {
             "data": zenith,
@@ -1064,11 +1066,19 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             f"{title}: Ge77 vs non-Ge77", xl,
             out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx,
         )
+        # Percentages relative to the full class populations (all muons),
+        # not only those passing the observable's validity mask (e.g. ekin>0)
+        annotate_fn = None
+        if obs.get("quantiles"):
+            n_cls_ge77, n_cls_noge77 = int(is_ge77.sum()), int((~is_ge77).sum())
+            annotate_fn = lambda axes, dg=d_ge77, dn=d_noge77: \
+                _annotate_ge77_quantiles(axes, dg, dn, n_cls_ge77, n_cls_noge77)
         _analysis_panel(
             d_ge77, d_noge77,
             "Ge77", "Non-Ge77", COLORS["red"], COLORS["blue"],
             bins, xl, f"{title}: Ge77 vs non-Ge77 muons",
             out_dir / f"{base}_ge77_vs_noge77_panel.png", log_x=lx, log_y_ratio=lyr,
+            annotate_fn=annotate_fn,
         )
         d_nc   = d[obs["mask_nc"]]
         d_nonc = d[obs["mask_nonc"]]
@@ -1168,18 +1178,6 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
         bins, "NC count per muon",
         "NC count per muon: Ge77-producing vs non-Ge77 muons (all simulated)",
         out_dir / "nc_count_per_muon_comparison_panel.png",
-        log_x=True, log_y=True, log_y_ratio=True,
-        n_num=n_mu_ge77, n_den=n_mu_noge77,
-    )
-    # Same panel with Ge77-quantile threshold lines (original kept above)
-    _analysis_panel(
-        counts_ge77, counts_noge77,
-        "Ge77-producing muons", "Non-Ge77 muons",
-        COLORS["red"], COLORS["blue"],
-        bins, "NC count per muon",
-        "NC count per muon: Ge77-producing vs non-Ge77 muons (all simulated)\n"
-        "dashed lines: thresholds keeping 80/50/20/10/5/1% of Ge77 muons at or right of the line",
-        out_dir / "nc_count_per_muon_comparison_panel_quantiles.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77,
         annotate_fn=lambda axes: _annotate_ge77_quantiles(
@@ -1801,8 +1799,9 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
     vmin = max(float(energies[energies > 0].min()) if (energies > 0).any() else 1e-1, 1e-1)
     bins = make_log_bins(vmin, float(energies.max()))
 
+    ge77_e, noge77_e = energies[is_ge77], energies[~is_ge77]
     _analysis_panel(
-        energies[is_ge77], energies[~is_ge77],
+        ge77_e, noge77_e,
         "Ge77-producing muons", "Non-Ge77 muons",
         COLORS["red"], COLORS["blue"],
         bins, "Mean total gamma energy per NC per muon [keV]",
@@ -1810,6 +1809,8 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_gamma_mean_energy.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
+        annotate_fn=lambda axes: _annotate_ge77_quantiles(
+            axes, ge77_e, noge77_e, n_mu_ge77, n_mu_noge77),
     )
 
     # ---- Total gamma energy per muon (sum over all the muon's NCs) ----
@@ -1819,8 +1820,9 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
         return
     bins_tot = make_log_bins(max(float(pos_e.min()), 1e-1), float(tot_e.max()))
 
+    ge77_te, noge77_te = tot_e[is_ge77], tot_e[~is_ge77]
     _analysis_panel(
-        tot_e[is_ge77], tot_e[~is_ge77],
+        ge77_te, noge77_te,
         "Ge77-producing muons", "Non-Ge77 muons",
         COLORS["red"], COLORS["blue"],
         bins_tot, "Total gamma energy per muon [keV]",
@@ -1828,6 +1830,8 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
         out_dir / "nc_gamma_energy_ge77_vs_noge77_panel.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77, pseudo_den=n_no_nc,
+        annotate_fn=lambda axes: _annotate_ge77_quantiles(
+            axes, ge77_te, noge77_te, n_mu_ge77, n_mu_noge77),
     )
 
 
