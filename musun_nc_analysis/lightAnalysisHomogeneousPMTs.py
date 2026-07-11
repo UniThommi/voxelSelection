@@ -47,7 +47,7 @@ from analyseMusunNCs import (
     read_nc_data_file, read_material_map,
     COLORS, RANDOM_SEED, N_MUONS_PER_RUN, VERTICES_GROUP,
     _log_resources, _save, plot_ratio, _annotate_ge77_quantiles,
-    extend_bins_with_zero_bin, _mark_zero_bin,
+    extend_bins_with_zero_bin, _mark_zero_bin, make_log_bins,
 )
 
 # ---------------------------------------------------------------------------
@@ -580,7 +580,8 @@ def _photon_hist(
 
     fig, ax = plt.subplots(figsize=(10, 6))
     if counts_pos.size > 0:
-        bins = np.logspace(0, np.log10(max(float(counts_pos.max()), 10)), 50)
+        # Integer metric → integer bin edges (1, 2, ..., 9, 10, 20, ...)
+        bins = make_log_bins(1.0, max(float(counts_pos.max()), 10.0))
         ax.hist(counts_pos, bins=bins, color=color, alpha=0.8,
                 edgecolor="black", linewidth=0.3,
                 label=f">0 photons  (N = {counts_pos.size:,})")
@@ -633,13 +634,17 @@ def plot_photon_count_comparison(
     summed over each muon's window NCs (per-muon aggregate).
 
     Only NC-producing muons enter the analysis (muons without any NC are
-    excluded).  Densities are normalised per muon: p_i = k_i / (N · Δx_i)
-    with N the number of NC-producing muons of the class.  NC-producing muons
-    with 0 detected photons count in N and are drawn in a dedicated zero
-    pseudo-bin left of the first regular bin (marked '0'); the zero bin also
-    enters the ratio panel.  The ratio panel uses full Poisson error
-    propagation from both classes (see plot_ratio).  Quantile thresholds are
-    computed on the true (unmapped) counts.
+    excluded).  Photon counts are integers, so the bins are integer-edged
+    (make_log_bins: 1, 2, ..., 9, 10, 20, ...); bins of width 1 read directly
+    as per-count muon fractions.  Densities are normalised per muon:
+    p_i = k_i / (N · Δx_i) with N the number of NC-producing muons of the
+    class.  NC-producing muons with 0 detected photons count in N and are
+    drawn in a dedicated zero pseudo-bin (marked '0') whose bar height equals
+    the muon FRACTION P(0) (mass, effective Δx = 1) rather than the density;
+    the zero bin also enters the ratio panel (the bin width cancels there).
+    The ratio panel uses full Poisson error propagation from both classes
+    (see plot_ratio).  Quantile thresholds are computed on the true
+    (unmapped) counts.
 
     ``attr`` selects which per-muon array to use — ``muon_photon_counts`` (with
     the 200 ns photon cut) or ``muon_photon_counts_nocut`` (200 ns cut removed).
@@ -663,7 +668,7 @@ def plot_photon_count_comparison(
     )
     if all_pos.size == 0:
         return
-    bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
+    bins = make_log_bins(1.0, max(float(all_pos.max()), 10.0))
     # Zero-photon NC-producing muons: dedicated pseudo-bin left of the axis
     bins_ext, x0 = extend_bins_with_zero_bin(bins)
     bin_widths_ext = np.diff(bins_ext)
@@ -671,7 +676,7 @@ def plot_photon_count_comparison(
     noge77_m = np.where(noge77_counts > 0, noge77_counts.astype(float), x0)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(title + "  (NC-producing muons only; leftmost bin: 0 photons)",
+    fig.suptitle(title + "  (NC-producing muons only; 0-bin height = muon fraction)",
                  fontsize=13)
 
     for data_m, n_zero, n_class, label, color in [
@@ -684,6 +689,9 @@ def plot_photon_count_comparison(
             continue
         k, _ = np.histogram(data_m, bins=bins_ext)
         p = k / (max(n_class, 1) * bin_widths_ext)
+        # Zero pseudo-bin: probability mass P(0) (effective Δx = 1), so the
+        # bar height reads directly as the fraction of muons with 0 photons
+        p[0] = k[0] / max(n_class, 1)
         axes[0].bar(bins_ext[:-1], p, width=bin_widths_ext, align="edge",
                     color=color, alpha=0.70, edgecolor="black", linewidth=0.3,
                     label=f"{label}  (N={n_class:,}, zero={n_zero:,})")
@@ -845,12 +853,13 @@ def plot_cut_comparison_all_muons(
     if cut.size == 0 and nocut.size == 0:
         return
 
-    # Shared bins so the two panels are directly comparable
+    # Shared bins so the two panels are directly comparable; counts are
+    # integers → integer bin edges (1, 2, ..., 9, 10, 20, ...)
     if bin_mode == "log":
         all_pos = np.concatenate([cut[cut > 0], nocut[nocut > 0]])
         if all_pos.size == 0:
             return
-        bins = np.logspace(0, np.log10(max(float(all_pos.max()), 10)), 50)
+        bins = make_log_bins(1.0, max(float(all_pos.max()), 10.0))
     else:
         all_v = np.concatenate([cut, nocut])
         max_v = int(all_v.max()) if all_v.size > 0 else 1
@@ -1095,7 +1104,8 @@ def plot_ge77_light(
     counts_pos = ge77_counts[ge77_counts > 0]
     if counts_pos.size > 0:
         fig3, ax3 = plt.subplots(figsize=(10, 6))
-        bins = np.logspace(0, np.log10(max(float(counts_pos.max()), 10)), 40)
+        # Integer metric → integer bin edges (1, 2, ..., 9, 10, 20, ...)
+        bins = make_log_bins(1.0, max(float(counts_pos.max()), 10.0))
         ax3.hist(counts_pos, bins=bins, color="gold", alpha=0.85,
                  edgecolor="black", linewidth=1.0)
         ax3.axvline(float(np.mean(counts_pos)), color="red", linestyle="--",

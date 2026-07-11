@@ -617,6 +617,7 @@ def _comparison_hist(
     log_x: bool = False, log_y: bool = False, normalized: bool = True,
     w1: np.ndarray | None = None, w2: np.ndarray | None = None,
     n1: float | None = None, n2: float | None = None,
+    mass_bin0: bool = False,
     annotate_fn=None,
 ) -> None:
     """Overlay histogram for two classes.
@@ -626,7 +627,8 @@ def _comparison_hist(
     to plot_normalized_histogram.  Optional weights w = 1/n_NC(muon) make
     per-NC observables count each muon once; ``n1``/``n2`` set N explicitly
     (e.g. the number of NC-producing muons of the class when the histogrammed
-    entries carry a validity filter).
+    entries carry a validity filter).  ``mass_bin0`` draws the zero pseudo-bin
+    as probability mass (see plot_normalized_histogram).
     """
     if d1.size == 0 and d2.size == 0:
         return
@@ -634,7 +636,7 @@ def _comparison_hist(
     if normalized:
         plot_normalized_histogram(
             ax, d1, d2, l1, l2, c1, c2, bins, log_x, log_y,
-            w1=w1, w2=w2, n1=n1, n2=n2,
+            w1=w1, w2=w2, n1=n1, n2=n2, mass_bin0=mass_bin0,
         )
         ax.set_ylabel("Probability density (per muon)", fontsize=13)
     else:
@@ -803,6 +805,7 @@ def plot_normalized_histogram(
     log_x: bool = False, log_y: bool = False,
     w1: np.ndarray | None = None, w2: np.ndarray | None = None,
     n1: float | None = None, n2: float | None = None,
+    mass_bin0: bool = False,
 ) -> None:
     """Overlay density-normalised histograms for two classes on *ax*.
 
@@ -817,6 +820,12 @@ def plot_normalized_histogram(
     removed some NC-producing muons).  Muons without any NC are excluded from
     the analysis and never enter N.
 
+    ``mass_bin0``: draw the FIRST bin (the zero pseudo-bin from
+    extend_bins_with_zero_bin) with height = probability MASS k₀/N
+    (effective Δx = 1) instead of density, so the bar reads directly as the
+    fraction of muons with metric value 0.  Interpretability over strict PDF
+    consistency; all other bins remain proper densities.
+
     For variable-width bins (e.g. log-spaced energy) dividing by Δx is the
     only correct normalisation.  Identical bin edges are applied to both
     distributions so every bin represents the same x-interval.
@@ -828,7 +837,10 @@ def plot_normalized_histogram(
         if data.size == 0:
             continue
         _, _, p, _ = _weighted_density(data, bins, w, n)
-        ax.bar(bins[:-1], p, width=np.diff(bins), align="edge",
+        heights = p.copy()
+        if mass_bin0:
+            heights[0] = p[0] * (bins[1] - bins[0])   # mass = density · Δx₀
+        ax.bar(bins[:-1], heights, width=np.diff(bins), align="edge",
                color=color, alpha=0.7, edgecolor="black", linewidth=0.3,
                label=_entries_label(label, data, w, n))
     if log_x:
@@ -902,6 +914,7 @@ def _analysis_panel(
     log_x: bool = False, log_y: bool = False, log_y_ratio: bool = False,
     w_num: np.ndarray | None = None, w_den: np.ndarray | None = None,
     n_num: float | None = None, n_den: float | None = None,
+    mass_bin0: bool = False,
     annotate_fn=None,
 ) -> None:
     """Two-panel comparison figure: density histogram | ratio with errors.
@@ -915,6 +928,10 @@ def _analysis_panel(
     the parent muon) turn per-NC observables into per-muon-counted densities;
     ``n_num``/``n_den`` set the class normalisation explicitly when the
     histogrammed entries are a subset of the class (validity filters).
+    ``mass_bin0`` draws the zero pseudo-bin as probability mass in the density
+    panel (see plot_normalized_histogram); the ratio panel is unaffected —
+    the density ratio in the pseudo-bin equals the mass ratio since the bin
+    width cancels between numerator and denominator.
     """
     if d_num.size == 0 and d_den.size == 0:
         return
@@ -923,7 +940,7 @@ def _analysis_panel(
     plot_normalized_histogram(
         axes[0], d_num, d_den, l_num, l_den,
         c_num, c_den, bins, log_x, log_y,
-        w1=w_num, w2=w_den, n1=n_num, n2=n_den,
+        w1=w_num, w2=w_den, n1=n_num, n2=n_den, mass_bin0=mass_bin0,
     )
     fig.suptitle(title, fontsize=13)
     axes[0].set_xlabel(xlabel, fontsize=11)
@@ -1093,6 +1110,11 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
     Classes cover NC-producing muons only: muons without any NC are excluded
     from both the PDFs and the ratio.  Every muon in either class therefore
     has NC count >= 1 and is visible on the log axis.
+
+    NC counts are integers, so the bins are integer-edged (make_log_bins:
+    1, 2, ..., 9, 10, 20, ...).  The bins [1,2) ... [9,10) have width 1, so
+    their density heights read directly as the fraction of muons with that
+    exact NC count; wider bins are per-count averages.
     """
     counts_all = agg["nc_counts"]
     counts_ge77 = agg["nc_counts_ge77mu"]
@@ -1105,7 +1127,7 @@ def plot_nc_count_per_muon(agg: dict, out_dir: Path) -> None:
     n_mu_noge77 = counts_noge77.size
 
     max_count = int(counts_all.max())
-    bins = np.logspace(0, np.log10(max(max_count, 10)), 50)
+    bins = make_log_bins(1.0, float(max(max_count, 10)))
 
     fig, ax = plt.subplots(figsize=(10, 6))
     for data, label, color in [
@@ -1659,9 +1681,12 @@ def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
 
     One entry per NC-producing muon: the capture-gamma multiplicities of all
     the muon's NCs are summed, so the density counts muons, not NCs.  Muons
-    without any NC are excluded from the analysis; NC-producing muons whose
-    NCs yielded 0 gammas count in N and are drawn in a dedicated zero
-    pseudo-bin left of the first regular bin (marked '0').
+    without any NC are excluded from the analysis.
+
+    Gamma counts are integers, so the bins are integer-edged (make_log_bins).
+    If muons with 0 total gammas exist, they count in N and are drawn in a
+    zero pseudo-bin (marked '0') whose bar height equals the muon FRACTION
+    P(0) (mass, effective Δx = 1) rather than the density.
     """
     totals  = agg["mu_nc_total_gammas"]
     is_ge77 = agg["mu_ncprod_is_ge77"]
@@ -1671,39 +1696,47 @@ def plot_nc_gamma_count(agg: dict, out_dir: Path) -> None:
 
     ge77_g   = totals[is_ge77]
     noge77_g = totals[~is_ge77]
-    n_mu_ge77   = ge77_g.size
-    n_mu_noge77 = noge77_g.size
 
     pos = totals[totals > 0]
     if pos.size == 0:
         return
     bins = make_log_bins(1.0, float(pos.max()))
-    # Zero-gamma muons: map onto the pseudo-bin centre so they stay visible
-    bins_ext, x0 = extend_bins_with_zero_bin(bins)
-    ge77_m   = np.where(ge77_g > 0, ge77_g.astype(float), x0)
-    noge77_m = np.where(noge77_g > 0, noge77_g.astype(float), x0)
-    zero_mark = lambda axes: _mark_zero_bin(axes, x0, float(bins[0]))
+
+    has_zeros = bool((totals == 0).any())
+    if has_zeros:
+        # Zero-gamma muons: map onto the pseudo-bin centre so they stay
+        # visible; the bar is drawn as probability mass (mass_bin0)
+        bins_plot, x0 = extend_bins_with_zero_bin(bins)
+        ge77_p   = np.where(ge77_g > 0, ge77_g.astype(float), x0)
+        noge77_p = np.where(noge77_g > 0, noge77_g.astype(float), x0)
+        zero_mark = lambda axes: _mark_zero_bin(axes, x0, float(bins[0]))
+        note = "\n(NC-producing only; 0-bin height = muon fraction)"
+    else:
+        bins_plot = bins
+        ge77_p, noge77_p = ge77_g, noge77_g
+        zero_mark = None
+        note = "\n(NC-producing muons only)"
 
     _comparison_hist(
-        noge77_m, ge77_m,
+        noge77_p, ge77_p,
         "Non-Ge77 NC-producing muons", "Ge77-producing muons",
         COLORS["blue"], COLORS["red"],
-        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons\n"
-        "(NC-producing only; leftmost bin: 0 gammas)",
+        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons" + note,
         "Total capture gammas per muon",
         out_dir / "nc_gamma_count_ge77_vs_noge77.png",
-        bins_ext, log_x=True, log_y=True,
+        bins_plot, log_x=True, log_y=True,
+        mass_bin0=has_zeros,
         annotate_fn=zero_mark,
     )
     _analysis_panel(
-        ge77_m, noge77_m,
+        ge77_p, noge77_p,
         "Ge77-producing muons", "Non-Ge77 NC-producing muons",
         COLORS["red"], COLORS["blue"],
-        bins_ext, "Total capture gammas per muon",
-        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons\n"
-        "(NC-producing only; leftmost bin: 0 gammas)",
+        bins_plot, "Total capture gammas per muon",
+        "Total capture gammas per muon: Ge77-producing vs non-Ge77 muons" + note,
         out_dir / "nc_gamma_count_ge77_vs_noge77_panel.png",
         log_x=True, log_y=True, log_y_ratio=True,
+        mass_bin0=has_zeros,
         annotate_fn=zero_mark,
     )
 
@@ -1720,10 +1753,10 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
                                             (summed over the muon's NCs)
 
     Both plots have one entry per NC-producing muon; muons without any NC are
-    excluded from the analysis.  NC-producing muons with 0 gamma energy count
-    in the class normalisation N and are drawn in a dedicated zero pseudo-bin
-    left of the first regular bin (marked '0').  Quantile thresholds are
-    computed on the true (unmapped) values.
+    excluded from the analysis.  Every capture gamma carries energy > 0, so
+    there is no zero pseudo-bin; N is passed explicitly because positive
+    values below the first bin edge fall out of the displayed range but their
+    muons still count in the normalisation.
     """
     is_ge77 = agg["mu_ncprod_is_ge77"]
 
@@ -1738,29 +1771,20 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
 
     vmin = max(float(energies[energies > 0].min()) if (energies > 0).any() else 1e-1, 1e-1)
     bins = make_log_bins(vmin, float(energies.max()))
-    bins_ext, x0 = extend_bins_with_zero_bin(bins)
 
     ge77_e, noge77_e = energies[is_ge77], energies[~is_ge77]
-    # Only exact zeros go to the pseudo-bin; positive values below the first
-    # regular edge fall out of range but still count in N (passed explicitly)
-    ge77_e_m   = np.where(ge77_e == 0.0, x0, ge77_e)
-    noge77_e_m = np.where(noge77_e == 0.0, x0, noge77_e)
-
-    def _annot_mean(axes):
-        _mark_zero_bin(axes, x0, float(bins[0]))
-        _annotate_ge77_quantiles(axes, ge77_e, noge77_e, n_mu_ge77, n_mu_noge77)
-
     _analysis_panel(
-        ge77_e_m, noge77_e_m,
+        ge77_e, noge77_e,
         "Ge77-producing muons", "Non-Ge77 NC-producing muons",
         COLORS["red"], COLORS["blue"],
-        bins_ext, "Mean total gamma energy per NC per muon [keV]",
+        bins, "Mean total gamma energy per NC per muon [keV]",
         r"Mean total $\gamma$ energy per NC: Ge77-producing vs non-Ge77 muons"
-        "\n(NC-producing only; leftmost bin: 0 keV)",
+        "\n(NC-producing muons only)",
         out_dir / "nc_gamma_mean_energy.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77,
-        annotate_fn=_annot_mean,
+        annotate_fn=lambda axes: _annotate_ge77_quantiles(
+            axes, ge77_e, noge77_e, n_mu_ge77, n_mu_noge77),
     )
 
     # ---- Total gamma energy per muon (sum over all the muon's NCs) ----
@@ -1769,27 +1793,20 @@ def plot_nc_gamma_energy(agg: dict, out_dir: Path) -> None:
     if pos_e.size == 0:
         return
     bins_tot = make_log_bins(max(float(pos_e.min()), 1e-1), float(tot_e.max()))
-    bins_tot_ext, x0_tot = extend_bins_with_zero_bin(bins_tot)
 
     ge77_te, noge77_te = tot_e[is_ge77], tot_e[~is_ge77]
-    ge77_te_m   = np.where(ge77_te == 0.0, x0_tot, ge77_te)
-    noge77_te_m = np.where(noge77_te == 0.0, x0_tot, noge77_te)
-
-    def _annot_tot(axes):
-        _mark_zero_bin(axes, x0_tot, float(bins_tot[0]))
-        _annotate_ge77_quantiles(axes, ge77_te, noge77_te, n_mu_ge77, n_mu_noge77)
-
     _analysis_panel(
-        ge77_te_m, noge77_te_m,
+        ge77_te, noge77_te,
         "Ge77-producing muons", "Non-Ge77 NC-producing muons",
         COLORS["red"], COLORS["blue"],
-        bins_tot_ext, "Total gamma energy per muon [keV]",
+        bins_tot, "Total gamma energy per muon [keV]",
         r"Total $\gamma$ energy per muon: Ge77-producing vs non-Ge77 muons"
-        "\n(NC-producing only; leftmost bin: 0 keV)",
+        "\n(NC-producing muons only)",
         out_dir / "nc_gamma_energy_ge77_vs_noge77_panel.png",
         log_x=True, log_y=True, log_y_ratio=True,
         n_num=n_mu_ge77, n_den=n_mu_noge77,
-        annotate_fn=_annot_tot,
+        annotate_fn=lambda axes: _annotate_ge77_quantiles(
+            axes, ge77_te, noge77_te, n_mu_ge77, n_mu_noge77),
     )
 
 
