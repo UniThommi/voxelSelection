@@ -1292,7 +1292,9 @@ def main() -> None:
 
     t_main = _log_resources("startup")
 
-    run_dirs_2 = sorted(sim2_path.glob("run_*"))[:args.runs]
+    # Directories only: the data path may also hold files like
+    # run_single_job.slurm, which must not be treated as runs.
+    run_dirs_2 = sorted(p for p in sim2_path.glob("run_*") if p.is_dir())[:args.runs]
     if not run_dirs_2:
         print(f"ERROR: no run_* directories in {sim2_path}", file=sys.stderr)
         sys.exit(1)

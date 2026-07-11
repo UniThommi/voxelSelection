@@ -3106,7 +3106,9 @@ def main() -> None:
     out_dir = output_base / "musun_nc_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = sorted(data_path.glob("run_*"))[: args.runs]
+    # Directories only: the data path may also hold files like
+    # run_single_job.slurm, which must not be treated as runs.
+    run_dirs = sorted(p for p in data_path.glob("run_*") if p.is_dir())[: args.runs]
     if not run_dirs:
         print(f"ERROR: no run_* directories in {data_path}")
         sys.exit(1)
