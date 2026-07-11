@@ -1012,6 +1012,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             "base": "muon_energy",
             "title": "Muon kinetic energy",
             "log_x": True,
+            "log_y": True,
             "log_y_ratio": True,
             "bins_fn": lambda d: make_log_bins(max(1.0, float(d.min())), float(d.max())),
             # Ge77-quantile threshold lines on the Ge77-vs-non-Ge77 panel
@@ -1053,6 +1054,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             continue
         bins = obs["bins_fn"](d_all)
         lx = obs["log_x"]
+        ly = obs.get("log_y", False)
         lyr = obs.get("log_y_ratio", False)
         base = obs["base"]
         xl = obs["xlabel"]
@@ -1064,7 +1066,7 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             d_noge77, d_ge77,
             "Non-Ge77", "Ge77", COLORS["blue"], COLORS["red"],
             f"{title}: Ge77 vs non-Ge77", xl,
-            out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx,
+            out_dir / f"{base}_ge77_vs_noge77.png", bins, log_x=lx, log_y=ly,
         )
         # Percentages relative to the full class populations (all muons),
         # not only those passing the observable's validity mask (e.g. ekin>0)
@@ -1077,7 +1079,8 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             d_ge77, d_noge77,
             "Ge77", "Non-Ge77", COLORS["red"], COLORS["blue"],
             bins, xl, f"{title}: Ge77 vs non-Ge77 muons",
-            out_dir / f"{base}_ge77_vs_noge77_panel.png", log_x=lx, log_y_ratio=lyr,
+            out_dir / f"{base}_ge77_vs_noge77_panel.png",
+            log_x=lx, log_y=ly, log_y_ratio=lyr,
             annotate_fn=annotate_fn,
         )
         d_nc   = d[obs["mask_nc"]]
@@ -1086,13 +1089,13 @@ def plot_muon_distributions(agg: dict, out_dir: Path) -> None:
             d_nonc, d_nc,
             "No NC", "NC-producing", COLORS["blue"], COLORS["red"],
             f"{title}: NC-producing vs non-NC", xl,
-            out_dir / f"{base}_nc_vs_nonc.png", bins, log_x=lx,
+            out_dir / f"{base}_nc_vs_nonc.png", bins, log_x=lx, log_y=ly,
         )
         _analysis_panel(
             d_nc, d_nonc,
             "NC-producing", "No NC", COLORS["red"], COLORS["blue"],
             bins, xl, f"{title}: NC-producing vs non-NC muons",
-            out_dir / f"{base}_nc_vs_nonc_panel.png", log_x=lx,
+            out_dir / f"{base}_nc_vs_nonc_panel.png", log_x=lx, log_y=ly,
         )
 
 
