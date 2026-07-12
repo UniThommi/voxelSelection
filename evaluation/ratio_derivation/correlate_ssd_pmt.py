@@ -1600,6 +1600,50 @@ def _dev_str(ssd: float, pmt: float) -> str:
     return f"{100.0 * (ssd - pmt) / pmt:+.1f}%"
 
 
+def _dev_val(ssd: float, pmt: float) -> float:
+    """Relative deviation (SSD − PMT) / PMT as a fraction (NaN if undefined)."""
+    if not (np.isfinite(ssd) and np.isfinite(pmt)) or pmt == 0:
+        return float("nan")
+    return (ssd - pmt) / pmt
+
+
+def _devf_str(v: float, signed: bool = True) -> str:
+    """Format an already-computed deviation fraction as a percentage."""
+    if not np.isfinite(v):
+        return "—"
+    return f"{v*100:+.1f}%" if signed else f"{v*100:.1f}%"
+
+
+def _col_mean_std(vals: list[float]) -> tuple[float, float]:
+    """Mean and sample std (ddof=1) over the finite entries of vals."""
+    finite = [v for v in vals if np.isfinite(v)]
+    if not finite:
+        return float("nan"), float("nan")
+    mean = float(np.mean(finite))
+    std = float(np.std(finite, ddof=1)) if len(finite) > 1 else float("nan")
+    return mean, std
+
+
+def _summary_column_stats(
+    ordered: list["SetupData"], metrics: dict, mi: int,
+) -> dict[str, tuple[float, float]]:
+    """Per-column (mean, std) across setups for one summary-table metric.
+
+    Columns: pmt, ssd (own), dev_own, ssd_anch, dev_anch.  Deviations are
+    the per-setup values (mean of devs, not dev of means).
+    """
+    pv = [metrics[s.label]["pmt"][mi] for s in ordered]
+    sv = [metrics[s.label]["ssd"][mi] for s in ordered]
+    sa = [metrics[s.label]["ssd_anchored"][mi] for s in ordered]
+    return {
+        "pmt": _col_mean_std(pv),
+        "ssd": _col_mean_std(sv),
+        "dev_own": _col_mean_std([_dev_val(s_, p_) for s_, p_ in zip(sv, pv)]),
+        "ssd_anch": _col_mean_std(sa),
+        "dev_anch": _col_mean_std([_dev_val(a_, p_) for a_, p_ in zip(sa, pv)]),
+    }
+
+
 def _render_table_figure(
     col_labels: list[str],
     rows_data: list[list[str]],
@@ -2558,6 +2602,18 @@ def write_recall_summary(
                 f"{_dev_str(sv, pv):>8} {_pct_str(sa):>9} {_dev_str(sa, pv):>9}   "
                 f"{'M'+str(pmw[0])+'W'+str(pmw[1]):>9} {'M'+str(smw[0])+'W'+str(smw[1]):>9}"
             )
+        st = _summary_column_stats(ordered, metrics, mi)
+        L.append("  " + "-" * 100)
+        L.append(
+            f"  {'mean':<26} {_pct_str(st['pmt'][0]):>7} {_pct_str(st['ssd'][0]):>8} "
+            f"{_devf_str(st['dev_own'][0]):>8} {_pct_str(st['ssd_anch'][0]):>9} "
+            f"{_devf_str(st['dev_anch'][0]):>9}   {'':>9} {'':>9}"
+        )
+        L.append(
+            f"  {'std':<26} {_pct_str(st['pmt'][1]):>7} {_pct_str(st['ssd'][1]):>8} "
+            f"{_devf_str(st['dev_own'][1], signed=False):>8} {_pct_str(st['ssd_anch'][1]):>9} "
+            f"{_devf_str(st['dev_anch'][1], signed=False):>9}   {'':>9} {'':>9}"
+        )
         L.append("")
 
     path = os.path.join(output_dir, "03m_recall_summary.txt")
@@ -2741,6 +2797,18 @@ def write_fom_summary(
                 f"{_dev_str(sv, pv):>9} {_fom_str(sa):>11} {_dev_str(sa, pv):>9}   "
                 f"{'M'+str(pmw[0])+'W'+str(pmw[1]):>9} {'M'+str(smw[0])+'W'+str(smw[1]):>9}"
             )
+        st = _summary_column_stats(ordered, metrics, mi)
+        L.append("  " + "-" * 106)
+        L.append(
+            f"  {'mean':<26} {_fom_str(st['pmt'][0]):>11} {_fom_str(st['ssd'][0]):>11} "
+            f"{_devf_str(st['dev_own'][0]):>9} {_fom_str(st['ssd_anch'][0]):>11} "
+            f"{_devf_str(st['dev_anch'][0]):>9}   {'':>9} {'':>9}"
+        )
+        L.append(
+            f"  {'std':<26} {_fom_str(st['pmt'][1]):>11} {_fom_str(st['ssd'][1]):>11} "
+            f"{_devf_str(st['dev_own'][1], signed=False):>9} {_fom_str(st['ssd_anch'][1]):>11} "
+            f"{_devf_str(st['dev_anch'][1], signed=False):>9}   {'':>9} {'':>9}"
+        )
         L.append("")
 
     path = os.path.join(output_dir, "02h_fom_summary.txt")
