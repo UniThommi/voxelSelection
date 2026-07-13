@@ -1430,7 +1430,9 @@ def plot_fom_scatter_per_m(
     c_valid = [colors[setups.index(s)] for s in valid]
     labels  = [s.label for s in valid]
 
-    n_cols = min(5, len(M_values))
+    # 3 columns (not 5) so each panel stays large enough to read when the
+    # figure is scaled to text width in the thesis.
+    n_cols = min(3, len(M_values))
     n_rows = math.ceil(len(M_values) / n_cols)
     fig, axes = plt.subplots(n_rows, n_cols,
                               figsize=(4.5 * n_cols, 4.2 * n_rows), squeeze=False)
@@ -1651,11 +1653,15 @@ def _render_table_figure(
     title: str,
     fname: str,
     output_dir: str,
+    fontsize: float = 12.0,
+    title_fontsize: float = 14.0,
 ) -> None:
     """Render a coloured matplotlib table figure and save it.
 
     ``cell_colors`` is a list of ``(row_idx, col_idx, colour)`` triples where
     ``row_idx`` counts data rows starting at 1 (row 0 is the header).
+    ``fontsize``/``title_fontsize`` scale the text without changing the
+    canvas size (the table always fills the axes via bbox).
     """
     n    = len(rows_data)
     ncol = len(col_labels)
@@ -1670,7 +1676,7 @@ def _render_table_figure(
     tbl = ax.table(cellText=rows_data, colLabels=col_labels,
                    cellLoc="center", bbox=[0, 0, 1, 1])
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(12)
+    tbl.set_fontsize(fontsize)
 
     # Bold, shaded header row for readability.
     for j in range(ncol):
@@ -1681,7 +1687,7 @@ def _render_table_figure(
     for row_idx, col_idx, color in cell_colors:
         tbl[row_idx, col_idx].set_facecolor(color)
 
-    ax.set_title(title, fontsize=14, pad=8)
+    ax.set_title(title, fontsize=title_fontsize, pad=8)
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, fname), dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -1764,7 +1770,8 @@ def plot_best_mw_agreement(
         "FoM shown at each side's own best (M,W); Dev = (FoM_SSD − FoM_PMT) / FoM_PMT"
     )
     _render_table_figure(col_labels, rows_data, cell_colors, title,
-                         "02g_best_mw_agreement.png", output_dir)
+                         "02g_best_mw_agreement.png", output_dir,
+                         fontsize=16.0, title_fontsize=18.0)
 
 
 def plot_recall_at_best_fom_agreement(
