@@ -2,7 +2,15 @@
 Greedy voxel selection algorithms.
 
 Implements Maximum k-Coverage and Partial Set Multi-Cover for
-NC-level and Ge77-muon-level optimization targets.
+NC-level and Ge77-muon-level optimization targets. Exact optimisation
+is NP-hard; the greedy choice (largest marginal gain per step) is the
+standard approximation for coverage problems.
+
+Input is the binary NC x voxel matrix ``B`` (CSC), where ``B[i, j] = 1``
+means voxel j registers NC i with at least m (PMT-equivalent) hits.
+An NC is detected when at least M selected voxels see it; in muon-ge77
+mode a Ge77 muon is detected when at least W of its NCs in the muon
+window are detected.
 
 Two modes for M>1 / W>1:
   - Priority mode (default): Always optimize for M=1 (W=1 in muon mode),
@@ -12,8 +20,13 @@ Two modes for M>1 / W>1:
     Priority: W-trigger > M-trigger > M=1 baseline.
 
   - Dynamic mode (--dynamic): Fallback to lower thresholds when no
-    voxels can promote at the target level. M>1 and W>1 simultaneously
-    is not supported in dynamic mode.
+    voxels can promote at the target level. NC mode lowers M; muon-ge77
+    mode sweeps W from high to low at each M level from high to low.
+
+A third mode, ``worst``, is an inverse benchmark that picks the voxel
+with the smallest gain while avoiding M/W promotions where possible.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import time
@@ -53,7 +66,13 @@ def _apply_spacing(
     min_spacing_sq: float,
     verbose: bool,
 ) -> None:
-    """Apply minimum spacing constraint after selecting a voxel."""
+    """Apply minimum spacing constraint after selecting a voxel.
+
+    Marks every still-available voxel on the same layer whose center lies
+    closer than ``sqrt(min_spacing_sq)`` to the selected voxel as unavailable
+    (in place), so that two PMTs cannot overlap. Voxels on other layers are
+    not affected.
+    """
     selected_center = centers[best_voxel]
     selected_layer = layers[best_voxel]
     same_layer_mask = (layers == selected_layer) & available
@@ -94,6 +113,9 @@ def greedy_select_nc(
     For M>1 (dynamic): Falls back through threshold levels when no
     voxels can promote at the current level.
 
+    For M=1 (and in every mode without M>1 logic) the gain of a voxel is
+    the number of not-yet-seen NCs it sees.
+
     Parameters
     ----------
     B : sparse.csc_matrix
@@ -116,8 +138,17 @@ def greedy_select_nc(
         Number of unique muons (required if muon_weight_k is set).
     dynamic : bool
         If True, use dynamic M fallback instead of priority logic.
+    worst : bool
+        If True, select the voxel with the smallest M=1 gain each step,
+        avoiding voxels that would promote NCs to M (worst-case benchmark).
     verbose : bool
         Print per-iteration progress.
+    on_step_snapshot : callable or None
+        Called as ``on_step_snapshot(gains, available, selected)`` at step
+        ``snapshot_step`` (standard M=1 mode only), before unavailable
+        voxels are masked. Used by main.py for the marginal-gain heatmap.
+    snapshot_step : int or None
+        Zero-based step at which ``on_step_snapshot`` fires.
 
     Returns
     -------
@@ -352,6 +383,15 @@ def greedy_select_muon(
     A NC is "detected" iff it is seen by >= M selected voxels
     (coverage_counts[nc] >= M).
     A Ge77 muon is detected iff >= W of its eligible NCs are detected.
+    Eligible NCs (``eligible_nc_mask``, from ``data_loading.build_muon_index``)
+    are all NCs of Ge77 muons inside the muon window [1 µs, 200 µs]; only
+    Ge77 muons enter the objective, non-Ge77 muons are ignored here.
+
+    Standard mode (M=1, W=1):
+        Gain = number of distinct Ge77 muons with at least one newly
+        detected NC. The SpMV gain is an upper bound (it counts NCs, not
+        muons), so the exact muon count is recomputed for the TOP_K = 50
+        best candidates.
 
     Priority mode (default, M>1 or W>1):
         Each step computes three candidate voxels:
@@ -361,8 +401,17 @@ def greedy_select_muon(
         3. M=1 baseline: voxel with highest gain at M=1 (new NCs).
         Selection: W-trigger > M-trigger > baseline.
 
-    Dynamic mode (--dynamic, only M=1 supported):
-        Falls back through W threshold levels.
+    Dynamic mode (--dynamic, W>1, not combined with muon_weight_k):
+        2D sweep: for M_eff from M down to 1 and W_eff from W down to 1,
+        take the first level at which a voxel lets muons cross W_eff
+        (W_eff = 1: NCs cross M_eff).
+
+    Worst mode (--worst):
+        Smallest M=1 gain, preferring voxels that promote no muon to W and
+        no NC to M.
+
+    Note: main.py forces M=1 in muon-ge77 mode, so the M>1 branches are
+    only reachable when this function is called directly.
 
     Parameters
     ----------
@@ -375,14 +424,21 @@ def greedy_select_muon(
     nc_to_muon_local : np.ndarray, shape (num_ncs,)
         NC -> local Ge77-muon index (-1 if not eligible).
     eligible_nc_mask : np.ndarray, shape (num_ncs,), dtype bool
+        True for NCs that count towards W (see above).
     num_ge77_muons : int
+        Number of Ge77 muons (length of the per-muon arrays).
     M : int
         NC multiplicity threshold (default 1).
     centers, layers, min_spacing : spacing constraint params.
     muon_weight_k : float or None
+        If set, weight each newly detected NC by the diminishing-returns
+        gain ``muon_weight_delta(d, k)`` of its muon instead of 1.
     dynamic : bool
         If True, use dynamic W fallback.
+    worst : bool
+        If True, run the worst-case benchmark.
     verbose : bool
+        Print per-iteration progress.
 
     Returns
     -------
@@ -448,7 +504,6 @@ def greedy_select_muon(
 
             # Compute per-voxel: how many muons would cross W, how many
             # NCs would cross M
-            avail_indices = np.where(available)[0]
 
             # Precompute M-threshold and W-threshold states
             at_m_thresh = (coverage_counts == (M - 1)) & eligible_nc_mask

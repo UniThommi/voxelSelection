@@ -22,6 +22,8 @@ without any NC are excluded from the analysis (the simulated total is kept
 solely for the data-integrity cross-check and as context in statistics.txt).
 
 Run script: python lightAnalysisHomogeneousPMTs.py
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 from __future__ import annotations
 

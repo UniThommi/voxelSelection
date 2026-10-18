@@ -3,10 +3,15 @@
 Works with sparse NC×PMT binary matrices produced by raw_loading.build_pmt_matrix()
 and the nc_truth DataFrame from raw_loading.build_nc_truth().
 
-The muon-classification logic mirrors comparePMTCoverage.py exactly:
+The muon-classification logic mirrors the former evaluation/comparePMTCoverage.py
+(no longer part of the repository) and is the same as on the SSD side
+(pmtopt.evaluate_coverages, correlate_ssd_pmt):
   - A muon is Ge77 if any of its NCs has flag_ge77 == 1.
-  - Muon is classified as Ge77 if it has ≥W detected NCs in [1µs, 200µs].
+  - Muon is classified as Ge77 if it has ≥W detected NCs in [1µs, 200µs]
+    (every detected NC counts, Ge77-flagged ones included).
   - "Detected" means the NC's PMT multiplicity (row-sum of B) ≥ M.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ import pandas as pd
 import scipy.sparse as sp
 
 # ──────────────────────────────────────────────────────────────────────
-# Constants (same as comparePMTCoverage.py)
+# Constants (same as the former comparePMTCoverage.py and
+# pmtopt.geometry.MUON_TIME_WINDOW_MIN_NS / _MAX_NS)
 # ──────────────────────────────────────────────────────────────────────
 MUON_WINDOW_LO_NS: float = 1_000.0    # 1 µs
 MUON_WINDOW_HI_NS: float = 200_000.0  # 200 µs
@@ -138,7 +144,7 @@ def evaluate_muon(
 ) -> dict[str, Any]:
     """Compute muon Ge77 classification results for all (M, W) combinations.
 
-    Classification logic (identical to comparePMTCoverage.py):
+    Classification logic (identical to the former comparePMTCoverage.py):
       1. A muon is Ge77 (ground truth) if any of its NCs has flag_ge77==1.
       2. For threshold M: a NC is "detected" if its multiplicity (row sum
          of B) ≥ M.
@@ -159,13 +165,19 @@ def evaluate_muon(
     -------
     dict with keys:
         muon_stats            : dict  — total, n_ge77, n_non_ge77 counts
-        confusion             : dict[(M, W) → {"TP", "FP", "TN", "FN"}]
+        confusion             : dict[(M, W) → {"TP", "FP", "FN",
+                                "tp_ge77_nc_counts", "fn_ge77_nc_counts"}]
+                                No "TN": callers derive it as
+                                total_primaries − TP − FP − FN (all simulated
+                                muons, not only the NC-producing ones here).
         w_hist                : dict[M → {"ge77": list[int], "non_ge77": list[int]}]
         ge77_muon_detectability : dict with keys:
             "any_photon"   — Ge77 muons where ≥1 NC has any photon (-1 if unknown)
             "within_200ns" — Ge77 muons where ≥1 NC has a photon within 200 ns (-1 if unknown)
             These are the theoretical upper bounds for muon-level detection,
             consistent with the TP metric in ``confusion``.
+        ge77_nc_counts          : list[int] — number of Ge77-flagged NCs per
+            Ge77 muon (no time cut), used for the statistical limit.
     """
     mults = compute_nc_multiplicities(B)
 

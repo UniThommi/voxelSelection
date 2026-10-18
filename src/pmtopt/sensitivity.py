@@ -3,6 +3,13 @@ Sensitivity analysis for area-ratio perturbation.
 
 Runs the greedy optimization for multiple perturbed ratios and compares
 voxel selections via Jaccard similarity and coverage metrics.
+
+Why: the per-area PMT/SSD ratios are derived from simulation and carry an
+uncertainty. Scaling all four ratios by (1 + δ) and re-running the greedy
+selection shows how strongly the selected PMT positions (Jaccard index of
+the top-k voxels) and the achieved efficiency (ΔC) depend on that input.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import json
@@ -11,9 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .geometry import DEFAULT_AREA_RATIOS, PMT_RADIUS, compute_per_area_N
+from .geometry import compute_per_area_N
 from .data_loading import (
-    get_valid_voxel_mask, load_and_binarize,
     load_muon_data, build_muon_index, load_nc_muon_ids,
     load_raw_sparse, binarize_from_raw,
 )
@@ -104,7 +110,16 @@ def run_single_greedy_from_raw(
 ) -> tuple[list[int], float]:
     """
     Run greedy optimization from pre-loaded raw sparse data.
-    No HDF5 I/O — only in-memory rounding and greedy.
+    No HDF5 I/O — only in-memory rounding and greedy (muon data is read
+    from ``filepath`` only if ``muon_cache`` is None).
+
+    Returns
+    -------
+    selected_cols : list[int]
+        Selected column indices in the full (unfiltered) voxel column space.
+    final_eff : float
+        Final NC detection efficiency (nc) or Ge77-muon detection
+        efficiency (muon-ge77).
     """
 
     num_voxels = len(voxel_ids)
@@ -294,6 +309,13 @@ def run_sensitivity(
 ) -> None:
     """
     Run full sensitivity analysis: baseline + perturbed greedy runs.
+
+    For each δ in ``deltas`` all area ratios are scaled by (1 + δ), the
+    greedy selection is repeated with the same seed, and the result is
+    compared with the baseline: Jaccard similarity of the first k selected
+    voxels (k = 25, 50, ..., N), per-area Jaccard similarity, and relative
+    efficiency change ΔC. Writes ``sensitivity_<mode>_N<N>.json`` and three
+    PNG plots to ``output_dir``.
 
     Parameters
     ----------

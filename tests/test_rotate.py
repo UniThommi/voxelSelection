@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 Unit tests for pmtopt.rotate — no file I/O, no HDF5.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import math

@@ -18,7 +18,7 @@ Usage:
     python src/latex_export/voxel_table.py greedy_N300.json [more.json ...] \\
         [--output-dir DIR]
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse

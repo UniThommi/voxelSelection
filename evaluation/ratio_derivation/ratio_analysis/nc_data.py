@@ -1,4 +1,6 @@
-"""Neutron capture event data loading — homogeneous and musun variants."""
+"""Neutron capture event data loading — homogeneous and musun variants.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import h5py
 import numpy as np

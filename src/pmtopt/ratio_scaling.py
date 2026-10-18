@@ -1,8 +1,14 @@
 """
 SSD-to-PMT hit scaling with stochastic rounding.
 
-Provides in-memory scaling (for greedy pipeline) and HDF5 file writing
-(for creating ratio-adjusted data files).
+Provides the helpers for the per-area ratio vector (used in-memory by
+``data_loading.binarize_from_raw`` in the greedy pipeline) and HDF5 file
+writing (for creating ratio-adjusted data files, ``greedy --write-hdf5``).
+
+Ratio convention: PMT/SSD (n_PMT / n_SSD per area); SSD hits are multiplied
+by the ratio (see ``geometry.DEFAULT_AREA_RATIOS``).
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import shutil
@@ -125,6 +131,10 @@ def write_ratio_hdf5(
     """
     Copy HDF5 file, scale target_matrix hits (SSD -> PMT equivalent) by area
     ratios with stochastic rounding, and recompute region_matrix.
+
+    The output keeps the input layout, so all downstream tools can read it
+    unchanged. A cross-check table compares the new region sums with the
+    expected ``original sum × ratio``.
 
     Parameters
     ----------
@@ -273,7 +283,8 @@ def fmt_ratio_filename(ratios: dict[str, float]) -> str:
     Returns
     -------
     str
-        Formatted string, e.g. "pit2p0731_bot2p3843_top2p2004_wall1p8776".
+        Formatted string, e.g. "pit0p5000_bot0p4670_top0p4670_wall0p5450"
+        for the default ratios.
     """
     def _fmt(r: float) -> str:
         return f"{r:.4f}".replace(".", "p")

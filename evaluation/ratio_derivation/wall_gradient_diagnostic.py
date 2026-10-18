@@ -12,6 +12,8 @@ Produces (per area):
   - Radial/vertical momentum distributions
   - Incidence angle distribution and mean angle vs position
   - (Wall only) Incidence angle vs z heatmap
+
+  Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse

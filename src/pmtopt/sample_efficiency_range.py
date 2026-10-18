@@ -22,7 +22,7 @@ Usage
         --output-dir setups/ \\
         --seed 42
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -308,6 +308,10 @@ def sample_efficiency_range(
     correction_strength: float,
     verbose: bool,
 ) -> None:
+    """Generate ``n_configs`` setups spanning the NC-efficiency range (see module docstring).
+
+    Writes one setup JSON per configuration plus a coverage-vs-f plot.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------

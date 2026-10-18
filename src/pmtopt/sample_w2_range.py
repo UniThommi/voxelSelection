@@ -36,7 +36,7 @@ Usage
     python src/pmtopt/main.py sample-w2-range \\
         --hdf5 data.hdf5 -N 300 --n-configs 50 --output-dir w2_setups/
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -771,6 +771,7 @@ def _compute_efficiency(
     B,  # scipy.sparse.csc_matrix
     M: int,
 ) -> float:
+    """Fraction of NCs seen by at least M of the selected voxels."""
     from scipy import sparse
     coverage = np.zeros(B.shape[0], dtype=np.int16)
     for col in selected_cols:
@@ -866,6 +867,11 @@ def sample_w2_range(
     exclude_areas: list[str] | None = None,
     allowed_algorithms: list[str] | None = None,
 ) -> None:
+    """Generate ``n_configs`` setups spanning the W2 homogeneity range (see module docstring).
+
+    Writes one JSON (standard ``selected_voxels`` format plus W2 and
+    generation metadata) and one PNG per configuration.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     main_rng = np.random.default_rng(seed)
     w2_ref = get_w2_ref()

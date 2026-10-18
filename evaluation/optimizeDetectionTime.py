@@ -16,7 +16,7 @@ Two source modes, selected via the SOURCE constant below:
     Matching: Sim2 optical/muon_track_id == Sim1 MyNeutronCaptureOutput/evtid
               Sim2 optical/nC_track_id   == Sim1 MyNeutronCaptureOutput/nC_track_id
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import gc

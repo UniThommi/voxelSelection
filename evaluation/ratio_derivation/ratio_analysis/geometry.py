@@ -3,6 +3,8 @@
 All constants are sourced from the single source of truth in
 src/pmtopt/geometry.py. This module re-exports them as a GeometryConfig
 dataclass for backwards compatibility with the ratio_analysis codebase.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import numpy as np

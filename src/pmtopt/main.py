@@ -3,14 +3,23 @@
 PMT Position Optimization — unified entry point
 ================================================
 
+Command-line front end of the ``pmtopt`` package. The ``greedy`` subcommand
+is the core of the repository: it reads the SSD voxel-hit data produced by
+simPostProcessing, converts the SSD hits to PMT-equivalent hits with the
+per-area PMT/SSD ratios, and greedily selects N voxels (PMT positions). The
+other subcommands generate reference layouts or plot existing selections.
+
 Subcommands:
   greedy           Greedy voxel selection from HDF5 simulation data (NC / muon-Ge77 modes)
   homogeneous      Generate all voxels or select N homogeneously distributed voxels
   rotate           Rotate an existing voxel selection by an azimuthal angle
   plot             Generate 3D plots for existing JSON voxel selection files
+  plot-hits        Heatmap of the total photon hits per voxel (raw target_matrix)
   plot-homogeneity Per-area 2D position plot with per-area CV + global W2 from JSON
   plot-w2          W2 explanation visualizations (plots A–F) from JSON config files
   sample-w2-range  Generate configurations spanning the W2 homogeneity range
+
+The examples assume the package is installed (``pip install -e .``).
 
 Usage examples:
     # Greedy: NC mode
@@ -44,7 +53,7 @@ Usage examples:
     python -m pmtopt.main sample-w2-range --hdf5 data.hdf5 -N 300 --n-configs 50 \\
         --output-dir w2_setups/
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -76,6 +85,25 @@ from pmtopt.sensitivity import run_sensitivity
 
 
 def run_greedy(argv: Optional[list[str]] = None) -> None:
+    """``greedy`` subcommand: ratio scaling, greedy selection and outputs.
+
+    Phases (each optional part is switched on by its flag):
+
+    1. ``--write-hdf5``: write a copy of the input HDF5 whose ``target_matrix``
+       holds the ratio-scaled (PMT-equivalent) hits
+       (``ratio_scaling.write_ratio_hdf5``).
+    2. ``--optimize nc|muon-ge77``: load the raw SSD hits, multiply them by
+       the per-area PMT/SSD ratios with stochastic rounding, binarize at the
+       per-voxel threshold ``m`` (``data_loading.binarize_from_raw``) and run
+       ``greedy_select_nc`` or ``greedy_select_muon``. Writes ``.npz``,
+       ``.json`` and ``.png`` files with a common, parameter-encoding base
+       name, plus hit and voxel-geometry plots.
+    3. ``--sensitivity``: perturb each area ratio and re-run the greedy
+       selection (``sensitivity.run_sensitivity``).
+
+    In muon-ge77 mode ``-M`` is forced to 1, so the M>1 branches of
+    ``greedy_select_muon`` are not reachable from this CLI.
+    """
     parser = argparse.ArgumentParser(
         description="Greedy PMT voxel selection with stochastic ratio scaling.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -337,6 +365,9 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
 
     t_greedy_start = time.time()
 
+    # Note: --no-spacing also disables the PMT placement validity filter
+    # (skip_validity), so all voxels, including those where a PMT would not
+    # fit, become candidates.
     (raw_rows, raw_cols, raw_vals,
      voxel_ids, centers, layers,
      num_ncs, num_primaries) = load_raw_sparse(
@@ -841,6 +872,12 @@ def _voxel_arrays(selected_voxels: list[dict]) -> tuple[np.ndarray, np.ndarray, 
 
 
 def run_plot(argv: Optional[list[str]] = None) -> None:
+    """``plot`` subcommand: 3D plot(s) of existing JSON voxel selections.
+
+    One JSON file gives one PNG next to it; two or more files are tiled into
+    combined grid figure(s). The global W2 homogeneity of each selection is
+    shown in the title.
+    """
     parser = argparse.ArgumentParser(
         description="Generate 3D plots for existing JSON voxel selection files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -970,6 +1007,11 @@ def _run_plot_grid(args) -> None:
 
 
 def run_plot_hits(argv: Optional[list[str]] = None) -> None:
+    """``plot-hits`` subcommand: heatmap of the raw photon hits per voxel.
+
+    Sums the unscaled ``target_matrix`` over all NCs (no ratio scaling, no
+    validity filter) and plots it per area. Reads the full matrix into memory.
+    """
     parser = argparse.ArgumentParser(
         description="Heatmap of total photon hits per voxel across all NCs, split by area.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1154,7 +1196,7 @@ _SUBCOMMANDS = ("greedy", "homogeneous", "rotate", "plot", "plot-hits",
 
 
 def main(argv: Optional[list[str]] = None) -> None:
-    """Top-level dispatcher: routes to greedy / homogeneous / rotate."""
+    """Top-level dispatcher: routes the first argument to one of ``_SUBCOMMANDS``."""
     if argv is None:
         argv = sys.argv[1:]
 

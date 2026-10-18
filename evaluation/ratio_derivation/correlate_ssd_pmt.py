@@ -2,8 +2,20 @@
 """
 SSD–PMT Correlation Analysis
 =============================
-Sweeps the SSD area ratio and identifies the value that maximises agreement
-between SSD-derived metrics and real PMT simulation results across N setups.
+Validates the SSD surrogate: for each of N setups (PMT layouts), the same
+voxel positions are evaluated twice, once with ratio-scaled SSD data
+(``pmtopt`` pipeline: binarize_from_raw, same B construction as the greedy
+optimizer) and once with the full PMT simulation of that layout
+(ratio_analysis.raw_loading / coverage_analysis). NC coverage per M, Ge77
+muon recall per (M, W) and the FoM are compared setup by setup (Pearson and
+Spearman correlation, relative deviation (SSD − PMT) / PMT, ranking
+agreement). Both sides use the same muon classification: every detected NC
+in the muon window [1 µs, 200 µs] counts towards W.
+
+In the default fixed-ratio mode the per-layer ratios are given on the
+command line. The experimental sweep mode sweeps the SSD area ratio and
+identifies the value that maximises agreement between SSD-derived metrics
+and real PMT simulation results across N setups.
 
 For each experimental setup the script loads:
   - PMT simulation data  (LGDO format, Sim 2 optical + NC truth)
@@ -33,9 +45,10 @@ The area ratios (--pit/--bot/--top/--wall and the swept value) follow the SAME
     ratio = n_PMT / n_SSD          (per-NC photon hits, per area)
 
 SSD-simulated hit counts are MULTIPLIED by this ratio to obtain PMT-equivalent
-hits (``n_PMT = n_SSD * ratio``).  Because a PMT detects fewer photons than the
-fully sensitive surface, the physical ratios are < 1 — the current
-``DEFAULT_AREA_RATIOS`` are pit 0.500, bot 0.467, top 0.467, wall 0.545.
+hits (``n_PMT = n_SSD * ratio``).  The current ``DEFAULT_AREA_RATIOS`` (pit
+0.500, bot 0.467, top 0.467, wall 0.545) are the per-PMT ("PMT-matching")
+ratios for the multi-simulation SSD file of simPostProcessing, whose summed
+voxel hits exceed those of a PMT; hence they are < 1.
 
 NOTE: this convention was previously the reciprocal SSD/PMT ratio (> 1, e.g.
 2.0731 …).  Do NOT pass the old > 1 values here — ``binarize_from_raw`` now
@@ -70,7 +83,7 @@ requires an explicit confirmation flag; without it the run aborts with a warning
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
         [--seed 42] [--skip-per-layer]
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 from __future__ import annotations
 
@@ -269,6 +282,15 @@ def compute_setup_w2(json_path: str) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────────────
 
 def align_ssd_to_pmt(hdf5_path: str, nc_truth: pd.DataFrame) -> dict:
+    """Load the SSD muon/NC arrays needed for the muon-level evaluation.
+
+    Returns the per-NC muon index, Ge77 truth per muon and the veto-candidate
+    mask (every NC in the muon window). The SSD rows are used in file order
+    (``ssd_row_order`` = identity); the comparison with the PMT side is done
+    on aggregated per-setup metrics, not NC by NC. ``nc_truth`` is not used.
+    Note: the warning text mentions "nc_time_ns ordering", but no reordering
+    is applied.
+    """
     with h5py.File(hdf5_path, "r") as f:
         phi_columns = [c.decode() if isinstance(c, bytes) else str(c) for c in f["phi_columns"][:]]
         phi_col_idx = {name: i for i, name in enumerate(phi_columns)}
@@ -301,7 +323,9 @@ def align_ssd_to_pmt(hdf5_path: str, nc_truth: pd.DataFrame) -> dict:
     global_to_all_local = np.searchsorted(all_unique_muons, global_muon_id).astype(np.int32)
     ge77_mask_all       = np.isin(all_unique_muons, ge77_muon_global_ids)
     in_time = (nc_time_ns >= MUON_TIME_WINDOW_MIN_NS) & (nc_time_ns <= MUON_TIME_WINDOW_MAX_NS)
-    nc_is_veto_candidate = in_time & (~nc_flag_ge77)
+    # Every in-window NC counts towards W, Ge77-flagged ones included, exactly
+    # as on the PMT side (ratio_analysis.coverage_analysis.evaluate_muon).
+    nc_is_veto_candidate = in_time
 
     return {
         "ssd_row_order":        ssd_row_order,
@@ -530,6 +554,7 @@ def _ssd_best_mw(
     return best_mw
 
 
+# UNUSED: not called anywhere.
 def _ssd_fom_grid(
     result: SSDResult,
     M_values: list[int],

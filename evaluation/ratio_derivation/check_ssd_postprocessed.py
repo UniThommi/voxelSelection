@@ -7,6 +7,8 @@ Verifies that the postprocessing pipeline does not lose optical photons.
 Comparisons:
   A) Global: Total hits (raw vs postprocessed)
   C) Per-NC Event Match: matched events, total hit comparison
+
+  Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse

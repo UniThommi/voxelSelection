@@ -29,6 +29,8 @@ TestWassersteinWithBaseline
     compute_wasserstein_homogeneity_with_baseline:
     - Fibonacci vs itself → w2_normalized == 1.0 exactly.
     - All-on-wall vs Fibonacci baseline → w2_normalized > 1.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import contextlib

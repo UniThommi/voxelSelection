@@ -1,5 +1,7 @@
 """
 Plotting functions for greedy voxel selection results.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 from pathlib import Path

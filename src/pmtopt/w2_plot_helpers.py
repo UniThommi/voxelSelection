@@ -9,6 +9,8 @@ Usage:
 python src/pmtopt/main.py plot-w2 setup1.json setup2.json \
       --output-dir ./output \      
       --labels "Greedy" "Homogeneous".
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 from __future__ import annotations
 

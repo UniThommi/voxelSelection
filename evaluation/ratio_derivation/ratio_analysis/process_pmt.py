@@ -1,4 +1,6 @@
-"""Process PMT raw HDF5 files, counting photons per zone."""
+"""Process PMT raw HDF5 files, counting photons per zone.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import gc
 import h5py
@@ -64,7 +66,8 @@ def process_pmt_file(
 
                 det_uid_filtered = det_uid[time_mask]
 
-                # Valid PMT UIDs (8 digits starting with 1)
+                # Valid PMT UIDs (8 digits starting with 1); the mask accepts
+                # the wider range [1e7, 1e9).
                 pmt_mask = ((det_uid_filtered >= 10_000_000) &
                             (det_uid_filtered < 1_000_000_000))
                 det_uid_filtered = det_uid_filtered[pmt_mask]

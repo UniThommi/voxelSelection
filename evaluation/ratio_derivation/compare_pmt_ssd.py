@@ -4,6 +4,11 @@
 Compare PMT simulation hits vs. SSD postprocessed voxel hits
 for LEGEND neutron capture optical photon simulations.
 
+Quick reference check: for each PMT of the PMT simulation and the SSD voxel
+at the same position (det_uid → voxel_id), the numbers of detected photons
+summed over all NCs are compared directly, without ratio scaling. The
+relative deviation per pair is (PMT − SSD) / mean(PMT, SSD).
+
 Plots:
   1. Histogram of hit differences (Σhits_PMT - Σhits_Voxel) over all NCs, per pair
   2. Scatter: Σhits_PMT vs Σhits_Voxel (300 points)
@@ -11,7 +16,7 @@ Plots:
   4. Boxplot of hit differences per pair (sorted by z-coordinate)
   5. Event-matched total hits correlation (PMT event vs SSD event)
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse

@@ -4,12 +4,30 @@ PMT Configuration Evaluator
 ============================
 
 Evaluates multiple PMT configurations (given as JSON voxel lists)
-against a common SSD dataset. Produces:
+against a common SSD dataset (simPostProcessing ML-format HDF5). The SSD
+hits are converted to PMT-equivalent hits with the per-area PMT/SSD ratios
+(stochastic rounding, one fixed seed for all configs) and binarized at m.
+For each config and each (M, W):
 
-  - NC coverage line plots (M=1..10, log + linear scale) per config
-  - Ge77 muon heatmaps (Accuracy, Precision) for W x Config, per M
-  - Confusion matrix text file for all (config, M, W) combinations
-  - Summary text file with NC statistics
+  * NC level: an NC is detected if at least M selected voxels see it.
+  * Muon level: a muon is classified as Ge77 muon if at least W detected
+    NCs lie in the muon window [1 µs, 200 µs]; compared with the truth
+    (any NC of the muon carries the Ge77 flag) this gives TP/FP/TN/FN.
+  * FoM: ``geometry.calc_fom_confusion`` with all simulated primaries as
+    the muon total and Ge-77-NC-weighted survival.
+
+Outputs (written by main()): NC coverage and detectability plots, NC rank
+stability, confusion-matrix and NC summary text files, Ge77 muon overview,
+confusion bars, TP/FP scatter, Recall/Precision/FoM sweeps over (M, W),
+FoM summaries, W2-homogeneity correlation plots, NC-coverage vs recall
+correlations, recall at the FoM optimum, Ge77 survival vs live-time plots
+and survival tables. Functions marked ``# UNUSED`` are not called.
+
+Note on the "survival at best FoM" outputs (ge77_survival_at_best_fom.png,
+signal_survival_at_best_fom.png, survival_at_best_fom.txt): they show the
+Recall and 1 − veto fraction of the NC-producing muons at the FoM-optimal
+(M, W), not the Ge77-NC-weighted survival and 1 − dead-time that enter the
+FoM itself (those are shown in plots 25/25d/25e).
 
 Usage:
     python -m pmtopt.evaluate_coverages \\
@@ -20,7 +38,7 @@ Usage:
         --output-dir eval_results/ \\
         --seed 42
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -281,12 +299,14 @@ def load_shared_data(
         ed.all_unique_muons, ed.ge77_muon_global_ids
     )
 
-    # Veto candidate NCs: in time window, not Ge77 themselves
+    # Veto candidate NCs: every NC inside the muon window [1 µs, 200 µs],
+    # including Ge77-flagged captures (same W definition as the PMT side in
+    # ratio_analysis.coverage_analysis.evaluate_muon).
     in_time = (
         (ed.nc_time_ns >= MUON_TIME_WINDOW_MIN_NS)
         & (ed.nc_time_ns <= MUON_TIME_WINDOW_MAX_NS)
     )
-    ed.nc_is_veto_candidate = in_time & (~ed.nc_flag_ge77)
+    ed.nc_is_veto_candidate = in_time
 
     # Per-muon Ge77 NC counts (no time window — flag_ge77 is a physics flag)
     ge77_nc_rows = np.where(ed.nc_flag_ge77.astype(bool))[0]
@@ -374,8 +394,8 @@ def evaluate_muon(
     Compute Ge77 muon confusion matrix for all (M, W).
 
     NC detected iff coverage_counts >= M.
-    Muon's detected-NC count = #eligible NCs (in time window, non-Ge77)
-    that are detected.
+    Muon's detected-NC count = #NCs in the muon window [1 µs, 200 µs]
+    that are detected (Ge77-flagged NCs included).
     Muon classified positive iff detected_nc_count >= W.
     """
     coverage_counts = config.coverage_counts
@@ -615,101 +635,102 @@ def plot_nc_coverage(
         print(f"  Saved: {out_path}")
 
 
-# ===================================================================
-# Plotting: NC coverage bar chart (additional)
-# ===================================================================
+# # ===================================================================
+# # Plotting: NC coverage bar chart (additional)
+# # ===================================================================
 
-def plot_nc_coverage_bars(
-    configs: list[ConfigResult],
-    M_max: int,
-    output_dir: Path,
-    color_map: dict[str, str] | None = None,
-    verbose: bool = True,
-) -> None:
-    """
-    Grouped bar chart of NC detection coverage — one bar per setup per M.
+# # UNUSED: not called anywhere (not part of main()).
+# def plot_nc_coverage_bars(
+#     configs: list[ConfigResult],
+#     M_max: int,
+#     output_dir: Path,
+#     color_map: dict[str, str] | None = None,
+#     verbose: bool = True,
+# ) -> None:
+#     """
+#     Grouped bar chart of NC detection coverage — one bar per setup per M.
 
-    Two panels (one figure):
-    - Left: linear scale, all configs except all-voxels reference.
-    - Right: log scale, all configs including all-voxels reference.
+#     Two panels (one figure):
+#     - Left: linear scale, all configs except all-voxels reference.
+#     - Right: log scale, all configs including all-voxels reference.
 
-    Bar height = number of detected NCs at that M threshold.
-    Text above each bar (rotated 90°): count and percentage of total NCs.
-    """
-    M_range = list(range(1, M_max + 1))
+#     Bar height = number of detected NCs at that M threshold.
+#     Text above each bar (rotated 90°): count and percentage of total NCs.
+#     """
+#     M_range = list(range(1, M_max + 1))
 
-    ordered = _sorted_by_w2(configs)
-    no_all  = [c for c in ordered if c.name != "all_voxels"]
+#     ordered = _sorted_by_w2(configs)
+#     no_all  = [c for c in ordered if c.name != "all_voxels"]
 
-    if color_map is None:
-        colors_all = _get_colors(len(ordered))
-        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
+#     if color_map is None:
+#         colors_all = _get_colors(len(ordered))
+#         color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(ordered)}
 
-    x = np.arange(len(M_range))
+#     x = np.arange(len(M_range))
 
-    # --- figure sizing ---
-    # width: enough room for grouped bars + annotations at all M values
-    n_max = max(len(no_all), len(ordered))
-    bar_width = min(0.8 / n_max, 0.18)
-    fig_w = max(18, len(M_range) * (n_max * bar_width + 0.6) + 3)
-    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(fig_w, 8))
+#     # --- figure sizing ---
+#     # width: enough room for grouped bars + annotations at all M values
+#     n_max = max(len(no_all), len(ordered))
+#     bar_width = min(0.8 / n_max, 0.18)
+#     fig_w = max(18, len(M_range) * (n_max * bar_width + 0.6) + 3)
+#     fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(fig_w, 8))
 
-    def _draw_bars(ax: plt.Axes, cfg_list: list[ConfigResult], scale: str) -> None:
-        n = len(cfg_list)
-        if n == 0:
-            return
-        bw = min(0.8 / n, 0.18)
-        for i, cfg in enumerate(cfg_list):
-            offset = (i - (n - 1) / 2) * bw
-            vals  = [cfg.num_detected.get(M, 0) for M in M_range]
-            total = cfg.num_ncs if cfg.num_ncs > 0 else 1
-            bars  = ax.bar(
-                x + offset, vals, bw,
-                label=_config_label(cfg),
-                color=color_map[cfg.name],
-            )
-            for bar, val in zip(bars, vals):
-                pct   = 100.0 * val / total
-                y_pos = max(bar.get_height(), 1) if scale == "log" else bar.get_height()
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    y_pos,
-                    f"{val:,}\n({pct:.1f}%)",
-                    ha="center", va="bottom",
-                    fontsize=5, rotation=90, fontweight="bold",
-                )
+#     def _draw_bars(ax: plt.Axes, cfg_list: list[ConfigResult], scale: str) -> None:
+#         n = len(cfg_list)
+#         if n == 0:
+#             return
+#         bw = min(0.8 / n, 0.18)
+#         for i, cfg in enumerate(cfg_list):
+#             offset = (i - (n - 1) / 2) * bw
+#             vals  = [cfg.num_detected.get(M, 0) for M in M_range]
+#             total = cfg.num_ncs if cfg.num_ncs > 0 else 1
+#             bars  = ax.bar(
+#                 x + offset, vals, bw,
+#                 label=_config_label(cfg),
+#                 color=color_map[cfg.name],
+#             )
+#             for bar, val in zip(bars, vals):
+#                 pct   = 100.0 * val / total
+#                 y_pos = max(bar.get_height(), 1) if scale == "log" else bar.get_height()
+#                 ax.text(
+#                     bar.get_x() + bar.get_width() / 2,
+#                     y_pos,
+#                     f"{val:,}\n({pct:.1f}%)",
+#                     ha="center", va="bottom",
+#                     fontsize=5, rotation=90, fontweight="bold",
+#                 )
 
-    _draw_bars(ax_lin, no_all,  "linear")
-    _draw_bars(ax_log, ordered, "log")
+#     _draw_bars(ax_lin, no_all,  "linear")
+#     _draw_bars(ax_log, ordered, "log")
 
-    for ax, scale, title in [
-        (ax_lin, "linear", "NC Detection Coverage (linear scale)"),
-        (ax_log, "log",    "NC Detection Coverage (log scale)"),
-    ]:
-        ax.set_xticks(x)
-        ax.set_xticklabels([f"M≥{M}" for M in M_range], fontsize=9)
-        ax.set_xlabel("Multiplicity threshold M", fontsize=11)
-        ax.set_ylabel("Detected NCs", fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=7, loc="upper right")
-        ax.grid(axis="y", alpha=0.3)
-        ax.yaxis.set_major_formatter(
-            mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
-        )
-        if scale == "log":
-            ax.set_yscale("log")
-        # extra headroom so rotated annotations don't get clipped
-        ax.margins(y=0.35)
+#     for ax, scale, title in [
+#         (ax_lin, "linear", "NC Detection Coverage (linear scale)"),
+#         (ax_log, "log",    "NC Detection Coverage (log scale)"),
+#     ]:
+#         ax.set_xticks(x)
+#         ax.set_xticklabels([f"M≥{M}" for M in M_range], fontsize=9)
+#         ax.set_xlabel("Multiplicity threshold M", fontsize=11)
+#         ax.set_ylabel("Detected NCs", fontsize=11)
+#         ax.set_title(title, fontsize=12)
+#         ax.legend(fontsize=7, loc="upper right")
+#         ax.grid(axis="y", alpha=0.3)
+#         ax.yaxis.set_major_formatter(
+#             mticker.FuncFormatter(lambda v, _: f"{int(v):,}")
+#         )
+#         if scale == "log":
+#             ax.set_yscale("log")
+#         # extra headroom so rotated annotations don't get clipped
+#         ax.margins(y=0.35)
 
-    ax_lin.set_title("NC Detection Coverage (linear scale,\nexcl. all-voxels reference)", fontsize=11)
-    ax_log.set_title("NC Detection Coverage (log scale,\nincl. all-voxels reference)", fontsize=11)
+#     ax_lin.set_title("NC Detection Coverage (linear scale,\nexcl. all-voxels reference)", fontsize=11)
+#     ax_log.set_title("NC Detection Coverage (log scale,\nincl. all-voxels reference)", fontsize=11)
 
-    plt.tight_layout()
-    out_path = output_dir / "nc_coverage_bars.png"
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
-    if verbose:
-        print(f"  Saved: {out_path}")
+#     plt.tight_layout()
+#     out_path = output_dir / "nc_coverage_bars.png"
+#     plt.savefig(out_path, dpi=200, bbox_inches="tight")
+#     plt.close()
+#     if verbose:
+#         print(f"  Saved: {out_path}")
 
 
 # ===================================================================
@@ -1130,69 +1151,70 @@ def plot_fom_summary(
         print(f"  Saved: {out_path}")
 
 
-def plot_fom_per_setup(
-    configs: list,
-    M_values: list[int],
-    W_values: list[int],
-    total_muons: int,
-    output_dir: Path,
-    verbose: bool = True,
-) -> None:
-    """Per-config FoM heatmap (M × W grid).
+# UNUSED: not called anywhere (not part of main()).
+# def plot_fom_per_setup(
+#     configs: list,
+#     M_values: list[int],
+#     W_values: list[int],
+#     total_muons: int,
+#     output_dir: Path,
+#     verbose: bool = True,
+# ) -> None:
+#     """Per-config FoM heatmap (M × W grid).
 
-    Produces one PNG file per config:
-      fom_heatmap_{name}.png  — 2-D colour map of FoM over (M, W)
+#     Produces one PNG file per config:
+#       fom_heatmap_{name}.png  — 2-D colour map of FoM over (M, W)
 
-    The cell with the maximum FoM is highlighted.
-    """
-    ordered  = _sorted_by_w2(configs)
-    mw_pairs = [(M, W) for M in M_values for W in W_values]
-    x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
-    x_arr    = np.arange(len(mw_pairs))
-    n_w      = len(W_values)
+#     The cell with the maximum FoM is highlighted.
+#     """
+#     ordered  = _sorted_by_w2(configs)
+#     mw_pairs = [(M, W) for M in M_values for W in W_values]
+#     x_labels = [f"M{M}W{W}" for M, W in mw_pairs]
+#     x_arr    = np.arange(len(mw_pairs))
+#     n_w      = len(W_values)
 
-    for cfg in ordered:
-        grid      = _fom_grid(cfg, M_values, W_values, total_muons)
-        title_sfx = _config_label(cfg)
-        safe_name = cfg.name.replace(" ", "_").replace("/", "_")
-        finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
+#     for cfg in ordered:
+#         grid      = _fom_grid(cfg, M_values, W_values, total_muons)
+#         title_sfx = _config_label(cfg)
+#         safe_name = cfg.name.replace(" ", "_").replace("/", "_")
+#         finite    = {k: v for k, v in grid.items() if np.isfinite(v)}
 
-        # ── 1. Heatmap ────────────────────────────────────────────────
-        heat = np.array(
-            [[grid.get((M, W), np.nan) for M in M_values] for W in W_values]
-        )  # shape (n_W, n_M)
+#         # ── 1. Heatmap ────────────────────────────────────────────────
+#         heat = np.array(
+#             [[grid.get((M, W), np.nan) for M in M_values] for W in W_values]
+#         )  # shape (n_W, n_M)
 
-        fig_h, ax_h = plt.subplots(
-            figsize=(max(6, len(M_values) * 0.9), max(5, len(W_values) * 0.45))
-        )
-        im = ax_h.imshow(
-            heat, aspect="auto", origin="lower",
-            extent=[M_values[0] - 0.5, M_values[-1] + 0.5,
-                    W_values[0] - 0.5, W_values[-1] + 0.5],
-            cmap="viridis",
-        )
-        plt.colorbar(im, ax=ax_h, label="Figure of Merit")
+#         fig_h, ax_h = plt.subplots(
+#             figsize=(max(6, len(M_values) * 0.9), max(5, len(W_values) * 0.45))
+#         )
+#         im = ax_h.imshow(
+#             heat, aspect="auto", origin="lower",
+#             extent=[M_values[0] - 0.5, M_values[-1] + 0.5,
+#                     W_values[0] - 0.5, W_values[-1] + 0.5],
+#             cmap="viridis",
+#         )
+#         plt.colorbar(im, ax=ax_h, label="Figure of Merit")
 
-        if finite:
-            best = max(finite, key=finite.__getitem__)
-            ax_h.scatter(
-                best[0], best[1],
-                marker="*", s=250, color="red", zorder=5,
-                label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
-            )
-            ax_h.legend(fontsize=9, loc="upper right")
+#         if finite:
+#             best = max(finite, key=finite.__getitem__)
+#             ax_h.scatter(
+#                 best[0], best[1],
+#                 marker="*", s=250, color="red", zorder=5,
+#                 label=f"Best: M{best[0]}W{best[1]} = {finite[best]:.4g}",
+#             )
+#             ax_h.legend(fontsize=9, loc="upper right")
 
-        ax_h.set_xlabel("M  (NC threshold)", fontsize=11)
-        ax_h.set_ylabel("W  (muon threshold)", fontsize=11)
-        ax_h.set_xticks(M_values)
-        ax_h.set_yticks(W_values)
-        ax_h.set_title(f"Figure of Merit — {title_sfx}", fontsize=12, pad=10)
-        fig_h.tight_layout()
-        out_h = output_dir / f"fom_heatmap_{safe_name}.png"
-        plt.savefig(out_h, dpi=200, bbox_inches="tight")
-        plt.close(fig_h)
-        if verbose:
-            print(f"  Saved: {out_h}")
+#         ax_h.set_xlabel("M  (NC threshold)", fontsize=11)
+#         ax_h.set_ylabel("W  (muon threshold)", fontsize=11)
+#         ax_h.set_xticks(M_values)
+#         ax_h.set_yticks(W_values)
+#         ax_h.set_title(f"Figure of Merit — {title_sfx}", fontsize=12, pad=10)
+#         fig_h.tight_layout()
+#         out_h = output_dir / f"fom_heatmap_{safe_name}.png"
+#         plt.savefig(out_h, dpi=200, bbox_inches="tight")
+#         plt.close(fig_h)
+#         if verbose:
+#             print(f"  Saved: {out_h}")
 
 
 
@@ -1267,204 +1289,206 @@ def plot_w2_fom_best(
         print(f"  Saved: {out_path}")
 
 
-def plot_w2_sorted_heatmaps(
-    configs: list,
-    M_values: list[int],
-    W_values: list[int],
-    total_primaries: int,
-    output_dir: Path,
-    verbose: bool = True,
-) -> None:
-    """W2-sorted heatmaps of Recall and FoM vs (setup × W) for M ∈ {1,3,5,10}.
+# UNUSED: not called anywhere (not part of main()).
+# def plot_w2_sorted_heatmaps(
+#     configs: list,
+#     M_values: list[int],
+#     W_values: list[int],
+#     total_primaries: int,
+#     output_dir: Path,
+#     verbose: bool = True,
+# ) -> None:
+#     """W2-sorted heatmaps of Recall and FoM vs (setup × W) for M ∈ {1,3,5,10}.
 
-    Setups are sorted left-to-right by ascending W2 (most uniform first).
-    The W2 value is appended to each x-axis label.
-    Only setups with a W2 value are included.
+#     Setups are sorted left-to-right by ascending W2 (most uniform first).
+#     The W2 value is appended to each x-axis label.
+#     Only setups with a W2 value are included.
 
-    Produces 4 Recall figures and 4 FoM figures (one per M in {1,3,5,10}).
-      w2_heatmap_recall_M{M:02d}.png
-      w2_heatmap_fom_M{M:02d}.png
-    """
-    w2_cfgs = sorted(
-        [cfg for cfg in configs if cfg.w2 is not None],
-        key=lambda c: c.w2,
-    )
-    if len(w2_cfgs) < 2:
-        if verbose:
-            print("  [SKIP] w2_sorted_heatmaps: fewer than 2 configs have W2.")
-        return
+#     Produces 4 Recall figures and 4 FoM figures (one per M in {1,3,5,10}).
+#       w2_heatmap_recall_M{M:02d}.png
+#       w2_heatmap_fom_M{M:02d}.png
+#     """
+#     w2_cfgs = sorted(
+#         [cfg for cfg in configs if cfg.w2 is not None],
+#         key=lambda c: c.w2,
+#     )
+#     if len(w2_cfgs) < 2:
+#         if verbose:
+#             print("  [SKIP] w2_sorted_heatmaps: fewer than 2 configs have W2.")
+#         return
 
-    heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
-    n_cfg    = len(w2_cfgs)
-    n_w      = len(W_values)
-    x_labels = [f"{c.label}\nW2={c.w2:.1f}" for c in w2_cfgs]
+#     heatmap_ms = [m for m in [1, 3, 5, 10] if m in M_values]
+#     n_cfg    = len(w2_cfgs)
+#     n_w      = len(W_values)
+#     x_labels = [f"{c.label}\nW2={c.w2:.1f}" for c in w2_cfgs]
 
-    for M in heatmap_ms:
-        for metric, fname_pfx, cmap, fixed_vmin, fixed_vmax in [
-            ("Recall", "w2_heatmap_recall", "YlOrRd",  0.0,  1.0),
-            ("FoM",    "w2_heatmap_fom",    "viridis", None, None),
-        ]:
-            data = np.full((n_w, n_cfg), np.nan)
-            for wi, W in enumerate(W_values):
-                for ci, cfg in enumerate(w2_cfgs):
-                    cm = cfg.confusion.get((M, W))
-                    if cm is None:
-                        continue
-                    if metric == "Recall":
-                        denom = cm["TP"] + cm["FN"]
-                        data[wi, ci] = cm["TP"] / denom if denom > 0 else 0.0
-                    else:
-                        data[wi, ci] = calc_fom_confusion(
-                            cm["TP"], cm["FP"], cm["FN"], total_primaries,
-                            tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
-                            fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
-                        )
+#     for M in heatmap_ms:
+#         for metric, fname_pfx, cmap, fixed_vmin, fixed_vmax in [
+#             ("Recall", "w2_heatmap_recall", "YlOrRd",  0.0,  1.0),
+#             ("FoM",    "w2_heatmap_fom",    "viridis", None, None),
+#         ]:
+#             data = np.full((n_w, n_cfg), np.nan)
+#             for wi, W in enumerate(W_values):
+#                 for ci, cfg in enumerate(w2_cfgs):
+#                     cm = cfg.confusion.get((M, W))
+#                     if cm is None:
+#                         continue
+#                     if metric == "Recall":
+#                         denom = cm["TP"] + cm["FN"]
+#                         data[wi, ci] = cm["TP"] / denom if denom > 0 else 0.0
+#                     else:
+#                         data[wi, ci] = calc_fom_confusion(
+#                             cm["TP"], cm["FP"], cm["FN"], total_primaries,
+#                             tp_ge77_nc_counts=cm.get("tp_ge77_nc_counts"),
+#                             fn_ge77_nc_counts=cm.get("fn_ge77_nc_counts"),
+#                         )
 
-            finite_vals = data[np.isfinite(data)]
-            _vmin = fixed_vmin if fixed_vmin is not None else (
-                finite_vals.min() if len(finite_vals) else 0.0
-            )
-            _vmax = fixed_vmax if fixed_vmax is not None else (
-                finite_vals.max() if len(finite_vals) else 1.0
-            )
-            mid = (_vmin + _vmax) / 2
+#             finite_vals = data[np.isfinite(data)]
+#             _vmin = fixed_vmin if fixed_vmin is not None else (
+#                 finite_vals.min() if len(finite_vals) else 0.0
+#             )
+#             _vmax = fixed_vmax if fixed_vmax is not None else (
+#                 finite_vals.max() if len(finite_vals) else 1.0
+#             )
+#             mid = (_vmin + _vmax) / 2
 
-            fig_w = max(8, n_cfg * 2.4 + 2)
-            fig_h = max(5, n_w * 0.45 + 2)
-            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+#             fig_w = max(8, n_cfg * 2.4 + 2)
+#             fig_h = max(5, n_w * 0.45 + 2)
+#             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-            im = ax.imshow(
-                data, aspect="auto", cmap=cmap,
-                vmin=_vmin, vmax=_vmax, origin="upper",
-            )
-            plt.colorbar(im, ax=ax, label=metric)
+#             im = ax.imshow(
+#                 data, aspect="auto", cmap=cmap,
+#                 vmin=_vmin, vmax=_vmax, origin="upper",
+#             )
+#             plt.colorbar(im, ax=ax, label=metric)
 
-            for wi in range(n_w):
-                for ci in range(n_cfg):
-                    val = data[wi, ci]
-                    if not np.isfinite(val):
-                        continue
-                    txt     = f"{val:.3f}" if metric == "Recall" else f"{val:.3g}"
-                    txt_col = "white" if val > mid else "black"
-                    ax.text(ci, wi, txt, ha="center", va="center",
-                            fontsize=6, color=txt_col)
+#             for wi in range(n_w):
+#                 for ci in range(n_cfg):
+#                     val = data[wi, ci]
+#                     if not np.isfinite(val):
+#                         continue
+#                     txt     = f"{val:.3f}" if metric == "Recall" else f"{val:.3g}"
+#                     txt_col = "white" if val > mid else "black"
+#                     ax.text(ci, wi, txt, ha="center", va="center",
+#                             fontsize=6, color=txt_col)
 
-            ax.set_xticks(range(n_cfg))
-            ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=8)
-            ax.set_yticks(range(n_w))
-            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=8)
-            metric_title = "Recall" if metric == "Recall" else "Figure of Merit"
-            ax.set_title(
-                f"{metric_title} at M={M}  —  setups sorted by W2 ascending",
-                fontsize=11, pad=8,
-            )
-            ax.set_xlabel("Setup  (sorted by W2, most uniform → left)", fontsize=10)
-            ax.set_ylabel("W  (muon threshold)", fontsize=10)
+#             ax.set_xticks(range(n_cfg))
+#             ax.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=8)
+#             ax.set_yticks(range(n_w))
+#             ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=8)
+#             metric_title = "Recall" if metric == "Recall" else "Figure of Merit"
+#             ax.set_title(
+#                 f"{metric_title} at M={M}  —  setups sorted by W2 ascending",
+#                 fontsize=11, pad=8,
+#             )
+#             ax.set_xlabel("Setup  (sorted by W2, most uniform → left)", fontsize=10)
+#             ax.set_ylabel("W  (muon threshold)", fontsize=10)
 
-            fig.tight_layout()
-            out_path = output_dir / f"{fname_pfx}_M{M:02d}.png"
-            plt.savefig(out_path, dpi=200, bbox_inches="tight")
-            plt.close()
-            if verbose:
-                print(f"  Saved: {out_path}")
+#             fig.tight_layout()
+#             out_path = output_dir / f"{fname_pfx}_M{M:02d}.png"
+#             plt.savefig(out_path, dpi=200, bbox_inches="tight")
+#             plt.close()
+#             if verbose:
+#                 print(f"  Saved: {out_path}")
 
 
 # ===================================================================
 # Plotting: Muon Ge77 heatmaps
 # ===================================================================
 
-def plot_muon_heatmaps(
-    configs: list[ConfigResult],
-    M_values: list[int],
-    W_values: list[int],
-    output_dir: Path,
-    num_ge77_muons: int,
-    total_muons: int,
-    verbose: bool = True,
-) -> None:
-    """
-    Per M: one figure with 2 heatmaps (Recall, Precision).
-    Axes: W (y) x Config (x). Cell text = value.
-    """
-    config_labels = [c.label for c in configs]
-    num_configs = len(configs)
+# UNUSED: not called anywhere (not part of main()).
+# def plot_muon_heatmaps(
+#     configs: list[ConfigResult],
+#     M_values: list[int],
+#     W_values: list[int],
+#     output_dir: Path,
+#     num_ge77_muons: int,
+#     total_muons: int,
+#     verbose: bool = True,
+# ) -> None:
+#     """
+#     Per M: one figure with 2 heatmaps (Recall, Precision).
+#     Axes: W (y) x Config (x). Cell text = value.
+#     """
+#     config_labels = [c.label for c in configs]
+#     num_configs = len(configs)
 
-    for M in M_values:
-        fig, axes = plt.subplots(
-            1, 2, figsize=(max(7, num_configs * 2.4 + 2), len(W_values) * 0.8 + 3),
-            sharey=True,
-        )
+#     for M in M_values:
+#         fig, axes = plt.subplots(
+#             1, 2, figsize=(max(7, num_configs * 2.4 + 2), len(W_values) * 0.8 + 3),
+#             sharey=True,
+#         )
 
-        metric_names = ["Recall", "Precision"]
-        cmaps = ["YlOrRd", "PuBu"]
+#         metric_names = ["Recall", "Precision"]
+#         cmaps = ["YlOrRd", "PuBu"]
 
-        for mi, (metric_name, cmap) in enumerate(
-            zip(metric_names, cmaps)
-        ):
-            ax = axes[mi]
-            data_matrix = np.full((len(W_values), num_configs), np.nan)
+#         for mi, (metric_name, cmap) in enumerate(
+#             zip(metric_names, cmaps)
+#         ):
+#             ax = axes[mi]
+#             data_matrix = np.full((len(W_values), num_configs), np.nan)
 
-            for wi, W in enumerate(W_values):
-                for ci, cfg in enumerate(configs):
-                    cm = cfg.confusion.get((M, W))
-                    if cm is None:
-                        continue
+#             for wi, W in enumerate(W_values):
+#                 for ci, cfg in enumerate(configs):
+#                     cm = cfg.confusion.get((M, W))
+#                     if cm is None:
+#                         continue
 
-                    TP, FP, TN, FN = cm["TP"], cm["FP"], cm["TN"], cm["FN"]
+#                     TP, FP, TN, FN = cm["TP"], cm["FP"], cm["TN"], cm["FN"]
 
-                    if metric_name == "Recall":
-                        denom = TP + FN
-                        val = TP / denom if denom > 0 else 0.0
-                    elif metric_name == "Precision":
-                        denom = TP + FP
-                        val = TP / denom if denom > 0 else 0.0
-                    else:
-                        val = 0.0
+#                     if metric_name == "Recall":
+#                         denom = TP + FN
+#                         val = TP / denom if denom > 0 else 0.0
+#                     elif metric_name == "Precision":
+#                         denom = TP + FP
+#                         val = TP / denom if denom > 0 else 0.0
+#                     else:
+#                         val = 0.0
 
-                    data_matrix[wi, ci] = val
+#                     data_matrix[wi, ci] = val
 
-            # Plot heatmap
-            im = ax.imshow(
-                data_matrix, aspect="auto", cmap=cmap,
-                vmin=0, vmax=1,
-            )
+#             # Plot heatmap
+#             im = ax.imshow(
+#                 data_matrix, aspect="auto", cmap=cmap,
+#                 vmin=0, vmax=1,
+#             )
 
-            # Cell text
-            for wi in range(len(W_values)):
-                for ci in range(num_configs):
-                    val = data_matrix[wi, ci]
-                    if np.isnan(val):
-                        continue
-                    text_color = "white" if val > 0.7 else "black"
-                    ax.text(
-                        ci, wi, f"{val:.3f}",
-                        ha="center", va="center",
-                        fontsize=7, color=text_color,
-                    )
+#             # Cell text
+#             for wi in range(len(W_values)):
+#                 for ci in range(num_configs):
+#                     val = data_matrix[wi, ci]
+#                     if np.isnan(val):
+#                         continue
+#                     text_color = "white" if val > 0.7 else "black"
+#                     ax.text(
+#                         ci, wi, f"{val:.3f}",
+#                         ha="center", va="center",
+#                         fontsize=7, color=text_color,
+#                     )
 
-            ax.set_xticks(range(num_configs))
-            ax.set_xticklabels(config_labels, rotation=45, ha="right",
-                               fontsize=8)
-            ax.set_yticks(range(len(W_values)))
-            ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=9)
-            ax.set_title(f"{metric_name}", fontsize=11)
+#             ax.set_xticks(range(num_configs))
+#             ax.set_xticklabels(config_labels, rotation=45, ha="right",
+#                                fontsize=8)
+#             ax.set_yticks(range(len(W_values)))
+#             ax.set_yticklabels([f"W={W}" for W in W_values], fontsize=9)
+#             ax.set_title(f"{metric_name}", fontsize=11)
 
-            if mi == 0:
-                ax.set_ylabel("W threshold", fontsize=10)
+#             if mi == 0:
+#                 ax.set_ylabel("W threshold", fontsize=10)
 
-        fig.suptitle(
-            f"Ge77 Muon Classification (M={M})\n"
-            f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total  "
-            f"| Recall = TP/(TP+FN)  Precision = TP/(TP+FP)",
-            fontsize=10, y=1.02,
-        )
-        plt.tight_layout()
+#         fig.suptitle(
+#             f"Ge77 Muon Classification (M={M})\n"
+#             f"Ge77 muons: {num_ge77_muons:,} / {total_muons:,} total  "
+#             f"| Recall = TP/(TP+FN)  Precision = TP/(TP+FP)",
+#             fontsize=10, y=1.02,
+#         )
+#         plt.tight_layout()
 
-        out_path = output_dir / f"muon_heatmap_M{M}.png"
-        plt.savefig(out_path, dpi=200, bbox_inches="tight")
-        plt.close()
-        if verbose:
-            print(f"  Saved: {out_path}")
+#         out_path = output_dir / f"muon_heatmap_M{M}.png"
+#         plt.savefig(out_path, dpi=200, bbox_inches="tight")
+#         plt.close()
+#         if verbose:
+#             print(f"  Saved: {out_path}")
 
 
 # ===================================================================
@@ -1645,127 +1669,128 @@ def plot_w2_scatter(
         print(f"  Saved: {out_path}")
 
 
-def plot_muon_w2_scatter(
-    configs: list[ConfigResult],
-    M_values: list[int],
-    W_values: list[int],
-    output_dir: Path,
-    num_ge77_muons: int,
-    color_map: dict[str, str] | None = None,
-    verbose: bool = True,
-) -> None:
-    """One subplot per (M, W) pair where any W2-plotted setup achieves
-    TP > 20% of all Ge77 muons (recall > 0.20).  Precision per setup is
-    printed below each panel.  Shared legend."""
-    w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
+# UNUSED: not called anywhere (not part of main()).
+# def plot_muon_w2_scatter(
+#     configs: list[ConfigResult],
+#     M_values: list[int],
+#     W_values: list[int],
+#     output_dir: Path,
+#     num_ge77_muons: int,
+#     color_map: dict[str, str] | None = None,
+#     verbose: bool = True,
+# ) -> None:
+#     """One subplot per (M, W) pair where any W2-plotted setup achieves
+#     TP > 20% of all Ge77 muons (recall > 0.20).  Precision per setup is
+#     printed below each panel.  Shared legend."""
+#     w2_cfgs = [cfg for cfg in configs if cfg.w2 is not None]
 
-    if len(w2_cfgs) < 2 or num_ge77_muons == 0:
-        return
+#     if len(w2_cfgs) < 2 or num_ge77_muons == 0:
+#         return
 
-    threshold = 0.05 * num_ge77_muons
+#     threshold = 0.05 * num_ge77_muons
 
-    # Find all (M, W) pairs where at least one w2-plotted config exceeds threshold
-    selected_mw = []
-    for M in M_values:
-        for W in W_values:
-            for cfg in w2_cfgs:
-                cm = cfg.confusion.get((M, W))
-                if cm is not None and cm["TP"] > threshold:
-                    selected_mw.append((M, W))
-                    break  # one setup suffices
+#     # Find all (M, W) pairs where at least one w2-plotted config exceeds threshold
+#     selected_mw = []
+#     for M in M_values:
+#         for W in W_values:
+#             for cfg in w2_cfgs:
+#                 cm = cfg.confusion.get((M, W))
+#                 if cm is not None and cm["TP"] > threshold:
+#                     selected_mw.append((M, W))
+#                     break  # one setup suffices
 
-    if not selected_mw:
-        if verbose:
-            print(f"  muon_w2_scatter: no (M,W) pair reaches TP > 5% of Ge77 muons "
-                  f"(>{0.05 * num_ge77_muons:.0f}) — skipped.")
-        return
+#     if not selected_mw:
+#         if verbose:
+#             print(f"  muon_w2_scatter: no (M,W) pair reaches TP > 5% of Ge77 muons "
+#                   f"(>{0.05 * num_ge77_muons:.0f}) — skipped.")
+#         return
 
-    if color_map is None:
-        _pal = _get_colors(len(w2_cfgs))
-        color_map = {cfg.name: _pal[i] for i, cfg in enumerate(w2_cfgs)}
+#     if color_map is None:
+#         _pal = _get_colors(len(w2_cfgs))
+#         color_map = {cfg.name: _pal[i] for i, cfg in enumerate(w2_cfgs)}
 
-    ncols = 3
-    nrows = (len(selected_mw) + ncols - 1) // ncols
-    # hspace scales with number of configs so the per-panel text box
-    # (one line per config) does not overlap the next row's axes.
-    hspace = max(0.55, 0.09 * (len(w2_cfgs) + 2))
-    fig, axes = plt.subplots(
-        nrows, ncols,
-        figsize=(ncols * 5, nrows * 5.5),
-        gridspec_kw={"hspace": hspace},
-    )
-    axes_flat = np.array(axes).flatten()
+#     ncols = 3
+#     nrows = (len(selected_mw) + ncols - 1) // ncols
+#     # hspace scales with number of configs so the per-panel text box
+#     # (one line per config) does not overlap the next row's axes.
+#     hspace = max(0.55, 0.09 * (len(w2_cfgs) + 2))
+#     fig, axes = plt.subplots(
+#         nrows, ncols,
+#         figsize=(ncols * 5, nrows * 5.5),
+#         gridspec_kw={"hspace": hspace},
+#     )
+#     axes_flat = np.array(axes).flatten()
 
-    legend_handles = []
+#     legend_handles = []
 
-    for pi, (M, W) in enumerate(selected_mw):
-        ax = axes_flat[pi]
+#     for pi, (M, W) in enumerate(selected_mw):
+#         ax = axes_flat[pi]
 
-        precision_lines = []
-        for cfg in w2_cfgs:
-            color = color_map[cfg.name]
-            w2 = cfg.w2
-            cm = cfg.confusion.get((M, W))
-            tp = cm["TP"] if cm is not None else 0
-            fp = cm["FP"] if cm is not None else 0
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+#         precision_lines = []
+#         for cfg in w2_cfgs:
+#             color = color_map[cfg.name]
+#             w2 = cfg.w2
+#             cm = cfg.confusion.get((M, W))
+#             tp = cm["TP"] if cm is not None else 0
+#             fp = cm["FP"] if cm is not None else 0
+#             prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
 
-            ax.plot([w2, w2], [0, tp], color=color, linewidth=1.8, alpha=0.7)
-            ax.scatter([w2], [tp], color=color, s=60, zorder=3)
-            precision_lines.append(f"{cfg.label}: {prec:.3f}")
+#             ax.plot([w2, w2], [0, tp], color=color, linewidth=1.8, alpha=0.7)
+#             ax.scatter([w2], [tp], color=color, s=60, zorder=3)
+#             precision_lines.append(f"{cfg.label}: {prec:.3f}")
 
-            if pi == 0:
-                legend_handles.append(
-                    plt.Line2D([0], [0], color=color, marker="o", markersize=6,
-                               label=_config_label(cfg), linewidth=1.5)
-                )
+#             if pi == 0:
+#                 legend_handles.append(
+#                     plt.Line2D([0], [0], color=color, marker="o", markersize=6,
+#                                label=_config_label(cfg), linewidth=1.5)
+#                 )
 
-        ax.set_xlabel("Global W2 (mm)", fontsize=9)
-        ax.set_ylabel("Detected Ge77 muons (TP)", fontsize=9)
-        ax.set_title(f"M ≥ {M},  W ≥ {W}", fontsize=10)
-        ax.set_ylim(bottom=0)
-        ax.grid(alpha=0.3)
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
+#         ax.set_xlabel("Global W2 (mm)", fontsize=9)
+#         ax.set_ylabel("Detected Ge77 muons (TP)", fontsize=9)
+#         ax.set_title(f"M ≥ {M},  W ≥ {W}", fontsize=10)
+#         ax.set_ylim(bottom=0)
+#         ax.grid(alpha=0.3)
+#         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-        # Precision text below each subplot — one config per line, inside a bbox
-        prec_text = "Precision:\n" + "\n".join(f"  {line}" for line in precision_lines)
-        ax.text(
-            0.5, -0.02, prec_text,
-            transform=ax.transAxes,
-            ha="center", va="top",
-            fontsize=7, family="monospace",
-            bbox=dict(
-                boxstyle="round,pad=0.3",
-                facecolor="lightyellow",
-                edgecolor="gray",
-                alpha=0.85,
-                linewidth=0.6,
-            ),
-        )
+#         # Precision text below each subplot — one config per line, inside a bbox
+#         prec_text = "Precision:\n" + "\n".join(f"  {line}" for line in precision_lines)
+#         ax.text(
+#             0.5, -0.02, prec_text,
+#             transform=ax.transAxes,
+#             ha="center", va="top",
+#             fontsize=7, family="monospace",
+#             bbox=dict(
+#                 boxstyle="round,pad=0.3",
+#                 facecolor="lightyellow",
+#                 edgecolor="gray",
+#                 alpha=0.85,
+#                 linewidth=0.6,
+#             ),
+#         )
 
-    for pi in range(len(selected_mw), len(axes_flat)):
-        axes_flat[pi].set_visible(False)
+#     for pi in range(len(selected_mw), len(axes_flat)):
+#         axes_flat[pi].set_visible(False)
 
-    fig.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=min(len(w2_cfgs), 4),
-        fontsize=8,
-        bbox_to_anchor=(0.5, 0.0),
-        framealpha=0.9,
-    )
-    fig.suptitle(
-        f"Ge77 Muon Detection (TP) vs Global W2 Homogeneity\n"
-        f"(Ge77 muons: {num_ge77_muons:,}  |  panels shown: TP > 5% of Ge77 muons  |  "
-        f"{len(selected_mw)} (M,W) pair(s))",
-        fontsize=12,
-    )
-    plt.tight_layout(rect=[0, 0.06, 1, 0.96])
-    out_path = output_dir / "muon_w2_scatter.png"
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
-    if verbose:
-        print(f"  Saved: {out_path}  [{len(selected_mw)} panel(s)]")
+#     fig.legend(
+#         handles=legend_handles,
+#         loc="lower center",
+#         ncol=min(len(w2_cfgs), 4),
+#         fontsize=8,
+#         bbox_to_anchor=(0.5, 0.0),
+#         framealpha=0.9,
+#     )
+#     fig.suptitle(
+#         f"Ge77 Muon Detection (TP) vs Global W2 Homogeneity\n"
+#         f"(Ge77 muons: {num_ge77_muons:,}  |  panels shown: TP > 5% of Ge77 muons  |  "
+#         f"{len(selected_mw)} (M,W) pair(s))",
+#         fontsize=12,
+#     )
+#     plt.tight_layout(rect=[0, 0.06, 1, 0.96])
+#     out_path = output_dir / "muon_w2_scatter.png"
+#     plt.savefig(out_path, dpi=200, bbox_inches="tight")
+#     plt.close()
+#     if verbose:
+#         print(f"  Saved: {out_path}  [{len(selected_mw)} panel(s)]")
 
 
 # ===================================================================
@@ -1799,7 +1824,12 @@ def _precision(cfg: ConfigResult, M: int, W: int) -> float:
 
 
 def _signal_survival(cfg: ConfigResult, M: int, W: int) -> float:
-    """Signal survival at (M, W): 1 − (TP+FP)/(TP+FP+TN+FN)."""
+    """Signal survival at (M, W): 1 − (TP+FP)/(TP+FP+TN+FN).
+
+    This is 1 − veto fraction over the muons in the HDF5 (``ed.total_muons``,
+    NC-producing muons only), without the dead-time scaling
+    (VETO_DURATION_H × MUSUN_RATE) used for the FoM input 1 − deadtime.
+    """
     cm = cfg.confusion.get((M, W))
     if cm is None:
         return 0.0
@@ -1893,94 +1923,95 @@ def plot_w2_nc_correlation(
 # Plot B — W2 × Muon metrics correlation scatter
 # ===================================================================
 
-def plot_w2_muon_correlation(
-    configs: list[ConfigResult],
-    M_values: list[int],
-    W_default: int,
-    output_dir: Path,
-    color_map: dict[str, str] | None = None,
-    verbose: bool = True,
-) -> None:
-    """
-    Plot B — W2 vs Ge-77 Recall and Precision at W=W_default for every M.
+# UNUSED: not called anywhere (not part of main()).
+# def plot_w2_muon_correlation(
+#     configs: list[ConfigResult],
+#     M_values: list[int],
+#     W_default: int,
+#     output_dir: Path,
+#     color_map: dict[str, str] | None = None,
+#     verbose: bool = True,
+# ) -> None:
+#     """
+#     Plot B — W2 vs Ge-77 Recall and Precision at W=W_default for every M.
 
-    Layout: 4 rows × 6 cols (Recall on left 3 cols, Precision on right 3 cols).
-    Each cell = scatter (top) + residual (bottom).
-    """
-    w2_cfgs = [cfg for cfg in configs
-               if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
-    if len(w2_cfgs) < 2:
-        if verbose:
-            print("  w2_muon_correlation: fewer than 2 configs have W2 — skipped.")
-        return
+#     Layout: 4 rows × 6 cols (Recall on left 3 cols, Precision on right 3 cols).
+#     Each cell = scatter (top) + residual (bottom).
+#     """
+#     w2_cfgs = [cfg for cfg in configs
+#                if cfg.w2 is not None and cfg.name != _ALL_VOXELS_NAME]
+#     if len(w2_cfgs) < 2:
+#         if verbose:
+#             print("  w2_muon_correlation: fewer than 2 configs have W2 — skipped.")
+#         return
 
-    if color_map is None:
-        colors_all = _get_colors(len(w2_cfgs))
-        color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
-    w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
-    labels     = [cfg.label for cfg in w2_cfgs]
-    color_pts  = [color_map.get(cfg.name, "gray") for cfg in w2_cfgs]
+#     if color_map is None:
+#         colors_all = _get_colors(len(w2_cfgs))
+#         color_map  = {cfg.name: colors_all[i] for i, cfg in enumerate(w2_cfgs)}
+#     w2_arr     = np.array([cfg.w2 for cfg in w2_cfgs])
+#     labels     = [cfg.label for cfg in w2_cfgs]
+#     color_pts  = [color_map.get(cfg.name, "gray") for cfg in w2_cfgs]
 
-    ncols_half = 3                                   # cols per metric
-    nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
+#     ncols_half = 3                                   # cols per metric
+#     nrows_M    = (len(M_values) + ncols_half - 1) // ncols_half
 
-    # 2 matplotlib sub-rows per logical row, 2*ncols_half cols total
-    total_rows = nrows_M * 2
-    total_cols = ncols_half * 2
+#     # 2 matplotlib sub-rows per logical row, 2*ncols_half cols total
+#     total_rows = nrows_M * 2
+#     total_cols = ncols_half * 2
 
-    fig = plt.figure(figsize=(total_cols * 4.5, total_rows * 3))
-    fig.suptitle(
-        f"W2 Homogeneity vs Ge-77 Recall / Precision  (W = {W_default})\n"
-        "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
-        fontsize=13,
-    )
+#     fig = plt.figure(figsize=(total_cols * 4.5, total_rows * 3))
+#     fig.suptitle(
+#         f"W2 Homogeneity vs Ge-77 Recall / Precision  (W = {W_default})\n"
+#         "(OLS fit · 95 % CI · Pearson r · Spearman ρ)",
+#         fontsize=13,
+#     )
 
-    for pi, M in enumerate(M_values):
-        logical_col = pi % ncols_half
-        logical_row = pi // ncols_half
+#     for pi, M in enumerate(M_values):
+#         logical_col = pi % ncols_half
+#         logical_row = pi // ncols_half
 
-        for mi, (metric_fn, metric_name, col_offset) in enumerate([
-            (_recall,    "Recall",    0),
-            (_precision, "Precision", ncols_half),
-        ]):
-            col = logical_col + col_offset
-            scatter_row = logical_row * 2
-            resid_row   = logical_row * 2 + 1
+#         for mi, (metric_fn, metric_name, col_offset) in enumerate([
+#             (_recall,    "Recall",    0),
+#             (_precision, "Precision", ncols_half),
+#         ]):
+#             col = logical_col + col_offset
+#             scatter_row = logical_row * 2
+#             resid_row   = logical_row * 2 + 1
 
-            ax_scatter = fig.add_subplot(
-                total_rows, total_cols,
-                scatter_row * total_cols + col + 1,
-            )
-            ax_resid = fig.add_subplot(
-                total_rows, total_cols,
-                resid_row * total_cols + col + 1,
-                sharex=ax_scatter,
-            )
+#             ax_scatter = fig.add_subplot(
+#                 total_rows, total_cols,
+#                 scatter_row * total_cols + col + 1,
+#             )
+#             ax_resid = fig.add_subplot(
+#                 total_rows, total_cols,
+#                 resid_row * total_cols + col + 1,
+#                 sharex=ax_scatter,
+#             )
 
-            y_arr = np.array([metric_fn(cfg, M, W_default) for cfg in w2_cfgs])
+#             y_arr = np.array([metric_fn(cfg, M, W_default) for cfg in w2_cfgs])
 
-            _regression_overlay(
-                ax_scatter, ax_resid,
-                w2_arr, y_arr,
-                color_pts, labels,
-                y_label=f"{metric_name} (M≥{M}, W≥{W_default})",
-            )
-            ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=8)
-            ax_scatter.set_ylim(-0.05, 1.05)
-            ax_scatter.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
-            )
-            ax_resid.yaxis.set_major_formatter(
-                mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
-            )
-            plt.setp(ax_scatter.get_xticklabels(), visible=False)
+#             _regression_overlay(
+#                 ax_scatter, ax_resid,
+#                 w2_arr, y_arr,
+#                 color_pts, labels,
+#                 y_label=f"{metric_name} (M≥{M}, W≥{W_default})",
+#             )
+#             ax_scatter.set_title(f"{metric_name}  M≥{M}", fontsize=8)
+#             ax_scatter.set_ylim(-0.05, 1.05)
+#             ax_scatter.yaxis.set_major_formatter(
+#                 mticker.FuncFormatter(lambda v, _: f"{v*100:.0f}%")
+#             )
+#             ax_resid.yaxis.set_major_formatter(
+#                 mticker.FuncFormatter(lambda v, _: f"{v*100:.1f}%")
+#             )
+#             plt.setp(ax_scatter.get_xticklabels(), visible=False)
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    out_path = output_dir / "w2_muon_correlation.png"
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
-    if verbose:
-        print(f"  Saved: {out_path}")
+#     fig.tight_layout(rect=[0, 0, 1, 0.96])
+#     out_path = output_dir / "w2_muon_correlation.png"
+#     plt.savefig(out_path, dpi=200, bbox_inches="tight")
+#     plt.close()
+#     if verbose:
+#         print(f"  Saved: {out_path}")
 
 
 # ===================================================================
@@ -2652,6 +2683,8 @@ def plot_ge77_survival_at_best_fom(
     """Scatter: Ge-77 survival (Recall) vs setup index at each config's FoM-optimal (M, W).
 
     Ge77 survival = TP / (TP + FN) = Recall.
+    The plotted value is the (unweighted) Recall, i.e. the tagged fraction
+    of Ge77 muons, not the Ge77-NC-weighted survival used in the FoM.
     The all_voxels reference is excluded.
     """
     plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
@@ -2723,6 +2756,8 @@ def plot_signal_survival_at_best_fom(
     """Scatter: signal survival 1-(TP+FP)/(TP+FP+TN+FN) vs setup index at each config's FoM-optimal (M, W).
 
     Signal survival = (TN+FN) / (TP+FP+TN+FN).
+    Computed by ``_signal_survival`` (NC-producing muons only, no dead-time
+    scaling), so it differs from the 1 − deadtime that enters the FoM.
     The all_voxels reference is excluded.
     """
     plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
@@ -2795,6 +2830,11 @@ def write_survival_table(
     Ge77 survival   = TP / (TP+FN)          = Recall
     Signal survival = (TP+FP) / total_primary_muons
     The all_voxels reference is excluded.
+
+    As computed: the "Ge77 Survival" column is the Recall (``_recall``) and
+    the "Signal Survival" column is ``_signal_survival`` = 1 − (TP+FP) /
+    (NC-producing muons), without dead-time scaling. The header lines of the
+    text file are left as they are.
     """
     plot_cfgs = [cfg for cfg in configs if cfg.name != _ALL_VOXELS_NAME]
     out_path = output_dir / "survival_at_best_fom.txt"

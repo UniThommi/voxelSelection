@@ -2,6 +2,20 @@
 homogeneous.py — CLI tool for voxel generation and homogeneous PMT selection
 on the cylindrical SSD detector.
 
+* ``generate`` builds the voxel grid of the four surfaces purely from the
+  geometry constants (no HDF5 needed): square cells of side L_VOXEL = 195 mm,
+  i.e. about the area of a PMT cathode of radius 110 mm.
+* ``select`` places N PMTs homogeneously: N is split over the areas in
+  proportion to their surface, ideal positions are generated with
+  Fibonacci spirals (disk or cylinder wall), and each ideal position is
+  matched to the nearest unused valid voxel. The result is the homogeneous
+  reference layout against which optimized layouts are compared.
+
+The module also provides the spatial-homogeneity metric W2 used throughout
+the repository: the exact 2-Wasserstein distance (``ot.emd2``) between the
+PMT positions and 3000 Fibonacci reference points that cover the detector
+surface uniformly (``get_w2_ref``). Lower W2 means a more uniform layout.
+
 Usage (via unified CLI):
     python src/pmtopt/main.py homogeneous --mode generate [--output-dir ./output]
     python src/pmtopt/main.py homogeneous --mode select -N 300 [--output-dir ./output]
@@ -9,6 +23,8 @@ Usage (via unified CLI):
 
 Direct invocation also works:
     python src/pmtopt/homogeneous.py --mode select -N 300
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 import argparse
 import json
@@ -614,6 +630,7 @@ def compute_cv_nnd(centers: np.ndarray) -> dict:
     return {"cv": cv, "mean_nnd": mu, "std_nnd": sigma, "n": n}
 
 
+# UNUSED in the pipeline: only called by tests/test_wasserstein.py.
 def compute_wasserstein_homogeneity_with_baseline(
     centers: np.ndarray,
     fibonacci_centers: np.ndarray,
@@ -1000,6 +1017,7 @@ def plot_homogeneity_from_selection(
 
 def build_output_stem(mode: str, geometry: str,
                       N: int = None, areas: list = None) -> str:
+    """Base name of the output files, e.g. ``homogeneous300PMTs_pit_bot_top_wall_currentDist``."""
     if mode == "generate":
         return f"allVoxels_{geometry}"
     areas_str = "_".join(sorted(areas, key=VALID_AREAS.index))
@@ -1011,6 +1029,7 @@ def build_output_stem(mode: str, geometry: str,
 # ---------------------------------------------------------------------------
 
 def run_generate(geometry: str, output_dir: str) -> None:
+    """Generate all voxels of the four areas; write one JSON list and 2D/3D plots."""
     print(f"Mode: generate | geometry: {geometry}")
     os.makedirs(output_dir, exist_ok=True)
     stem = build_output_stem("generate", geometry)
@@ -1054,6 +1073,12 @@ def load_all_voxels_json(path: str) -> list[dict]:
 
 def run_select(geometry: str, N: int, areas: list, output_dir: str,
                all_voxels_path: str) -> None:
+    """Select N homogeneously distributed voxels from the all-voxels JSON.
+
+    Prints the global and per-area W2 (each against its own reference
+    sample), writes the selection as a plain JSON list and saves a 3D plot
+    and a per-area homogeneity plot.
+    """
     print(f"Mode: select | geometry: {geometry} | N={N} | areas={areas}")
     print(f"  All-voxels file: {all_voxels_path}")
     os.makedirs(output_dir, exist_ok=True)
@@ -1185,6 +1210,12 @@ def run_reference(output_dir: str = ".", M: int = 3000, seed: int = 42) -> None:
 # ---------------------------------------------------------------------------
 
 def main(argv=None) -> None:
+    """``homogeneous`` subcommand: parse arguments and run generate or select mode.
+
+    When the module is executed directly, ``--sanity-check`` runs a W2 check
+    (clustered layout must score worse than a Fibonacci layout) and running
+    it without arguments plots the W2 reference points (``run_reference``).
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Voxel generation and homogeneous PMT selection for the SSD detector.\n"

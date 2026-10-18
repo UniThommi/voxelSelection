@@ -1,4 +1,6 @@
-"""Visualization utilities for zone ratio analysis."""
+"""Visualization utilities for zone ratio analysis.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import numpy as np
 import matplotlib

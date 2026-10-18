@@ -4,9 +4,15 @@ Loads data directly from the raw LGDO format produced by REMAGE/Geant4:
   - /hit/MyNeutronCaptureOutput  (Sim 1 — NC truth)
   - /hit/optical                 (Sim 2 — photon detection)
 
-Mirrors the loading logic of evaluation/comparePMTCoverage.py but
-generalises to multiple run directories and returns outputs suitable
-for sparse-matrix construction.
+Mirrors the loading logic of the former evaluation/comparePMTCoverage.py
+(no longer part of the repository) but generalises to multiple run
+directories and returns outputs suitable for sparse-matrix construction.
+
+This is the PMT-side counterpart of simPostProcessing: the PMT simulation is
+not post-processed into the ML format, so its raw files are read here and
+turned into an NC × PMT detection matrix with the same 200 ns photon window.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 # ──────────────────────────────────────────────────────────────────────
-# Constants (same as comparePMTCoverage.py)
+# Constants (same as the former comparePMTCoverage.py)
 # ──────────────────────────────────────────────────────────────────────
 FLOAT_TOL_NS: float = -1.0     # tolerance for small negative times (float rounding)
 TIME_CUT_NC_NS: float = 200.0  # photon detection window after NC [ns]

@@ -2,6 +2,8 @@
 """ssd_hit_histogram.py
 
 Histogram of total hit counts per voxel in an SSD postprocessed simulation file.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse

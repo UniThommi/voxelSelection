@@ -3,6 +3,44 @@
 
 Unified CLI for zone-based SSD/PMT photon detection efficiency ratio analysis.
 
+The same neutron captures are simulated twice: once with the sensitive
+surface detector (SSD) and once with a real PMT setup (``--pmt-json``, by
+default 300 homogeneously placed PMTs). Two ratios PMT/SSD are derived:
+
+1. Zone ratio ("detector-matching ratio", default run). Each area is split
+   into zones (pit/top: radial rings, wall: z bands, bot: one zone) whose
+   boundaries equalise the effective PMT density; PMTs crossing a boundary
+   are shared by MC-sampled cathode overlap fractions. Per zone:
+       raw_ratio  = (PMT photons / NC) / (SSD photons / NC)
+       corr_ratio = raw_ratio · (mean area PMT density / zone PMT density)
+   Multiplying all SSD hits of an area by this ratio reproduces the total
+   number of PMT detections of that area. The zone-count scan (``io.
+   scan_optimal_zones``) tests whether an area has to be split into
+   sub-areas: the zone-to-zone spread of corr_ratio is compared with its
+   statistical uncertainty (SNR = σ_zone / ⟨σ_R⟩ ≥ --snr-threshold). Run for
+   both the MUSUN and the homogeneous-NC data. Outputs zone_ratio_results.txt
+   and .json (keys ``raw_ratio_pmt_over_ssd``, ``corr_ratio_pmt_over_ssd``)
+   and zone/SNR plots.
+
+2. Per-PMT ratio ("PMT-matching ratio", --per-pmt-ratio / --per-pmt-only).
+   For each PMT i of the PMT simulation and the SSD voxel at the same
+   position (``pmt.index == voxel_id``):
+       ratio_i = (PMT hits_i / NC) / (SSD voxel hits_i / NC)
+   The SSD side is read from the post-processed ML file
+   (--ssd-postprocessed-file). With the multi-simulation file of
+   simPostProcessing (hits of several optical simulations summed) this
+   ratio scales each voxel to the efficiency of a PMT; the per-area values
+   are the DEFAULT_AREA_RATIOS in src/pmtopt/geometry.py. Outputs
+   per_pmt_ratios.png, per_pmt_ratios_by_area.png and per_pmt_ratios.txt.
+
+Photon selection: SSD photons as in simPostProcessing (hit time within
+200 ns after the NC and direction into the surface: bot pz ≤ 0, top
+pz ≥ 0, wall radially outward); PMT photons with the same 200 ns time
+window. --multi-ssd-dir adds further optical SSD simulations of the same
+NCs to the zone analysis.
+
+Default input/output paths point to the author's NERSC installation.
+
 Modes:
   homogeneous  NC from uniform neutron source simulation (evtid-based NC keys)
   musun        NC from muon-seeded simulation (muon_track_id-based NC keys from CSV)
@@ -10,6 +48,8 @@ Modes:
 Usage:
   python zone_ratio_analysis.py --mode homogeneous --ssd-dir /path/ssd --pmt-dir /path/pmt
   python zone_ratio_analysis.py --mode musun --compare ref_zones.json --output-dir ./out
+
+  Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -259,6 +299,8 @@ def _filter_pmt_chunk(
             n_unmatched += 1
     tmask = (nc_times != np.inf) & (time >= nc_times) & (time <= nc_times + 200.0)
     uid_f = uid[tmask]
+    # PMT UIDs have 8 digits starting with '1' (pmt_data.pmt_index_to_uid);
+    # the mask accepts the wider range [1e7, 1e9).
     pmt_mask = (uid_f >= 10_000_000) & (uid_f < 1_000_000_000)
     uid_f = uid_f[pmt_mask]
 
@@ -959,6 +1001,12 @@ def analyze_per_pmt_ratio(
     runs: Optional[List[int]] = None,
 ) -> None:
     """Per-PMT-position ratio analysis (independent of zone scan).
+
+    PMT-matching ratio: compares each PMT with the SSD voxel at the same
+    position, so that the scaled voxel has the detection efficiency of that
+    PMT. Run on the multi-simulation post-processed file (summed hits of
+    several optical simulations), the per-area values are the
+    DEFAULT_AREA_RATIOS of src/pmtopt/geometry.py.
 
     For each PMT position computes ratio_i = (pmt_hits[i]/pmt_nc) / (ssd_hits[i]/ssd_nc)
     and produces:

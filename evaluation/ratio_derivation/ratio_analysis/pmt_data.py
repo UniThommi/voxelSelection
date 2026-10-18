@@ -1,4 +1,6 @@
-"""PMT position data loading and UID mapping."""
+"""PMT position data loading and UID mapping.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import json
 import numpy as np
@@ -68,6 +70,8 @@ def pmt_index_to_uid(index: str) -> int:
     raise ValueError(f"Cannot convert PMT index '{index}' to 8-digit UID")
 
 
+# UNUSED: uid_to_pmt_index is not called anywhere in the repository; the code
+# maps PMTs via the forward direction (pmt_index_to_uid / build_uid_to_pmt_map).
 def uid_to_pmt_index(det_uid: int) -> str:
     """
     Convert detector UID to PMT JSON index.

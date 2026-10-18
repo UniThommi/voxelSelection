@@ -1,4 +1,6 @@
-"""Zone scan optimizer and result serialization."""
+"""Zone scan optimizer and result serialization.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import json
 import numpy as np
@@ -25,6 +27,18 @@ def scan_optimal_zones(
 
     For each N_zones computes corrected ratios, σ_zone (signal), ⟨σ_R⟩ (noise),
     and SNR = σ_zone / ⟨σ_R⟩. Returns the largest N with SNR ≥ threshold.
+
+    σ_zone is the sample standard deviation of the corrected zone ratios
+    (real zone-to-zone variation), ⟨σ_R⟩ the mean Poisson uncertainty of a
+    single zone ratio (sqrt(1/n_SSD + 1/n_PMT) relative). SNR ≥ threshold
+    means the zones differ by more than statistics allow, i.e. the area
+    should be subdivided. Zones with fewer than ``min_pmts_per_zone``
+    effective PMTs are skipped; the scan stops after two consecutive
+    failures and the result defaults to 2 if no N passes.
+
+    Note: the ratios here are computed in the legacy SSD/PMT orientation
+    (SSD per NC / PMT per NC), the reciprocal of the PMT/SSD ratios written
+    to the result files.
 
     Returns:
         (optimal_n, scan_data_dict)

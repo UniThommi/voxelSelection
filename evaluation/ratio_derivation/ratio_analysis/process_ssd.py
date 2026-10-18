@@ -1,4 +1,6 @@
-"""Process SSD raw HDF5 files, counting photons per zone."""
+"""Process SSD raw HDF5 files, counting photons per zone.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import gc
 import h5py

@@ -2,9 +2,11 @@ selected/
 *.npz
 *.jpg
 *.png
+*.csv
 __pycache__/
 *.pyc
 *.md
+!README.md
 settings*
 *.egg-info
 *.txt

@@ -2,6 +2,8 @@
 Detector geometry constants and PMT placement validation.
 
 All dimensions in mm. Coordinate system origin at (0, 0, Z_ORIGIN + Z_OFFSET).
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import numpy as np
@@ -26,19 +28,24 @@ MUON_TIME_WINDOW_MIN_NS: float = 1_000.0    # 1 µs
 MUON_TIME_WINDOW_MAX_NS: float = 200_000.0  # 200 µs
 
 # ---------------------------------------------------------------------------
-# Default area-dependent hit scaling ratios (PMT / SSD).
+# Default area-dependent hit scaling ratios (PMT / SSD), "PMT-matching ratios".
 #
-# Convention: ratio = n_PMT / n_SSD  (per-NC photon hits, per area), i.e. the
-# PMT/SSD convention produced by evaluation/ratio_derivation/zone_ratio_analysis.py
-# (key `corr_ratio_pmt_over_ssd` in zone_ratio_results.json). Because a PMT
-# detects fewer photons than the fully sensitive surface, these are < 1.
+# Convention: ratio = n_PMT / n_SSD (photon hits per NC at the same position),
+# derived per area from the per-PMT ratio analysis
+# (evaluation/ratio_derivation/zone_ratio_analysis.py --per-pmt-ratio /
+# --per-pmt-only): for each PMT of a PMT simulation, the hits per NC are
+# divided by the hits per NC of the SSD voxel at the same position.
+#
+# The SSD data must be the multi-simulation file of simPostProcessing
+# (musun2SimMultiOpticalPostprocessing.py), in which the hits of several
+# optical simulations of the same NCs are summed. A single optical simulation
+# gives a lower voxel efficiency than a PMT; the summed hits exceed it, so the
+# ratios are < 1 and scale each voxel down to the efficiency of a PMT at that
+# position. They are not valid for single-simulation SSD data.
 #
 # Usage: the SSD-simulated hit counts are MULTIPLIED by this ratio to obtain the
 # equivalent PMT hit counts (n_PMT = n_SSD * ratio). See stochastic_round_block
-# and binarize_from_raw. The values below are the reciprocals of the former
-# SSD/PMT defaults (1/2.0731, 1/2.3843, 1/2.2004, 1/1.8776), so multiplying by
-# them reproduces the former divide-by-SSD/PMT behaviour — only the convention
-# changed from division to multiplication.
+# and binarize_from_raw.
 # ---------------------------------------------------------------------------
 DEFAULT_AREA_RATIOS: dict[str, float] = {
     "pit":  0.500,
@@ -133,8 +140,8 @@ def compute_per_area_N(
 
     if verbose:
         print(f"\nPer-area PMT allocation (N={N}, areas={areas_to_use}):")
-        print(f"  {'Area':<6} {'N_PMTs':>7} {'Fläche (M mm²)':>16} "
-              f"{'Dichte':>14} {'Abw. von Ziel':>14}")
+        print(f"  {'Area':<6} {'N_PMTs':>7} {'Surface (M mm²)':>16} "
+              f"{'Density':>14} {'Dev. vs target':>14}")
         print(f"  {'-' * 58}")
         target_density = N / total_area
         for area in areas_to_use:
@@ -189,6 +196,12 @@ def is_valid_pmt_position(
 
 # ---------------------------------------------------------------------------
 # Figure of Merit — physical parameters
+#
+# The FoM is the median discovery significance of the asymptotic formulae in
+# G. Cowan et al., "Asymptotic formulae for likelihood-based tests of new
+# physics", Eur. Phys. J. C 71 (2011) 1554, doi:10.1140/epjc/s10052-011-1554-0.
+# The parameter values below are preliminary (preliminary detector design and
+# simulation-derived quantities).
 # ---------------------------------------------------------------------------
 N_a = 6.022e23 # 1 / mol
 m_76 = 75.9214036 *1e-3 # kg/mol
@@ -216,13 +229,21 @@ Used as a fallback when /primaries in the HDF5 is 0 (placeholder).
 VETO_DURATION_H: float = 5.0 * 54.0 / np.log(2) / 3600.0
 """Dead-time per classified-positive muon (hours).
 
-Derived from vetoing for 5 half-lives of the Ge-77 activation product
-(T_1/2 ≈ 54 min → mean lifetime τ = T_1/2 / ln 2 ≈ 77.9 min).
+Five mean lifetimes of Ge-77m: 5 · τ with τ = T_1/2 / ln 2 and
+T_1/2 = 54 s (τ ≈ 77.9 s), i.e. ≈ 389.5 s ≈ 0.108 h.
 """
 
 
 # ---------------------------------------------------------------------------
 # Figure of Merit — general (array-based) functions
+#
+# UNUSED: calc_deadtime, calc_germanium_efficiency and calc_figure_of_merit
+# are not called anywhere in the repository. They are kept as the original
+# definition of the FoM inputs. All FoM values in the evaluation scripts are
+# computed with the confusion-matrix helpers below (calc_fom_confusion), which
+# give the same dead time (for runtime = total muons / MUSUN_RATE) and the
+# same FoM when no weights are passed, but additionally weight the Ge-77
+# survival by the number of Ge-77 NCs per muon.
 # ---------------------------------------------------------------------------
 
 def calc_deadtime(nCaptures, threshold, runtime):
@@ -275,6 +296,16 @@ def calc_germanium_efficiency(nCaptures, threshold, ge77_muon_counts):
 def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float:
     """Core Figure of Merit formula.
 
+    Median discovery significance for a counting experiment with expected
+    signal s and background b (Cowan et al., Eur. Phys. J. C 71 (2011) 1554):
+
+        FoM = sqrt(2 · ((s + b) · ln(1 + s/b) − s))
+
+    s is the expected 0νββ signal count, reduced by the signal survival
+    (live-time) fraction; b is the expected background count in the energy
+    window, with the Ge-77m part reduced by the Ge-77 survival fraction.
+    Both are computed from the module-level parameters above.
+
     Parameters
     ----------
     ge_survival_eff : float
@@ -298,7 +329,12 @@ def figure_of_merit(ge_survival_eff: float, signal_survival_eff: float) -> float
 
 
 def calc_figure_of_merit(nCaptures, threshold, ge77_muon_counts, runtime):
-    """Figure of Merit from per-muon arrays (combines helpers above)."""
+    """Figure of Merit from per-muon arrays (combines helpers above).
+
+    Original, unweighted definition: Ge-77 survival = 1 − Recall over Ge-77
+    muons. Equal to ``calc_fom_confusion`` called without the Ge-77-NC count
+    arrays when ``runtime`` = total muons / MUSUN_RATE.
+    """
     ge_survival_eff     = 1.0 - calc_germanium_efficiency(nCaptures, threshold, ge77_muon_counts)
     signal_survival_eff = 1.0 - calc_deadtime(nCaptures, threshold, runtime)
     return figure_of_merit(ge_survival_eff, signal_survival_eff)
@@ -375,6 +411,13 @@ def calc_fom_confusion(
     musun_rate: float = MUSUN_RATE,
 ) -> float:
     """Figure of Merit computed from a confusion matrix.
+
+    This is the function used for all FoM values in the evaluation scripts
+    (evaluate_coverages, compare_coverages, correlate_ssd_pmt). It reproduces
+    ``calc_figure_of_merit`` but weights the Ge-77 survival by the number of
+    Ge-77 NCs per muon when the count arrays are passed (they always are in
+    those scripts), because a muon producing several Ge-77 nuclei contributes
+    correspondingly more background.
 
     Convenience wrapper that calls:
       - ``calc_ge_survival_confusion``  →  ge_surv (Ge77-NC-weighted)

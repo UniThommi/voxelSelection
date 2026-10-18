@@ -1,4 +1,6 @@
-"""Zone data structures, boundary optimization, and compare-mode helpers."""
+"""Zone data structures, boundary optimization, and compare-mode helpers.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import json
 import numpy as np
@@ -64,7 +66,15 @@ def compute_radial_fractions(
     boundaries: List[float],
     n_samples: int = MC_SAMPLES,
 ) -> Dict[int, float]:
-    """Fraction of PMT cathode area in each radial zone via MC sampling."""
+    """Fraction of PMT cathode area in each radial zone via MC sampling.
+
+    Points are sampled uniformly on the cathode disk (radius
+    PMT_CATHODE_RADIUS); a PMT that straddles a zone boundary contributes
+    to each zone with its area fraction.
+    """
+    # Note: hash() of a str is salted per Python process (PYTHONHASHSEED), so
+    # this seed, and hence the sampled fractions, differ between runs unless
+    # PYTHONHASHSEED is fixed.
     rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
     radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
@@ -94,6 +104,7 @@ def compute_z_fractions(
     n_samples: int = MC_SAMPLES,
 ) -> Dict[int, float]:
     """Fraction of PMT cathode area in each z-zone via MC sampling (wall PMTs)."""
+    # Seed is per-process salted, see compute_radial_fractions.
     rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
     radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))

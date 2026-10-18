@@ -34,6 +34,8 @@ Usage — explore all valid angles (omit --angle):
     applies the mean actual bot rotation to all other layers.  All valid
     configurations are saved automatically; no interactive angle selection.
     A comparison figure is created in --output-dir summarising all configs.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import argparse
@@ -230,6 +232,7 @@ def check_mapping(mapping: list[tuple[dict, dict]]) -> int:
     return len(overlap)
 
 
+# UNUSED
 def check_validity(mapping: list[tuple[dict, dict]]) -> None:
     """Check that every target voxel is a geometrically valid PMT position.
 
@@ -1535,6 +1538,12 @@ def run_bot_split_angle(
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[list[str]] = None) -> None:
+    """``rotate`` subcommand: single-angle rotation or explore mode (see module docstring).
+
+    Explore mode is used to check the rotation invariance of the W2
+    homogeneity metric: the W2 scatter over all valid rotations of a setup
+    is summarised by ``aggregate_w2_deviation``.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Rotate a greedy PMT voxel selection by a fraction of 2π.\n\n"

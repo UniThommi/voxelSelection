@@ -5,9 +5,22 @@ PMT Coverage Comparison — N Configurations
 Compares NC detection efficiency and Ge-77 muon classification across
 N PMT configurations using raw LGDO HDF5 simulation data.
 
-This script fully replaces evaluation/comparePMTCoverage.py and extends
-it to an arbitrary number of configurations with full M/W sweeps,
+This is the PMT-simulation counterpart of src/pmtopt/evaluate_coverages.py:
+every configuration is a full optical simulation with real PMTs (Sim 2),
+evaluated against the shared NC truth of the MUSUN simulation (Sim 1).
+Muon classification, TN (all simulated primaries) and the FoM
+(geometry.calc_fom_confusion, Ge-77-NC-weighted survival) follow the same
+definitions; see ratio_analysis.coverage_analysis. An NC-truth statistical
+limit (perfect NC detection, only the [1 µs, 200 µs] window) is drawn as
+the upper bound in the survival vs live-time plots (25/25b).
+
+This script fully replaces the former evaluation/comparePMTCoverage.py and
+extends it to an arbitrary number of configurations with full M/W sweeps,
 heatmaps, and W2 homogeneity analysis.
+
+Note: survival_at_best_fom.txt lists the Recall as "Ge77 survival" and
+1 − (TP+FP)/total_primaries (no dead-time scaling) as "Signal survival";
+the FoM inputs themselves are in plot25_fom_summary.txt.
 
 Usage
 -----
@@ -16,11 +29,11 @@ Usage
         --sim-dirs  /path/sim_hom /path/sim_opt1 /path/sim_opt2 \\
         --labels    Homogeneous Optimized1 Optimized2 \\
         [--configs  hom.json opt1.json opt2.json]  # optional, for W2 \\
-        [--m 1] [--M-max 10] [--W-max 20] \\
+        [--m 1] [--M-max 15] [--W-max 30] \\
         [--M-default 1] [--W-default 1] \\
         [--output-dir ./coverage_results]
 
-Author: Thomas Buerger (University of Tübingen)
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 from __future__ import annotations
@@ -379,17 +392,6 @@ _SETUP_PALETTE: list[str] = [
 def _colors(n: int) -> list[str]:
     """Return a list of n setup colours, cycling _SETUP_PALETTE if n > 20."""
     return [_SETUP_PALETTE[i % len(_SETUP_PALETTE)] for i in range(n)]
-
-
-def _setup_color(results: list, r) -> str:
-    """Return the palette colour for SetupResult r relative to the full list."""
-    return _SETUP_PALETTE[results.index(r) % len(_SETUP_PALETTE)]
-
-
-def _w2_sorted(results: list) -> list:
-    """Return results sorted by ascending W2 (None values last)."""
-    return sorted(results, key=lambda r: (r.w2_global is None, r.w2_global or 0.0))
-
 
 def _perf_sorted(results: list, key_fn) -> list:
     """Return results sorted by ``key_fn(r)`` descending (best first).
@@ -1284,19 +1286,17 @@ def _cc_precision(r: SetupResult, M: int, W: int) -> float:
 
 
 def _cc_signal_survival(r: SetupResult, M: int, W: int, total_primaries: int) -> float:
-    """Signal survival at (M, W): 1 − (TP+FP) / total_primaries."""
+    """Signal survival at (M, W): 1 − (TP+FP) / total_primaries.
+
+    1 − veto fraction; not scaled by VETO_DURATION_H × MUSUN_RATE, so it is
+    not the 1 − deadtime that enters the FoM.
+    """
     cm = r.muon["confusion"].get((M, W))
     if cm is None:
         return 0.0
     tp, fp, fn = cm["TP"], cm["FP"], cm["FN"]
     tn = total_primaries - tp - fp - fn
     return 1.0 - calc_veto_fraction(tp, fp, tn, fn)
-
-
-def _sorted_by_w2_cc(results: list[SetupResult]) -> list[SetupResult]:
-    """Return results sorted by W2 descending (None W2 last)."""
-    return sorted(results, key=lambda r: (r.w2_global is None, -(r.w2_global or 0.0)))
-
 
 # ── Plot D — Coverage profile colored by W2 ────────────────────────────
 
@@ -4343,6 +4343,11 @@ def write_survival_table(
 
     Ge77 survival   = TP / (TP+FN)          = Recall
     Signal survival = (TP+FP) / all_muons
+
+    As computed: "Ge77 Survival" is the Recall (``_cc_recall``) and "Signal
+    Survival" is ``_cc_signal_survival`` = 1 − (TP+FP)/all_muons, without
+    the dead-time scaling used for the FoM input 1 − deadtime. The header
+    lines of the text file are left as they are.
     """
     fpath = os.path.join(output_dir, "survival_at_best_fom.txt")
     W = 80

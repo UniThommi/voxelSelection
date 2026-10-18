@@ -10,7 +10,13 @@ Outputs (all to <output_path>/musun_nc_analysis/):
   - NC spatial / time distributions
   - Outlier analysis (muons above 99th-percentile NC count on log scale)
   - Monte Carlo uncertainty analysis: standard error ΔE_N = S/√N vs sample size N
+    (currently disabled: the call in main() is commented out)
   - statistics.txt
+
+Input is the raw MUSUN simulation (sim1 in simPostProcessing terms), not the
+post-processed ML file.
+
+  Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 from __future__ import annotations
 
@@ -588,27 +594,6 @@ def _save(fig: plt.Figure, path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Muon property plots  (4 variants × 3 observables = 12 PNGs)
 # ---------------------------------------------------------------------------
-def _single_hist(
-    data: np.ndarray, color: str, title: str, xlabel: str,
-    out_path: Path, bins: np.ndarray,
-    log_x: bool = False, log_y: bool = False, normalized: bool = True,
-) -> None:
-    if data.size == 0:
-        return
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(data, bins=bins, density=normalized, color=color,
-            edgecolor="black", linewidth=0.3, alpha=0.85)
-    if log_x:
-        ax.set_xscale("log")
-    if log_y:
-        ax.set_yscale("log")
-    ax.set_xlabel(xlabel, fontsize=13)
-    ax.set_ylabel("Probability density" if normalized else "Count", fontsize=13)
-    ax.set_title(f"{title}  (N = {len(data):,})", fontsize=14)
-    ax.tick_params(labelsize=11)
-    _save(fig, out_path)
-
-
 def _comparison_hist(
     d1: np.ndarray, d2: np.ndarray,
     l1: str, l2: str, c1: str, c2: str,
@@ -2144,743 +2129,748 @@ def plot_cut_nc_material(run_list: list[RunData], out_dir: Path) -> None:
     _save(fig, out_dir / "cut_nc_material.png")
 
 
-# ---------------------------------------------------------------------------
-# Muon-level MC uncertainty analysis — helpers
-# ---------------------------------------------------------------------------
-
-def _read_nc_full(fp: Path) -> dict[str, np.ndarray]:
-    """Read all NC fields needed for muon-level MC analysis from one HDF5 file.
-
-    Reads gamma count and total gamma energy directly from NC_GROUP, avoiding
-    the need to cross-join the CaptureGammas group.
-    """
-    empty: dict[str, np.ndarray] = {
-        k: np.array([], dtype=dt)
-        for k, dt in [
-            ("evtid", np.int64), ("track_id", np.int64),
-            ("ge77", np.int32), ("time_ns", np.float64),
-            ("x_m", np.float64), ("y_m", np.float64), ("z_m", np.float64),
-            ("n_gammas", np.int32), ("gamma_energy_kev", np.float64),
-        ]
-    }
-    try:
-        with h5py.File(fp, "r") as f:
-            if NC_GROUP not in f:
-                return empty
-            grp = f[NC_GROUP]
-            if int(grp["entries"][()]) == 0:
-                return empty
-            return {
-                "evtid":            _pages(grp, "evtid").astype(np.int64),
-                "track_id":         _pages(grp, "nC_track_id").astype(np.int64),
-                "ge77":             _pages(grp, "nC_flag_Ge77").astype(np.int32),
-                "time_ns":          _pages(grp, "nC_time_in_ns"),
-                "x_m":              _pages(grp, "nC_x_position_in_m"),
-                "y_m":              _pages(grp, "nC_y_position_in_m"),
-                "z_m":              _pages(grp, "nC_z_position_in_m"),
-                "n_gammas":         _pages(grp, "nC_gamma_amount").astype(np.int32),
-                "gamma_energy_kev": _pages(grp, "nC_gamma_total_energy_in_keV"),
-            }
-    except Exception as exc:
-        print(f"  ERROR reading NC data from {fp.name}: {exc}")
-        return empty
-
-
-def _load_single_run_for_mc(run_dir: Path) -> dict:
-    """Load one run directory and return muon-level arrays.
-
-    Reads all output_t*.hdf5 files, deduplicates NCs on (evtid, nC_track_id),
-    deduplicates muons on evtid (first occurrence), then maps each NC to its
-    muon to accumulate per-muon statistics.
-
-    Returns dict keys:
-        n_mu_total, mu_is_ge77, mu_nc_count,
-        mu_nc_pos (N×3 mean NC position, mm),
-        mu_nc_mean_time (mean NC capture time per muon, ns),
-        mu_nc_mean_gammas, mu_nc_mean_energy_kev,
-        mu_ekin (MeV), mu_phi_rad (rad), mu_theta_rad (rad),
-        mu_pos_mm (N×3 muon start position, mm).
-    All arrays have length n_mu_total; muons without NCs receive 0 / zero-vector.
-    """
-    _empty: dict = {
-        "n_mu_total":            0,
-        "mu_is_ge77":            np.array([], dtype=bool),
-        "mu_nc_count":           np.array([], dtype=np.float64),
-        "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
-        "mu_nc_mean_time":       np.array([], dtype=np.float64),
-        "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
-        "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
-        "mu_ekin":               np.array([], dtype=np.float64),
-        "mu_phi_rad":            np.array([], dtype=np.float64),
-        "mu_theta_rad":          np.array([], dtype=np.float64),
-        "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
-    }
-
-    hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
-    if not hdf5_files:
-        print(f"  WARNING: no output_t*.hdf5 found in {run_dir}", flush=True)
-        return _empty
-
-    nc_ev_l: list[np.ndarray] = []
-    nc_tr_l: list[np.ndarray] = []
-    nc_ge77_l: list[np.ndarray] = []
-    nc_t_l: list[np.ndarray] = []
-    nc_x_l: list[np.ndarray] = []
-    nc_y_l: list[np.ndarray] = []
-    nc_z_l: list[np.ndarray] = []
-    nc_ng_l: list[np.ndarray] = []
-    nc_en_l: list[np.ndarray] = []
-    mu_ev_l: list[np.ndarray] = []
-    mu_ekin_l:  list[np.ndarray] = []
-    mu_phi_l:   list[np.ndarray] = []   # φ = arctan2(py, px) [rad]
-    mu_theta_l: list[np.ndarray] = []   # θ = arccos(pz / |p|) [rad]
-    mu_x_mm_l:  list[np.ndarray] = []   # start position [mm]
-    mu_y_mm_l:  list[np.ndarray] = []
-    mu_z_mm_l:  list[np.ndarray] = []
-
-    for fp in hdf5_files:
-        nc = _read_nc_full(fp)
-        if nc["evtid"].size > 0:
-            nc_ev_l.append(nc["evtid"])
-            nc_tr_l.append(nc["track_id"])
-            nc_ge77_l.append(nc["ge77"])
-            nc_t_l.append(nc["time_ns"])
-            nc_x_l.append(nc["x_m"])
-            nc_y_l.append(nc["y_m"])
-            nc_z_l.append(nc["z_m"])
-            nc_ng_l.append(nc["n_gammas"].astype(np.float64))
-            nc_en_l.append(nc["gamma_energy_kev"])
-        mu = read_muon_data_file(fp)
-        if mu["evtid"].size > 0:
-            mu_ev_l.append(mu["evtid"])
-            mu_ekin_l.append(mu["ekin_mev"])
-            mu_phi_l.append(np.radians(mu["azimuth_deg"]))
-            mu_theta_l.append(np.radians(mu["zenith_deg"]))
-            mu_x_mm_l.append(mu["x_m"] * 1000.0)
-            mu_y_mm_l.append(mu["y_m"] * 1000.0)
-            mu_z_mm_l.append(mu["z_m"] * 1000.0)
-
-    # ---- Muon deduplication (first occurrence per evtid) ----
-    if mu_ev_l:
-        evtid_all = np.concatenate(mu_ev_l)
-        _, first_idx = np.unique(evtid_all, return_index=True)
-        mu_evtid  = evtid_all[first_idx]
-        mu_ekin   = np.concatenate(mu_ekin_l)[first_idx]
-        mu_phi    = np.concatenate(mu_phi_l)[first_idx]
-        mu_theta  = np.concatenate(mu_theta_l)[first_idx]
-        mu_x_mm   = np.concatenate(mu_x_mm_l)[first_idx]
-        mu_y_mm   = np.concatenate(mu_y_mm_l)[first_idx]
-        mu_z_mm   = np.concatenate(mu_z_mm_l)[first_idx]
-        del evtid_all, first_idx
-    else:
-        mu_evtid = np.array([], dtype=np.int64)
-        mu_ekin  = mu_phi = mu_theta = np.array([], dtype=np.float64)
-        mu_x_mm  = mu_y_mm = mu_z_mm = np.array([], dtype=np.float64)
-    n_mu = mu_evtid.size
-    if n_mu == 0:
-        return _empty
-    mu_pos_mm = np.stack([mu_x_mm, mu_y_mm, mu_z_mm], axis=1)
-
-    # ---- NC deduplication on (evtid, nC_track_id) ----
-    if nc_ev_l:
-        ev_all  = np.concatenate(nc_ev_l)
-        tr_all  = np.concatenate(nc_tr_l)
-        pair_keys = np.stack([ev_all, tr_all], axis=1)
-        _, uniq_idx, inverse = np.unique(
-            pair_keys, axis=0, return_index=True, return_inverse=True
-        )
-        # Resolve duplicate NC records: keep max Ge77 flag
-        ge77_flat  = np.concatenate(nc_ge77_l)
-        uniq_ge77  = np.zeros(uniq_idx.size, dtype=np.int32)
-        np.maximum.at(uniq_ge77, inverse, ge77_flat)
-
-        nc_evtid = ev_all[uniq_idx]
-        nc_ge77  = uniq_ge77
-        nc_x     = np.concatenate(nc_x_l)[uniq_idx]
-        nc_y     = np.concatenate(nc_y_l)[uniq_idx]
-        nc_z     = np.concatenate(nc_z_l)[uniq_idx]
-        nc_time  = np.concatenate(nc_t_l)[uniq_idx]
-        nc_ngam  = np.concatenate(nc_ng_l)[uniq_idx]
-        nc_energ = np.concatenate(nc_en_l)[uniq_idx]
-        del ev_all, tr_all, pair_keys, ge77_flat, uniq_idx, inverse
-    else:
-        nc_evtid = np.array([], dtype=np.int64)
-        nc_ge77  = np.array([], dtype=np.int32)
-        nc_x = nc_y = nc_z = nc_time = nc_ngam = nc_energ = np.array([], dtype=np.float64)
-
-    # ---- Ge77 muon set ----
-    ge77_evtids = (
-        np.unique(nc_evtid[nc_ge77 == 1]) if nc_evtid.size > 0
-        else np.array([], dtype=np.int64)
-    )
-    mu_is_ge77 = np.isin(mu_evtid, ge77_evtids)
-
-    # ---- Map NC evtids → muon array indices (mu_evtid is sorted by np.unique) ----
-    mu_nc_count     = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_x     = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_y     = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_pos_z     = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_time_sum  = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_ngam_sum  = np.zeros(n_mu, dtype=np.float64)
-    mu_nc_energ_sum = np.zeros(n_mu, dtype=np.float64)
-
-    if nc_evtid.size > 0:
-        nc_mu_idx = np.searchsorted(mu_evtid, nc_evtid)
-        # Guard against NC evtids absent from the muon list
-        valid = (
-            (nc_mu_idx < n_mu)
-            & (mu_evtid[np.clip(nc_mu_idx, 0, n_mu - 1)] == nc_evtid)
-        )
-        if not valid.all():
-            nc_mu_idx = nc_mu_idx[valid]
-            nc_x      = nc_x[valid];  nc_y = nc_y[valid];  nc_z = nc_z[valid]
-            nc_time   = nc_time[valid]
-            nc_ngam   = nc_ngam[valid]
-            nc_energ  = nc_energ[valid]
-
-        mu_nc_count   = np.bincount(nc_mu_idx, minlength=n_mu).astype(np.float64)
-        mu_nc_pos_x   = np.bincount(nc_mu_idx, weights=nc_x,     minlength=n_mu)
-        mu_nc_pos_y   = np.bincount(nc_mu_idx, weights=nc_y,     minlength=n_mu)
-        mu_nc_pos_z   = np.bincount(nc_mu_idx, weights=nc_z,     minlength=n_mu)
-        mu_nc_time_sum  = np.bincount(nc_mu_idx, weights=nc_time,  minlength=n_mu)
-        mu_nc_ngam_sum  = np.bincount(nc_mu_idx, weights=nc_ngam,  minlength=n_mu)
-        mu_nc_energ_sum = np.bincount(nc_mu_idx, weights=nc_energ, minlength=n_mu)
-
-    has_nc    = mu_nc_count > 0
-    inv_count = np.where(has_nc, 1.0 / np.where(has_nc, mu_nc_count, 1.0), 0.0)
-
-    mu_nc_pos = np.stack([
-        mu_nc_pos_x * inv_count * 1000.0,   # m → mm
-        mu_nc_pos_y * inv_count * 1000.0,
-        mu_nc_pos_z * inv_count * 1000.0,
-    ], axis=1)
-    mu_nc_mean_time       = mu_nc_time_sum  * inv_count          # mean NC time [ns]
-    mu_nc_mean_gammas     = mu_nc_ngam_sum  * inv_count
-    mu_nc_mean_energy_kev = mu_nc_energ_sum * inv_count          # keV (no conversion)
-
-    return {
-        "n_mu_total":            n_mu,
-        "mu_is_ge77":            mu_is_ge77,
-        "mu_nc_count":           mu_nc_count,
-        "mu_nc_pos":             mu_nc_pos,              # [N_mu, 3] mm
-        "mu_nc_mean_time":       mu_nc_mean_time,        # mean NC time [ns]
-        "mu_nc_mean_gammas":     mu_nc_mean_gammas,
-        "mu_nc_mean_energy_kev": mu_nc_mean_energy_kev,  # keV
-        "mu_ekin":               mu_ekin,                # MeV  [N_mu]
-        "mu_phi_rad":            mu_phi,                 # rad  [N_mu]
-        "mu_theta_rad":          mu_theta,               # rad  [N_mu]
-        "mu_pos_mm":             mu_pos_mm,              # [N_mu, 3] mm
-    }
-
-
-def _load_dataset_for_mc(dataset_dir: Path) -> dict:
-    """Load a full dataset directory for muon-level MC analysis.
-
-    Auto-detects layout:
-      - Multi-run: run_*/ sub-directories each containing output_t*.hdf5 files.
-      - Single-run: output_t*.hdf5 files directly in dataset_dir.
-
-    Concatenates per-run muon-level arrays; evtid spaces are independent between
-    runs so concatenation is correct without composite key bookkeeping.
-    """
-    run_dirs = sorted(dataset_dir.glob("run_*/"))
-    if not run_dirs:
-        run_dirs = [dataset_dir]
-
-    parts: list[dict] = []
-    for rd_path in run_dirs:
-        print(f"    {rd_path.name} ...", end="  ", flush=True)
-        p = _load_single_run_for_mc(rd_path)
-        print(f"N_mu={p['n_mu_total']:,}", flush=True)
-        parts.append(p)
-
-    n_mu_total = sum(p["n_mu_total"] for p in parts)
-    if n_mu_total == 0:
-        return {
-            "n_mu_total":            0,
-            "mu_is_ge77":            np.array([], dtype=bool),
-            "mu_nc_count":           np.array([], dtype=np.float64),
-            "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
-            "mu_nc_mean_time":       np.array([], dtype=np.float64),
-            "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
-            "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
-            "mu_ekin":               np.array([], dtype=np.float64),
-            "mu_phi_rad":            np.array([], dtype=np.float64),
-            "mu_theta_rad":          np.array([], dtype=np.float64),
-            "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
-        }
-
-    return {
-        "n_mu_total":  n_mu_total,
-        "mu_is_ge77":  np.concatenate([p["mu_is_ge77"]  for p in parts]),
-        "mu_nc_count": np.concatenate([p["mu_nc_count"] for p in parts]),
-        "mu_nc_pos":   np.concatenate([p["mu_nc_pos"]   for p in parts], axis=0),
-        "mu_nc_mean_time":       np.concatenate([p["mu_nc_mean_time"]       for p in parts]),
-        "mu_nc_mean_gammas":     np.concatenate([p["mu_nc_mean_gammas"]     for p in parts]),
-        "mu_nc_mean_energy_kev": np.concatenate([p["mu_nc_mean_energy_kev"] for p in parts]),
-        "mu_ekin":     np.concatenate([p["mu_ekin"]     for p in parts]),
-        "mu_phi_rad":  np.concatenate([p["mu_phi_rad"]  for p in parts]),
-        "mu_theta_rad": np.concatenate([p["mu_theta_rad"] for p in parts]),
-        "mu_pos_mm":   np.concatenate([p["mu_pos_mm"]   for p in parts], axis=0),
-    }
-
-
-def _mc_sem_fixed(
-    data: np.ndarray,
-    n_vals: np.ndarray,
-    n_draws: int = MC_N_DRAWS,
-    seed: int = RANDOM_SEED,
-    vector: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
-    """MC standard error on a caller-supplied N grid (fixed across datasets).
-
-    data  : (N_total,) scalar or (N_total, 3) vector muon-level array.
-    n_vals: 1-D int array of sample sizes; all values must be ≤ N_total.
-    vector: if True, computes ‖ΔE⃗‖₂ = ‖(std_c/√N)‖ for each component c.
-
-    Returns (sem_mean, sem_std) each of shape (len(n_vals),).
-    """
-    N_full = len(data)
-    rng    = np.random.default_rng(seed)
-    sem_means = np.zeros(len(n_vals), dtype=np.float64)
-    sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
-
-    for i, n in enumerate(n_vals):
-        vals: list[float] = []
-        for _ in range(n_draws):
-            idx = rng.choice(N_full, size=int(n), replace=True)
-            if vector:
-                sample = data[idx]                         # (n, 3)
-                std_c  = np.std(sample, axis=0, ddof=1)   # (3,)
-                vals.append(float(np.linalg.norm(std_c / np.sqrt(n))))
-            else:
-                s = float(np.std(data[idx], ddof=1))
-                vals.append(s / np.sqrt(n))
-        sem_means[i] = float(np.mean(vals))
-        sem_stds[i]  = float(np.std(vals))
-
-    return sem_means, sem_stds
-
-
-# ---------------------------------------------------------------------------
-# Muon-level MC uncertainty analysis — main function
-# ---------------------------------------------------------------------------
-
-def mc_uncertainty_analysis_muon_level(
-    dataset_dirs: dict[str, Path],
-    out_dir: Path,
-) -> None:
-    """MC standard error scaling with muon-level bootstrap across three datasets.
-
-    For each dataset the full N_mu_total muon array is constructed: muons without
-    NCs (or without Ge77) carry value 0 / zero-vector.  Bootstrap samples are
-    drawn with replacement from this sparse array, so the variance correctly
-    reflects the dilution by non-contributing muons.
-
-    Observables (9 total, 5×2 subplot grid, last cell empty):
-        nc_count        — NC count per muon                   [scalar]
-        nc_position     — mean NC position (x,y,z)            [vector → ‖ΔE⃗‖₂, mm]
-        nc_time         — mean NC capture time per muon       [scalar, ns]
-        nc_n_gammas     — mean gammas per NC per muon         [scalar]
-        nc_gamma_energy — mean total gamma energy per NC      [scalar, keV]
-        mu_ekin         — muon kinetic energy                 [scalar, MeV]
-        mu_phi          — muon azimuthal angle φ=arctan2(py,px) [scalar, rad]
-        mu_theta        — muon polar angle θ=arccos(pz/|p|)  [scalar, rad]
-        mu_pos          — muon start position (x,y,z)         [vector → ‖ΔE⃗‖₂, mm]
-
-    Two populations per observable:
-        all  — muons with ≥1 NC contribute their observable; others contribute 0
-        Ge77 — Ge77-producing muons contribute their observable; others contribute 0
-
-    N grid: log-spaced from 10³ to 10⁷ (fixed, MC_N_SIZES points, MC_N_DRAWS draws).
-
-    A second y-axis (right, log scale) shows ρ_N = ΔE_N / |E_N| with a 5 %
-    threshold line and N* crossing annotations.
-
-    dataset_dirs keys must be "1e6", "1e7", "1e8".  The "1e8" path must contain
-    run_001/…run_010/ sub-directories; "1e6" and "1e7" paths contain HDF5 files
-    directly.
-
-    Output: mc_uncertainty_scaling_muon_level.png
-    """
-    print("\n--- Monte Carlo uncertainty analysis (muon level) ---", flush=True)
-    _t0 = time.perf_counter()
-
-    N_FIXED   = 10**7
-    N_MIN_FIX = 10**5
-    RHO_THRESH = 0.05
-
-    n_vals = np.unique(
-        np.logspace(np.log10(N_MIN_FIX), np.log10(N_FIXED), MC_N_SIZES)
-        .round().astype(int)
-        .clip(2, N_FIXED)
-    )  # int array, shape (≤MC_N_SIZES,)
-
-    DS_COLORS: dict[str, str] = {
-        "1e6": COLORS["blue"],
-        "1e7": COLORS["green"],
-        "1e8": COLORS["red"],
-    }
-
-    observables: list[dict] = [
-        # --- NC observables ---
-        {
-            "key":    "nc_count",
-            "label":  "NC count per muon",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [NCs]",
-            "vector": False,
-        },
-        {
-            "key":    "nc_position",
-            "label":  "NC position (x, y, z)",
-            "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
-            "vector": True,
-        },
-        {
-            "key":    "nc_time",
-            "label":  "NC capture time (mean per muon)",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [ns]",
-            "vector": False,
-        },
-        {
-            "key":    "nc_n_gammas",
-            "label":  "Capture gammas per NC",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [gammas]",
-            "vector": False,
-        },
-        {
-            "key":    "nc_gamma_energy",
-            "label":  "Total gamma energy per NC",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [keV]",
-            "vector": False,
-        },
-        # --- Muon observables ---
-        {
-            "key":    "mu_ekin",
-            "label":  r"Muon kinetic energy $E_k$",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [MeV]",
-            "vector": False,
-        },
-        {
-            "key":    "mu_phi",
-            "label":  r"Muon azimuthal angle $\varphi = \arctan2(p_y,\,p_x)$",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
-            "vector": False,
-        },
-        {
-            "key":    "mu_theta",
-            "label":  r"Muon polar angle $\theta = \arccos(p_z / |\vec{p}|)$",
-            "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
-            "vector": False,
-        },
-        {
-            "key":    "mu_pos",
-            "label":  "Muon start position (x, y, z)",
-            "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
-            "vector": True,
-        },
-    ]
-
-    # results[(ds_key, obs_key, pop)] → {sem_mean, sem_std, E_full, n_mu_total, k_ge77}
-    results: dict[tuple, dict] = {}
-
-    for i_ds, (ds_key, ds_dir) in enumerate(dataset_dirs.items()):
-        print(f"\n  Dataset '{ds_key}'  ({ds_dir})", flush=True)
-        t_ds = time.perf_counter()
-
-        # Detect multi-run layout (e.g. the 1e8 dataset with run_001/…run_010/).
-        # Process one run at a time to avoid loading 100 M muon arrays simultaneously.
-        run_dirs_mc = sorted(ds_dir.glob("run_*/"))
-
-        if not run_dirs_mc:
-            # ---- Single-run layout (1e6, 1e7): load everything at once ----------
-            mu_data    = _load_dataset_for_mc(ds_dir)
-            n_mu_total = mu_data["n_mu_total"]
-            mu_is_ge77 = mu_data["mu_is_ge77"]
-            k_ge77     = int(mu_is_ge77.sum())
-            print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77:,}", flush=True)
-
-            obs_arr: dict[str, np.ndarray] = {
-                "nc_count":        mu_data["mu_nc_count"],
-                "nc_position":     mu_data["mu_nc_pos"],
-                "nc_time":         mu_data["mu_nc_mean_time"],
-                "nc_n_gammas":     mu_data["mu_nc_mean_gammas"],
-                "nc_gamma_energy": mu_data["mu_nc_mean_energy_kev"],
-                "mu_ekin":         mu_data["mu_ekin"],
-                "mu_phi":          mu_data["mu_phi_rad"],
-                "mu_theta":        mu_data["mu_theta_rad"],
-                "mu_pos":          mu_data["mu_pos_mm"],
-            }
-
-            for i_obs, obs in enumerate(observables):
-                okey   = obs["key"]
-                is_vec = obs["vector"]
-                d_all  = obs_arr[okey]
-
-                if is_vec:
-                    d_ge77 = d_all.copy()
-                    d_ge77[~mu_is_ge77] = 0.0
-                else:
-                    d_ge77 = np.where(mu_is_ge77, d_all, 0.0)
-
-                for i_pop, (pop, data) in enumerate(
-                    [("all", d_all), ("ge77", d_ge77)]
-                ):
-                    if pop == "ge77" and k_ge77 == 0:
-                        continue
-                    if is_vec:
-                        E_full = float(np.linalg.norm(np.mean(data, axis=0)))
-                    else:
-                        E_full = float(np.mean(data))
-                    seed = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop
-                    sem_mean, sem_std = _mc_sem_fixed(
-                        data, n_vals, n_draws=MC_N_DRAWS, seed=seed, vector=is_vec,
-                    )
-                    results[(ds_key, okey, pop)] = {
-                        "sem_mean":   sem_mean,
-                        "sem_std":    sem_std,
-                        "E_full":     E_full,
-                        "n_mu_total": n_mu_total,
-                        "k_ge77":     k_ge77,
-                    }
-                del d_ge77
-
-            del mu_data, obs_arr, mu_is_ge77
-            gc.collect()
-
-        else:
-            # ---- Multi-run layout (1e8): stream one run at a time ---------------
-            # For each (okey, pop) key accumulate:
-            #   e_sum     — sum of muon-level values across all runs (for E_full)
-            #   sem_means — list of per-run sem_mean arrays (averaged at the end)
-            #   sem_stds  — list of per-run sem_std arrays
-            # Each run has ~N_FIXED muons, so per-run bootstrap is an unbiased
-            # estimator of the full-population SEM at any N ≤ N_FIXED.
-            e_sum:     dict[tuple, np.ndarray] = {}
-            sem_means: dict[tuple, list]        = {}
-            sem_stds:  dict[tuple, list]        = {}
-            n_mu_total   = 0
-            k_ge77_total = 0
-
-            for i_run, rd_path in enumerate(run_dirs_mc):
-                print(f"    {rd_path.name} ...", end="  ", flush=True)
-                t_run  = time.perf_counter()
-                mu_r   = _load_single_run_for_mc(rd_path)
-                n_mu_r = mu_r["n_mu_total"]
-                print(f"N_mu={n_mu_r:,}", flush=True)
-                if n_mu_r == 0:
-                    del mu_r
-                    continue
-
-                n_mu_total   += n_mu_r
-                mu_is_ge77_r  = mu_r["mu_is_ge77"]
-                k_ge77_r      = int(mu_is_ge77_r.sum())
-                k_ge77_total += k_ge77_r
-
-                obs_arr_r: dict[str, np.ndarray] = {
-                    "nc_count":        mu_r["mu_nc_count"],
-                    "nc_position":     mu_r["mu_nc_pos"],
-                    "nc_time":         mu_r["mu_nc_mean_time"],
-                    "nc_n_gammas":     mu_r["mu_nc_mean_gammas"],
-                    "nc_gamma_energy": mu_r["mu_nc_mean_energy_kev"],
-                    "mu_ekin":         mu_r["mu_ekin"],
-                    "mu_phi":          mu_r["mu_phi_rad"],
-                    "mu_theta":        mu_r["mu_theta_rad"],
-                    "mu_pos":          mu_r["mu_pos_mm"],
-                }
-
-                for i_obs, obs in enumerate(observables):
-                    okey   = obs["key"]
-                    is_vec = obs["vector"]
-                    d_all_r = obs_arr_r[okey]
-
-                    if is_vec:
-                        d_ge77_r = d_all_r.copy()
-                        d_ge77_r[~mu_is_ge77_r] = 0.0
-                    else:
-                        d_ge77_r = np.where(mu_is_ge77_r, d_all_r, 0.0)
-
-                    for i_pop, (pop, data_r) in enumerate(
-                        [("all", d_all_r), ("ge77", d_ge77_r)]
-                    ):
-                        if pop == "ge77" and k_ge77_r == 0:
-                            continue
-
-                        k_acc = (okey, pop)
-
-                        # Accumulate sum for E_full
-                        contrib = (np.sum(data_r, axis=0)
-                                   if is_vec
-                                   else np.float64(np.sum(data_r)))
-                        if k_acc not in e_sum:
-                            e_sum[k_acc] = contrib.copy() if is_vec else contrib
-                        else:
-                            e_sum[k_acc] = e_sum[k_acc] + contrib
-
-                        # Per-run SEM bootstrap
-                        seed_r = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop + i_run * 1000
-                        sm_r, ss_r = _mc_sem_fixed(
-                            data_r, n_vals, n_draws=MC_N_DRAWS,
-                            seed=seed_r, vector=is_vec,
-                        )
-                        sem_means.setdefault(k_acc, []).append(sm_r)
-                        sem_stds.setdefault(k_acc, []).append(ss_r)
-
-                    del d_ge77_r
-
-                del mu_r, obs_arr_r, mu_is_ge77_r
-                gc.collect()
-                _log_resources(f"    run {rd_path.name}", t_run)
-
-            print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77_total:,}", flush=True)
-
-            # Combine per-run results
-            for i_obs, obs in enumerate(observables):
-                okey   = obs["key"]
-                is_vec = obs["vector"]
-                for i_pop, pop in enumerate(["all", "ge77"]):
-                    k_acc = (okey, pop)
-                    if k_acc not in sem_means or not sem_means[k_acc]:
-                        continue
-                    # E_full: total sum / total muon count
-                    total_sum = e_sum[k_acc]
-                    if is_vec:
-                        E_full = float(np.linalg.norm(total_sum / n_mu_total))
-                    else:
-                        E_full = float(total_sum / n_mu_total)
-                    # SEM: mean over per-run estimates (each run is an unbiased draw)
-                    sem_mean = np.mean(sem_means[k_acc], axis=0)
-                    sem_std  = np.mean(sem_stds[k_acc],  axis=0)
-                    results[(ds_key, okey, pop)] = {
-                        "sem_mean":   sem_mean,
-                        "sem_std":    sem_std,
-                        "E_full":     E_full,
-                        "n_mu_total": n_mu_total,
-                        "k_ge77":     k_ge77_total,
-                    }
-
-            del e_sum, sem_means, sem_stds
-            gc.collect()
-
-        _log_resources(f"  dataset '{ds_key}' done", t_ds)
-
-    # ---- Plot: one figure per population (all / Ge77) -----------------------
-    n_obs   = len(observables)
-    ncols   = 2
-    nrows   = (n_obs + ncols - 1) // ncols
-    n_arr_f = n_vals.astype(np.float64)
-
-    for pop_filter, pop_title, fname in [
-        ("all",  "All muons",          "mc_uncertainty_scaling_muon_level_all.png"),
-        ("ge77", "Ge77-producing muons", "mc_uncertainty_scaling_muon_level_ge77.png"),
-    ]:
-        fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5.5 * nrows))
-        axes_flat = np.array(axes).flatten()
-
-        for idx, obs in enumerate(observables):
-            ax   = axes_flat[idx]
-            okey = obs["key"]
-
-            ax2 = ax.twinx()
-            ax2.set_yscale("log")
-            ax2.set_ylabel(r"$\rho_N = \Delta E_N\,/\,|E_N|$",
-                           fontsize=9, color="dimgray")
-            ax2.tick_params(labelsize=8, colors="dimgray")
-            ax2.axhline(RHO_THRESH, color="gray", linestyle=":",
-                        linewidth=0.9, alpha=0.55)
-
-            ref_n0: float | None   = None
-            ref_sem0: float | None = None
-
-            for ds_key in dataset_dirs:
-                color = DS_COLORS.get(ds_key, "black")
-                key   = (ds_key, okey, pop_filter)
-                if key not in results:
-                    continue
-                r        = results[key]
-                sem_mean = r["sem_mean"]
-                sem_std  = r["sem_std"]
-                E_full   = r["E_full"]
-                k        = r["k_ge77"]
-                n_mu_tot = r["n_mu_total"]
-
-                if pop_filter == "all":
-                    label = f"{ds_key}  (N={n_mu_tot:,})"
-                elif ds_key == "1e6":
-                    label = f"{ds_key}  (k≈{k:,}, high variance)"
-                else:
-                    label = f"{ds_key}  (k≈{k:,})"
-
-                ax.plot(n_arr_f, sem_mean, "-", color=color,
-                        linewidth=1.5, label=label)
-                _rel = np.where(sem_mean > 0, sem_std / sem_mean, 0.0)
-                ax.fill_between(
-                    n_arr_f,
-                    np.maximum(sem_mean * np.exp(-_rel), 1e-30),
-                    sem_mean * np.exp(_rel),
-                    color=color, alpha=0.12,
-                )
-
-                # Anchor 1/√N reference at the first valid 1e8 point
-                if ds_key == "1e8" and ref_n0 is None:
-                    _v = np.isfinite(sem_mean) & (sem_mean > 0)
-                    if _v.any():
-                        i0       = int(np.argmax(_v))
-                        ref_n0   = float(n_arr_f[i0])
-                        ref_sem0 = float(sem_mean[i0])
-
-                # ρ_N on right axis (dotted, same colour)
-                if abs(E_full) > 0:
-                    rho    = sem_mean / abs(E_full)
-                    finite = np.isfinite(rho) & (rho > 0)
-                    if finite.any():
-                        ax2.plot(n_arr_f[finite], rho[finite],
-                                 ":", color=color, linewidth=0.9, alpha=0.65)
-                        below = np.where(finite & (rho < RHO_THRESH))[0]
-                        if below.size > 0:
-                            n_star = n_arr_f[below[0]]
-                            ax2.annotate(
-                                f"N*≈{n_star:.0e}",
-                                xy=(n_star, RHO_THRESH),
-                                xytext=(4, 4), textcoords="offset points",
-                                fontsize=6, color=color, alpha=0.85,
-                            )
-                        else:
-                            ax2.text(
-                                n_arr_f[-1], rho[finite][-1],
-                                "ρ > 5%",
-                                fontsize=6, color=color, alpha=0.70,
-                                ha="right", va="bottom",
-                            )
-
-            if ref_n0 is not None and ref_sem0 is not None:
-                n_ref = np.logspace(np.log10(ref_n0), np.log10(float(N_FIXED)), 100)
-                ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
-                        ":", color="gray", linewidth=1.2, alpha=0.7,
-                        label=r"$1/\sqrt{N}$ ref.")
-
-            ax.set_xscale("log")
-            ax.set_yscale("log")
-            ax.set_xlabel("Sample size $N$", fontsize=11)
-            ax.set_ylabel(obs["ylabel"], fontsize=10)
-            ax.set_title(obs["label"], fontsize=12)
-            ax.legend(fontsize=7, loc="upper right")
-            ax.tick_params(labelsize=9)
-
-        for extra in axes_flat[n_obs:]:
-            extra.set_visible(False)
-
-        fig.suptitle(
-            f"Monte Carlo Uncertainty Scaling — Muon-Level Sampling  [{pop_title}]\n"
-            r"Left axis: $\Delta E_N = S/\sqrt{N}$  |  "
-            r"Right axis (dotted): $\rho_N = \Delta E_N\,/\,|E_N|$, threshold 5\,\%"
-            rf"   ({MC_N_DRAWS} draws per grid point)",
-            fontsize=12,
-        )
-        plt.tight_layout()
-        _save(fig, out_dir / fname)
-
-    _log_resources("mc_uncertainty_analysis_muon_level done", _t0)
+# # ---------------------------------------------------------------------------
+# # Muon-level MC uncertainty analysis — helpers
+# # ---------------------------------------------------------------------------
+
+# # UNUSED: only used by the disabled Monte Carlo uncertainty analysis (call commented out in main()).
+# def _read_nc_full(fp: Path) -> dict[str, np.ndarray]:
+#     """Read all NC fields needed for muon-level MC analysis from one HDF5 file.
+
+#     Reads gamma count and total gamma energy directly from NC_GROUP, avoiding
+#     the need to cross-join the CaptureGammas group.
+#     """
+#     empty: dict[str, np.ndarray] = {
+#         k: np.array([], dtype=dt)
+#         for k, dt in [
+#             ("evtid", np.int64), ("track_id", np.int64),
+#             ("ge77", np.int32), ("time_ns", np.float64),
+#             ("x_m", np.float64), ("y_m", np.float64), ("z_m", np.float64),
+#             ("n_gammas", np.int32), ("gamma_energy_kev", np.float64),
+#         ]
+#     }
+#     try:
+#         with h5py.File(fp, "r") as f:
+#             if NC_GROUP not in f:
+#                 return empty
+#             grp = f[NC_GROUP]
+#             if int(grp["entries"][()]) == 0:
+#                 return empty
+#             return {
+#                 "evtid":            _pages(grp, "evtid").astype(np.int64),
+#                 "track_id":         _pages(grp, "nC_track_id").astype(np.int64),
+#                 "ge77":             _pages(grp, "nC_flag_Ge77").astype(np.int32),
+#                 "time_ns":          _pages(grp, "nC_time_in_ns"),
+#                 "x_m":              _pages(grp, "nC_x_position_in_m"),
+#                 "y_m":              _pages(grp, "nC_y_position_in_m"),
+#                 "z_m":              _pages(grp, "nC_z_position_in_m"),
+#                 "n_gammas":         _pages(grp, "nC_gamma_amount").astype(np.int32),
+#                 "gamma_energy_kev": _pages(grp, "nC_gamma_total_energy_in_keV"),
+#             }
+#     except Exception as exc:
+#         print(f"  ERROR reading NC data from {fp.name}: {exc}")
+#         return empty
+
+
+# # UNUSED: only used by the disabled Monte Carlo uncertainty analysis (call commented out in main()).
+# def _load_single_run_for_mc(run_dir: Path) -> dict:
+#     """Load one run directory and return muon-level arrays.
+
+#     Reads all output_t*.hdf5 files, deduplicates NCs on (evtid, nC_track_id),
+#     deduplicates muons on evtid (first occurrence), then maps each NC to its
+#     muon to accumulate per-muon statistics.
+
+#     Returns dict keys:
+#         n_mu_total, mu_is_ge77, mu_nc_count,
+#         mu_nc_pos (N×3 mean NC position, mm),
+#         mu_nc_mean_time (mean NC capture time per muon, ns),
+#         mu_nc_mean_gammas, mu_nc_mean_energy_kev,
+#         mu_ekin (MeV), mu_phi_rad (rad), mu_theta_rad (rad),
+#         mu_pos_mm (N×3 muon start position, mm).
+#     All arrays have length n_mu_total; muons without NCs receive 0 / zero-vector.
+#     """
+#     _empty: dict = {
+#         "n_mu_total":            0,
+#         "mu_is_ge77":            np.array([], dtype=bool),
+#         "mu_nc_count":           np.array([], dtype=np.float64),
+#         "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
+#         "mu_nc_mean_time":       np.array([], dtype=np.float64),
+#         "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
+#         "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
+#         "mu_ekin":               np.array([], dtype=np.float64),
+#         "mu_phi_rad":            np.array([], dtype=np.float64),
+#         "mu_theta_rad":          np.array([], dtype=np.float64),
+#         "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
+#     }
+
+#     hdf5_files = sorted(run_dir.glob("output_t*.hdf5"))
+#     if not hdf5_files:
+#         print(f"  WARNING: no output_t*.hdf5 found in {run_dir}", flush=True)
+#         return _empty
+
+#     nc_ev_l: list[np.ndarray] = []
+#     nc_tr_l: list[np.ndarray] = []
+#     nc_ge77_l: list[np.ndarray] = []
+#     nc_t_l: list[np.ndarray] = []
+#     nc_x_l: list[np.ndarray] = []
+#     nc_y_l: list[np.ndarray] = []
+#     nc_z_l: list[np.ndarray] = []
+#     nc_ng_l: list[np.ndarray] = []
+#     nc_en_l: list[np.ndarray] = []
+#     mu_ev_l: list[np.ndarray] = []
+#     mu_ekin_l:  list[np.ndarray] = []
+#     mu_phi_l:   list[np.ndarray] = []   # φ = arctan2(py, px) [rad]
+#     mu_theta_l: list[np.ndarray] = []   # θ = arccos(pz / |p|) [rad]
+#     mu_x_mm_l:  list[np.ndarray] = []   # start position [mm]
+#     mu_y_mm_l:  list[np.ndarray] = []
+#     mu_z_mm_l:  list[np.ndarray] = []
+
+#     for fp in hdf5_files:
+#         nc = _read_nc_full(fp)
+#         if nc["evtid"].size > 0:
+#             nc_ev_l.append(nc["evtid"])
+#             nc_tr_l.append(nc["track_id"])
+#             nc_ge77_l.append(nc["ge77"])
+#             nc_t_l.append(nc["time_ns"])
+#             nc_x_l.append(nc["x_m"])
+#             nc_y_l.append(nc["y_m"])
+#             nc_z_l.append(nc["z_m"])
+#             nc_ng_l.append(nc["n_gammas"].astype(np.float64))
+#             nc_en_l.append(nc["gamma_energy_kev"])
+#         mu = read_muon_data_file(fp)
+#         if mu["evtid"].size > 0:
+#             mu_ev_l.append(mu["evtid"])
+#             mu_ekin_l.append(mu["ekin_mev"])
+#             mu_phi_l.append(np.radians(mu["azimuth_deg"]))
+#             mu_theta_l.append(np.radians(mu["zenith_deg"]))
+#             mu_x_mm_l.append(mu["x_m"] * 1000.0)
+#             mu_y_mm_l.append(mu["y_m"] * 1000.0)
+#             mu_z_mm_l.append(mu["z_m"] * 1000.0)
+
+#     # ---- Muon deduplication (first occurrence per evtid) ----
+#     if mu_ev_l:
+#         evtid_all = np.concatenate(mu_ev_l)
+#         _, first_idx = np.unique(evtid_all, return_index=True)
+#         mu_evtid  = evtid_all[first_idx]
+#         mu_ekin   = np.concatenate(mu_ekin_l)[first_idx]
+#         mu_phi    = np.concatenate(mu_phi_l)[first_idx]
+#         mu_theta  = np.concatenate(mu_theta_l)[first_idx]
+#         mu_x_mm   = np.concatenate(mu_x_mm_l)[first_idx]
+#         mu_y_mm   = np.concatenate(mu_y_mm_l)[first_idx]
+#         mu_z_mm   = np.concatenate(mu_z_mm_l)[first_idx]
+#         del evtid_all, first_idx
+#     else:
+#         mu_evtid = np.array([], dtype=np.int64)
+#         mu_ekin  = mu_phi = mu_theta = np.array([], dtype=np.float64)
+#         mu_x_mm  = mu_y_mm = mu_z_mm = np.array([], dtype=np.float64)
+#     n_mu = mu_evtid.size
+#     if n_mu == 0:
+#         return _empty
+#     mu_pos_mm = np.stack([mu_x_mm, mu_y_mm, mu_z_mm], axis=1)
+
+#     # ---- NC deduplication on (evtid, nC_track_id) ----
+#     if nc_ev_l:
+#         ev_all  = np.concatenate(nc_ev_l)
+#         tr_all  = np.concatenate(nc_tr_l)
+#         pair_keys = np.stack([ev_all, tr_all], axis=1)
+#         _, uniq_idx, inverse = np.unique(
+#             pair_keys, axis=0, return_index=True, return_inverse=True
+#         )
+#         # Resolve duplicate NC records: keep max Ge77 flag
+#         ge77_flat  = np.concatenate(nc_ge77_l)
+#         uniq_ge77  = np.zeros(uniq_idx.size, dtype=np.int32)
+#         np.maximum.at(uniq_ge77, inverse, ge77_flat)
+
+#         nc_evtid = ev_all[uniq_idx]
+#         nc_ge77  = uniq_ge77
+#         nc_x     = np.concatenate(nc_x_l)[uniq_idx]
+#         nc_y     = np.concatenate(nc_y_l)[uniq_idx]
+#         nc_z     = np.concatenate(nc_z_l)[uniq_idx]
+#         nc_time  = np.concatenate(nc_t_l)[uniq_idx]
+#         nc_ngam  = np.concatenate(nc_ng_l)[uniq_idx]
+#         nc_energ = np.concatenate(nc_en_l)[uniq_idx]
+#         del ev_all, tr_all, pair_keys, ge77_flat, uniq_idx, inverse
+#     else:
+#         nc_evtid = np.array([], dtype=np.int64)
+#         nc_ge77  = np.array([], dtype=np.int32)
+#         nc_x = nc_y = nc_z = nc_time = nc_ngam = nc_energ = np.array([], dtype=np.float64)
+
+#     # ---- Ge77 muon set ----
+#     ge77_evtids = (
+#         np.unique(nc_evtid[nc_ge77 == 1]) if nc_evtid.size > 0
+#         else np.array([], dtype=np.int64)
+#     )
+#     mu_is_ge77 = np.isin(mu_evtid, ge77_evtids)
+
+#     # ---- Map NC evtids → muon array indices (mu_evtid is sorted by np.unique) ----
+#     mu_nc_count     = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_pos_x     = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_pos_y     = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_pos_z     = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_time_sum  = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_ngam_sum  = np.zeros(n_mu, dtype=np.float64)
+#     mu_nc_energ_sum = np.zeros(n_mu, dtype=np.float64)
+
+#     if nc_evtid.size > 0:
+#         nc_mu_idx = np.searchsorted(mu_evtid, nc_evtid)
+#         # Guard against NC evtids absent from the muon list
+#         valid = (
+#             (nc_mu_idx < n_mu)
+#             & (mu_evtid[np.clip(nc_mu_idx, 0, n_mu - 1)] == nc_evtid)
+#         )
+#         if not valid.all():
+#             nc_mu_idx = nc_mu_idx[valid]
+#             nc_x      = nc_x[valid];  nc_y = nc_y[valid];  nc_z = nc_z[valid]
+#             nc_time   = nc_time[valid]
+#             nc_ngam   = nc_ngam[valid]
+#             nc_energ  = nc_energ[valid]
+
+#         mu_nc_count   = np.bincount(nc_mu_idx, minlength=n_mu).astype(np.float64)
+#         mu_nc_pos_x   = np.bincount(nc_mu_idx, weights=nc_x,     minlength=n_mu)
+#         mu_nc_pos_y   = np.bincount(nc_mu_idx, weights=nc_y,     minlength=n_mu)
+#         mu_nc_pos_z   = np.bincount(nc_mu_idx, weights=nc_z,     minlength=n_mu)
+#         mu_nc_time_sum  = np.bincount(nc_mu_idx, weights=nc_time,  minlength=n_mu)
+#         mu_nc_ngam_sum  = np.bincount(nc_mu_idx, weights=nc_ngam,  minlength=n_mu)
+#         mu_nc_energ_sum = np.bincount(nc_mu_idx, weights=nc_energ, minlength=n_mu)
+
+#     has_nc    = mu_nc_count > 0
+#     inv_count = np.where(has_nc, 1.0 / np.where(has_nc, mu_nc_count, 1.0), 0.0)
+
+#     mu_nc_pos = np.stack([
+#         mu_nc_pos_x * inv_count * 1000.0,   # m → mm
+#         mu_nc_pos_y * inv_count * 1000.0,
+#         mu_nc_pos_z * inv_count * 1000.0,
+#     ], axis=1)
+#     mu_nc_mean_time       = mu_nc_time_sum  * inv_count          # mean NC time [ns]
+#     mu_nc_mean_gammas     = mu_nc_ngam_sum  * inv_count
+#     mu_nc_mean_energy_kev = mu_nc_energ_sum * inv_count          # keV (no conversion)
+
+#     return {
+#         "n_mu_total":            n_mu,
+#         "mu_is_ge77":            mu_is_ge77,
+#         "mu_nc_count":           mu_nc_count,
+#         "mu_nc_pos":             mu_nc_pos,              # [N_mu, 3] mm
+#         "mu_nc_mean_time":       mu_nc_mean_time,        # mean NC time [ns]
+#         "mu_nc_mean_gammas":     mu_nc_mean_gammas,
+#         "mu_nc_mean_energy_kev": mu_nc_mean_energy_kev,  # keV
+#         "mu_ekin":               mu_ekin,                # MeV  [N_mu]
+#         "mu_phi_rad":            mu_phi,                 # rad  [N_mu]
+#         "mu_theta_rad":          mu_theta,               # rad  [N_mu]
+#         "mu_pos_mm":             mu_pos_mm,              # [N_mu, 3] mm
+#     }
+
+
+# # UNUSED: only used by the disabled Monte Carlo uncertainty analysis (call commented out in main()).
+# def _load_dataset_for_mc(dataset_dir: Path) -> dict:
+#     """Load a full dataset directory for muon-level MC analysis.
+
+#     Auto-detects layout:
+#       - Multi-run: run_*/ sub-directories each containing output_t*.hdf5 files.
+#       - Single-run: output_t*.hdf5 files directly in dataset_dir.
+
+#     Concatenates per-run muon-level arrays; evtid spaces are independent between
+#     runs so concatenation is correct without composite key bookkeeping.
+#     """
+#     run_dirs = sorted(dataset_dir.glob("run_*/"))
+#     if not run_dirs:
+#         run_dirs = [dataset_dir]
+
+#     parts: list[dict] = []
+#     for rd_path in run_dirs:
+#         print(f"    {rd_path.name} ...", end="  ", flush=True)
+#         p = _load_single_run_for_mc(rd_path)
+#         print(f"N_mu={p['n_mu_total']:,}", flush=True)
+#         parts.append(p)
+
+#     n_mu_total = sum(p["n_mu_total"] for p in parts)
+#     if n_mu_total == 0:
+#         return {
+#             "n_mu_total":            0,
+#             "mu_is_ge77":            np.array([], dtype=bool),
+#             "mu_nc_count":           np.array([], dtype=np.float64),
+#             "mu_nc_pos":             np.zeros((0, 3), dtype=np.float64),
+#             "mu_nc_mean_time":       np.array([], dtype=np.float64),
+#             "mu_nc_mean_gammas":     np.array([], dtype=np.float64),
+#             "mu_nc_mean_energy_kev": np.array([], dtype=np.float64),
+#             "mu_ekin":               np.array([], dtype=np.float64),
+#             "mu_phi_rad":            np.array([], dtype=np.float64),
+#             "mu_theta_rad":          np.array([], dtype=np.float64),
+#             "mu_pos_mm":             np.zeros((0, 3), dtype=np.float64),
+#         }
+
+#     return {
+#         "n_mu_total":  n_mu_total,
+#         "mu_is_ge77":  np.concatenate([p["mu_is_ge77"]  for p in parts]),
+#         "mu_nc_count": np.concatenate([p["mu_nc_count"] for p in parts]),
+#         "mu_nc_pos":   np.concatenate([p["mu_nc_pos"]   for p in parts], axis=0),
+#         "mu_nc_mean_time":       np.concatenate([p["mu_nc_mean_time"]       for p in parts]),
+#         "mu_nc_mean_gammas":     np.concatenate([p["mu_nc_mean_gammas"]     for p in parts]),
+#         "mu_nc_mean_energy_kev": np.concatenate([p["mu_nc_mean_energy_kev"] for p in parts]),
+#         "mu_ekin":     np.concatenate([p["mu_ekin"]     for p in parts]),
+#         "mu_phi_rad":  np.concatenate([p["mu_phi_rad"]  for p in parts]),
+#         "mu_theta_rad": np.concatenate([p["mu_theta_rad"] for p in parts]),
+#         "mu_pos_mm":   np.concatenate([p["mu_pos_mm"]   for p in parts], axis=0),
+#     }
+
+
+# # UNUSED: only used by the disabled Monte Carlo uncertainty analysis (call commented out in main()).
+# def _mc_sem_fixed(
+#     data: np.ndarray,
+#     n_vals: np.ndarray,
+#     n_draws: int = MC_N_DRAWS,
+#     seed: int = RANDOM_SEED,
+#     vector: bool = False,
+# ) -> tuple[np.ndarray, np.ndarray]:
+#     """MC standard error on a caller-supplied N grid (fixed across datasets).
+
+#     data  : (N_total,) scalar or (N_total, 3) vector muon-level array.
+#     n_vals: 1-D int array of sample sizes; all values must be ≤ N_total.
+#     vector: if True, computes ‖ΔE⃗‖₂ = ‖(std_c/√N)‖ for each component c.
+
+#     Returns (sem_mean, sem_std) each of shape (len(n_vals),).
+#     """
+#     N_full = len(data)
+#     rng    = np.random.default_rng(seed)
+#     sem_means = np.zeros(len(n_vals), dtype=np.float64)
+#     sem_stds  = np.zeros(len(n_vals), dtype=np.float64)
+
+#     for i, n in enumerate(n_vals):
+#         vals: list[float] = []
+#         for _ in range(n_draws):
+#             idx = rng.choice(N_full, size=int(n), replace=True)
+#             if vector:
+#                 sample = data[idx]                         # (n, 3)
+#                 std_c  = np.std(sample, axis=0, ddof=1)   # (3,)
+#                 vals.append(float(np.linalg.norm(std_c / np.sqrt(n))))
+#             else:
+#                 s = float(np.std(data[idx], ddof=1))
+#                 vals.append(s / np.sqrt(n))
+#         sem_means[i] = float(np.mean(vals))
+#         sem_stds[i]  = float(np.std(vals))
+
+#     return sem_means, sem_stds
+
+
+# # ---------------------------------------------------------------------------
+# # Muon-level MC uncertainty analysis — main function
+# # ---------------------------------------------------------------------------
+
+# # UNUSED: disabled; its call in main() is commented out.
+# def mc_uncertainty_analysis_muon_level(
+#     dataset_dirs: dict[str, Path],
+#     out_dir: Path,
+# ) -> None:
+#     """MC standard error scaling with muon-level bootstrap across three datasets.
+
+#     For each dataset the full N_mu_total muon array is constructed: muons without
+#     NCs (or without Ge77) carry value 0 / zero-vector.  Bootstrap samples are
+#     drawn with replacement from this sparse array, so the variance correctly
+#     reflects the dilution by non-contributing muons.
+
+#     Observables (9 total, 5×2 subplot grid, last cell empty):
+#         nc_count        — NC count per muon                   [scalar]
+#         nc_position     — mean NC position (x,y,z)            [vector → ‖ΔE⃗‖₂, mm]
+#         nc_time         — mean NC capture time per muon       [scalar, ns]
+#         nc_n_gammas     — mean gammas per NC per muon         [scalar]
+#         nc_gamma_energy — mean total gamma energy per NC      [scalar, keV]
+#         mu_ekin         — muon kinetic energy                 [scalar, MeV]
+#         mu_phi          — muon azimuthal angle φ=arctan2(py,px) [scalar, rad]
+#         mu_theta        — muon polar angle θ=arccos(pz/|p|)  [scalar, rad]
+#         mu_pos          — muon start position (x,y,z)         [vector → ‖ΔE⃗‖₂, mm]
+
+#     Two populations per observable:
+#         all  — muons with ≥1 NC contribute their observable; others contribute 0
+#         Ge77 — Ge77-producing muons contribute their observable; others contribute 0
+
+#     N grid: log-spaced from 10³ to 10⁷ (fixed, MC_N_SIZES points, MC_N_DRAWS draws).
+
+#     A second y-axis (right, log scale) shows ρ_N = ΔE_N / |E_N| with a 5 %
+#     threshold line and N* crossing annotations.
+
+#     dataset_dirs keys must be "1e6", "1e7", "1e8".  The "1e8" path must contain
+#     run_001/…run_010/ sub-directories; "1e6" and "1e7" paths contain HDF5 files
+#     directly.
+
+#     Output: mc_uncertainty_scaling_muon_level.png
+#     """
+#     print("\n--- Monte Carlo uncertainty analysis (muon level) ---", flush=True)
+#     _t0 = time.perf_counter()
+
+#     N_FIXED   = 10**7
+#     N_MIN_FIX = 10**5
+#     RHO_THRESH = 0.05
+
+#     n_vals = np.unique(
+#         np.logspace(np.log10(N_MIN_FIX), np.log10(N_FIXED), MC_N_SIZES)
+#         .round().astype(int)
+#         .clip(2, N_FIXED)
+#     )  # int array, shape (≤MC_N_SIZES,)
+
+#     DS_COLORS: dict[str, str] = {
+#         "1e6": COLORS["blue"],
+#         "1e7": COLORS["green"],
+#         "1e8": COLORS["red"],
+#     }
+
+#     observables: list[dict] = [
+#         # --- NC observables ---
+#         {
+#             "key":    "nc_count",
+#             "label":  "NC count per muon",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [NCs]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "nc_position",
+#             "label":  "NC position (x, y, z)",
+#             "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
+#             "vector": True,
+#         },
+#         {
+#             "key":    "nc_time",
+#             "label":  "NC capture time (mean per muon)",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [ns]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "nc_n_gammas",
+#             "label":  "Capture gammas per NC",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [gammas]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "nc_gamma_energy",
+#             "label":  "Total gamma energy per NC",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [keV]",
+#             "vector": False,
+#         },
+#         # --- Muon observables ---
+#         {
+#             "key":    "mu_ekin",
+#             "label":  r"Muon kinetic energy $E_k$",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [MeV]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "mu_phi",
+#             "label":  r"Muon azimuthal angle $\varphi = \arctan2(p_y,\,p_x)$",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "mu_theta",
+#             "label":  r"Muon polar angle $\theta = \arccos(p_z / |\vec{p}|)$",
+#             "ylabel": r"$\Delta E_N = S/\sqrt{N}$  [rad]",
+#             "vector": False,
+#         },
+#         {
+#             "key":    "mu_pos",
+#             "label":  "Muon start position (x, y, z)",
+#             "ylabel": r"$\|\Delta\vec{E}_N\|_2$  [mm]",
+#             "vector": True,
+#         },
+#     ]
+
+#     # results[(ds_key, obs_key, pop)] → {sem_mean, sem_std, E_full, n_mu_total, k_ge77}
+#     results: dict[tuple, dict] = {}
+
+#     for i_ds, (ds_key, ds_dir) in enumerate(dataset_dirs.items()):
+#         print(f"\n  Dataset '{ds_key}'  ({ds_dir})", flush=True)
+#         t_ds = time.perf_counter()
+
+#         # Detect multi-run layout (e.g. the 1e8 dataset with run_001/…run_010/).
+#         # Process one run at a time to avoid loading 100 M muon arrays simultaneously.
+#         run_dirs_mc = sorted(ds_dir.glob("run_*/"))
+
+#         if not run_dirs_mc:
+#             # ---- Single-run layout (1e6, 1e7): load everything at once ----------
+#             mu_data    = _load_dataset_for_mc(ds_dir)
+#             n_mu_total = mu_data["n_mu_total"]
+#             mu_is_ge77 = mu_data["mu_is_ge77"]
+#             k_ge77     = int(mu_is_ge77.sum())
+#             print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77:,}", flush=True)
+
+#             obs_arr: dict[str, np.ndarray] = {
+#                 "nc_count":        mu_data["mu_nc_count"],
+#                 "nc_position":     mu_data["mu_nc_pos"],
+#                 "nc_time":         mu_data["mu_nc_mean_time"],
+#                 "nc_n_gammas":     mu_data["mu_nc_mean_gammas"],
+#                 "nc_gamma_energy": mu_data["mu_nc_mean_energy_kev"],
+#                 "mu_ekin":         mu_data["mu_ekin"],
+#                 "mu_phi":          mu_data["mu_phi_rad"],
+#                 "mu_theta":        mu_data["mu_theta_rad"],
+#                 "mu_pos":          mu_data["mu_pos_mm"],
+#             }
+
+#             for i_obs, obs in enumerate(observables):
+#                 okey   = obs["key"]
+#                 is_vec = obs["vector"]
+#                 d_all  = obs_arr[okey]
+
+#                 if is_vec:
+#                     d_ge77 = d_all.copy()
+#                     d_ge77[~mu_is_ge77] = 0.0
+#                 else:
+#                     d_ge77 = np.where(mu_is_ge77, d_all, 0.0)
+
+#                 for i_pop, (pop, data) in enumerate(
+#                     [("all", d_all), ("ge77", d_ge77)]
+#                 ):
+#                     if pop == "ge77" and k_ge77 == 0:
+#                         continue
+#                     if is_vec:
+#                         E_full = float(np.linalg.norm(np.mean(data, axis=0)))
+#                     else:
+#                         E_full = float(np.mean(data))
+#                     seed = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop
+#                     sem_mean, sem_std = _mc_sem_fixed(
+#                         data, n_vals, n_draws=MC_N_DRAWS, seed=seed, vector=is_vec,
+#                     )
+#                     results[(ds_key, okey, pop)] = {
+#                         "sem_mean":   sem_mean,
+#                         "sem_std":    sem_std,
+#                         "E_full":     E_full,
+#                         "n_mu_total": n_mu_total,
+#                         "k_ge77":     k_ge77,
+#                     }
+#                 del d_ge77
+
+#             del mu_data, obs_arr, mu_is_ge77
+#             gc.collect()
+
+#         else:
+#             # ---- Multi-run layout (1e8): stream one run at a time ---------------
+#             # For each (okey, pop) key accumulate:
+#             #   e_sum     — sum of muon-level values across all runs (for E_full)
+#             #   sem_means — list of per-run sem_mean arrays (averaged at the end)
+#             #   sem_stds  — list of per-run sem_std arrays
+#             # Each run has ~N_FIXED muons, so per-run bootstrap is an unbiased
+#             # estimator of the full-population SEM at any N ≤ N_FIXED.
+#             e_sum:     dict[tuple, np.ndarray] = {}
+#             sem_means: dict[tuple, list]        = {}
+#             sem_stds:  dict[tuple, list]        = {}
+#             n_mu_total   = 0
+#             k_ge77_total = 0
+
+#             for i_run, rd_path in enumerate(run_dirs_mc):
+#                 print(f"    {rd_path.name} ...", end="  ", flush=True)
+#                 t_run  = time.perf_counter()
+#                 mu_r   = _load_single_run_for_mc(rd_path)
+#                 n_mu_r = mu_r["n_mu_total"]
+#                 print(f"N_mu={n_mu_r:,}", flush=True)
+#                 if n_mu_r == 0:
+#                     del mu_r
+#                     continue
+
+#                 n_mu_total   += n_mu_r
+#                 mu_is_ge77_r  = mu_r["mu_is_ge77"]
+#                 k_ge77_r      = int(mu_is_ge77_r.sum())
+#                 k_ge77_total += k_ge77_r
+
+#                 obs_arr_r: dict[str, np.ndarray] = {
+#                     "nc_count":        mu_r["mu_nc_count"],
+#                     "nc_position":     mu_r["mu_nc_pos"],
+#                     "nc_time":         mu_r["mu_nc_mean_time"],
+#                     "nc_n_gammas":     mu_r["mu_nc_mean_gammas"],
+#                     "nc_gamma_energy": mu_r["mu_nc_mean_energy_kev"],
+#                     "mu_ekin":         mu_r["mu_ekin"],
+#                     "mu_phi":          mu_r["mu_phi_rad"],
+#                     "mu_theta":        mu_r["mu_theta_rad"],
+#                     "mu_pos":          mu_r["mu_pos_mm"],
+#                 }
+
+#                 for i_obs, obs in enumerate(observables):
+#                     okey   = obs["key"]
+#                     is_vec = obs["vector"]
+#                     d_all_r = obs_arr_r[okey]
+
+#                     if is_vec:
+#                         d_ge77_r = d_all_r.copy()
+#                         d_ge77_r[~mu_is_ge77_r] = 0.0
+#                     else:
+#                         d_ge77_r = np.where(mu_is_ge77_r, d_all_r, 0.0)
+
+#                     for i_pop, (pop, data_r) in enumerate(
+#                         [("all", d_all_r), ("ge77", d_ge77_r)]
+#                     ):
+#                         if pop == "ge77" and k_ge77_r == 0:
+#                             continue
+
+#                         k_acc = (okey, pop)
+
+#                         # Accumulate sum for E_full
+#                         contrib = (np.sum(data_r, axis=0)
+#                                    if is_vec
+#                                    else np.float64(np.sum(data_r)))
+#                         if k_acc not in e_sum:
+#                             e_sum[k_acc] = contrib.copy() if is_vec else contrib
+#                         else:
+#                             e_sum[k_acc] = e_sum[k_acc] + contrib
+
+#                         # Per-run SEM bootstrap
+#                         seed_r = RANDOM_SEED + i_obs * 12 + i_ds * 2 + i_pop + i_run * 1000
+#                         sm_r, ss_r = _mc_sem_fixed(
+#                             data_r, n_vals, n_draws=MC_N_DRAWS,
+#                             seed=seed_r, vector=is_vec,
+#                         )
+#                         sem_means.setdefault(k_acc, []).append(sm_r)
+#                         sem_stds.setdefault(k_acc, []).append(ss_r)
+
+#                     del d_ge77_r
+
+#                 del mu_r, obs_arr_r, mu_is_ge77_r
+#                 gc.collect()
+#                 _log_resources(f"    run {rd_path.name}", t_run)
+
+#             print(f"  N_mu={n_mu_total:,}  k_ge77={k_ge77_total:,}", flush=True)
+
+#             # Combine per-run results
+#             for i_obs, obs in enumerate(observables):
+#                 okey   = obs["key"]
+#                 is_vec = obs["vector"]
+#                 for i_pop, pop in enumerate(["all", "ge77"]):
+#                     k_acc = (okey, pop)
+#                     if k_acc not in sem_means or not sem_means[k_acc]:
+#                         continue
+#                     # E_full: total sum / total muon count
+#                     total_sum = e_sum[k_acc]
+#                     if is_vec:
+#                         E_full = float(np.linalg.norm(total_sum / n_mu_total))
+#                     else:
+#                         E_full = float(total_sum / n_mu_total)
+#                     # SEM: mean over per-run estimates (each run is an unbiased draw)
+#                     sem_mean = np.mean(sem_means[k_acc], axis=0)
+#                     sem_std  = np.mean(sem_stds[k_acc],  axis=0)
+#                     results[(ds_key, okey, pop)] = {
+#                         "sem_mean":   sem_mean,
+#                         "sem_std":    sem_std,
+#                         "E_full":     E_full,
+#                         "n_mu_total": n_mu_total,
+#                         "k_ge77":     k_ge77_total,
+#                     }
+
+#             del e_sum, sem_means, sem_stds
+#             gc.collect()
+
+#         _log_resources(f"  dataset '{ds_key}' done", t_ds)
+
+#     # ---- Plot: one figure per population (all / Ge77) -----------------------
+#     n_obs   = len(observables)
+#     ncols   = 2
+#     nrows   = (n_obs + ncols - 1) // ncols
+#     n_arr_f = n_vals.astype(np.float64)
+
+#     for pop_filter, pop_title, fname in [
+#         ("all",  "All muons",          "mc_uncertainty_scaling_muon_level_all.png"),
+#         ("ge77", "Ge77-producing muons", "mc_uncertainty_scaling_muon_level_ge77.png"),
+#     ]:
+#         fig, axes = plt.subplots(nrows, ncols, figsize=(15, 5.5 * nrows))
+#         axes_flat = np.array(axes).flatten()
+
+#         for idx, obs in enumerate(observables):
+#             ax   = axes_flat[idx]
+#             okey = obs["key"]
+
+#             ax2 = ax.twinx()
+#             ax2.set_yscale("log")
+#             ax2.set_ylabel(r"$\rho_N = \Delta E_N\,/\,|E_N|$",
+#                            fontsize=9, color="dimgray")
+#             ax2.tick_params(labelsize=8, colors="dimgray")
+#             ax2.axhline(RHO_THRESH, color="gray", linestyle=":",
+#                         linewidth=0.9, alpha=0.55)
+
+#             ref_n0: float | None   = None
+#             ref_sem0: float | None = None
+
+#             for ds_key in dataset_dirs:
+#                 color = DS_COLORS.get(ds_key, "black")
+#                 key   = (ds_key, okey, pop_filter)
+#                 if key not in results:
+#                     continue
+#                 r        = results[key]
+#                 sem_mean = r["sem_mean"]
+#                 sem_std  = r["sem_std"]
+#                 E_full   = r["E_full"]
+#                 k        = r["k_ge77"]
+#                 n_mu_tot = r["n_mu_total"]
+
+#                 if pop_filter == "all":
+#                     label = f"{ds_key}  (N={n_mu_tot:,})"
+#                 elif ds_key == "1e6":
+#                     label = f"{ds_key}  (k≈{k:,}, high variance)"
+#                 else:
+#                     label = f"{ds_key}  (k≈{k:,})"
+
+#                 ax.plot(n_arr_f, sem_mean, "-", color=color,
+#                         linewidth=1.5, label=label)
+#                 _rel = np.where(sem_mean > 0, sem_std / sem_mean, 0.0)
+#                 ax.fill_between(
+#                     n_arr_f,
+#                     np.maximum(sem_mean * np.exp(-_rel), 1e-30),
+#                     sem_mean * np.exp(_rel),
+#                     color=color, alpha=0.12,
+#                 )
+
+#                 # Anchor 1/√N reference at the first valid 1e8 point
+#                 if ds_key == "1e8" and ref_n0 is None:
+#                     _v = np.isfinite(sem_mean) & (sem_mean > 0)
+#                     if _v.any():
+#                         i0       = int(np.argmax(_v))
+#                         ref_n0   = float(n_arr_f[i0])
+#                         ref_sem0 = float(sem_mean[i0])
+
+#                 # ρ_N on right axis (dotted, same colour)
+#                 if abs(E_full) > 0:
+#                     rho    = sem_mean / abs(E_full)
+#                     finite = np.isfinite(rho) & (rho > 0)
+#                     if finite.any():
+#                         ax2.plot(n_arr_f[finite], rho[finite],
+#                                  ":", color=color, linewidth=0.9, alpha=0.65)
+#                         below = np.where(finite & (rho < RHO_THRESH))[0]
+#                         if below.size > 0:
+#                             n_star = n_arr_f[below[0]]
+#                             ax2.annotate(
+#                                 f"N*≈{n_star:.0e}",
+#                                 xy=(n_star, RHO_THRESH),
+#                                 xytext=(4, 4), textcoords="offset points",
+#                                 fontsize=6, color=color, alpha=0.85,
+#                             )
+#                         else:
+#                             ax2.text(
+#                                 n_arr_f[-1], rho[finite][-1],
+#                                 "ρ > 5%",
+#                                 fontsize=6, color=color, alpha=0.70,
+#                                 ha="right", va="bottom",
+#                             )
+
+#             if ref_n0 is not None and ref_sem0 is not None:
+#                 n_ref = np.logspace(np.log10(ref_n0), np.log10(float(N_FIXED)), 100)
+#                 ax.plot(n_ref, ref_sem0 * np.sqrt(ref_n0 / n_ref),
+#                         ":", color="gray", linewidth=1.2, alpha=0.7,
+#                         label=r"$1/\sqrt{N}$ ref.")
+
+#             ax.set_xscale("log")
+#             ax.set_yscale("log")
+#             ax.set_xlabel("Sample size $N$", fontsize=11)
+#             ax.set_ylabel(obs["ylabel"], fontsize=10)
+#             ax.set_title(obs["label"], fontsize=12)
+#             ax.legend(fontsize=7, loc="upper right")
+#             ax.tick_params(labelsize=9)
+
+#         for extra in axes_flat[n_obs:]:
+#             extra.set_visible(False)
+
+#         fig.suptitle(
+#             f"Monte Carlo Uncertainty Scaling — Muon-Level Sampling  [{pop_title}]\n"
+#             r"Left axis: $\Delta E_N = S/\sqrt{N}$  |  "
+#             r"Right axis (dotted): $\rho_N = \Delta E_N\,/\,|E_N|$, threshold 5\,\%"
+#             rf"   ({MC_N_DRAWS} draws per grid point)",
+#             fontsize=12,
+#         )
+#         plt.tight_layout()
+#         _save(fig, out_dir / fname)
+
+#     _log_resources("mc_uncertainty_analysis_muon_level done", _t0)
 
 
 # ---------------------------------------------------------------------------

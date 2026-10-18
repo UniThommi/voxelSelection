@@ -3,6 +3,14 @@ Data loading and sparse matrix construction.
 
 Reads HDF5 simulation data, applies stochastic rounding with area ratios,
 and constructs sparse binary matrices for greedy optimization.
+
+Input is the ML-format HDF5 written by simPostProcessing (``target_matrix``
+with photon hits per NC and SSD voxel, ``target_columns``, ``voxels/``,
+``phi_matrix``, ``event_ids``, ``primaries``). The hits are SSD hits; the
+per-area PMT/SSD ratios convert them to PMT-equivalent hits before the
+per-voxel threshold m is applied.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import time
@@ -70,179 +78,6 @@ def get_valid_voxel_mask(
     return valid_mask
 
 
-def load_and_binarize(
-    filepath: str,
-    m: int,
-    area_ratios: dict[str, float],
-    seed: int = 42,
-    verbose: bool = True,
-    skip_validity: bool = False,
-) -> tuple[sparse.csc_matrix, np.ndarray, np.ndarray, np.ndarray, int]:
-    """
-    Load HDF5 data, apply stochastic rounding with area ratios,
-    and construct sparse binary matrix B.
-
-    B[i, j] = 1 iff the stochastically rounded hit count for voxel j
-    and NC i is >= m.
-
-    Parameters
-    ----------
-    filepath : str
-        Path to the HDF5 file.
-    m : int
-        Minimum number of (rounded) hits per voxel for detection.
-    area_ratios : dict[str, float]
-        PMT/SSD ratios per area (SSD hits are multiplied by these).
-    seed : int
-        Random seed for stochastic rounding.
-    verbose : bool
-        Print progress information.
-    skip_validity : bool
-        If True, skip the PMT placement filter and use all voxels.
-
-    Returns
-    -------
-    B : sparse.csc_matrix
-        Binary (NCs x voxels) matrix in CSC format.
-    voxel_ids : np.ndarray
-        Array of voxel ID strings, mapping column index -> voxel name.
-    centers : np.ndarray, shape (num_voxels, 3)
-        Voxel center coordinates (x, y, z) in mm.
-    layers : np.ndarray of str, shape (num_voxels,)
-        Layer label per voxel.
-    num_primaries : int
-        Total number of primary events.
-    """
-    rng = np.random.default_rng(seed)
-
-    with h5py.File(filepath, "r") as f:
-        voxel_keys = sorted(
-            c.decode() if isinstance(c, bytes) else str(c)
-            for c in f["target_columns"][:]
-        )
-
-        # PMT placement filter (optional)
-        if skip_validity:
-            valid_keys = voxel_keys
-            num_voxels = len(valid_keys)
-            if verbose:
-                print(f"PMT placement filter skipped: "
-                      f"using all {num_voxels} voxels")
-        else:
-            valid_mask = get_valid_voxel_mask(f, voxel_keys, verbose=verbose)
-            valid_keys = [k for k, v in zip(voxel_keys, valid_mask) if v]
-            num_voxels = len(valid_keys)
-
-        # Read centers and layers for valid voxels
-        centers = np.empty((num_voxels, 3), dtype=np.float64)
-        layers = np.empty(num_voxels, dtype=object)
-        for i, vkey in enumerate(valid_keys):
-            centers[i] = f[f"voxels/{vkey}/center"][:]
-            layer_raw = f[f"voxels/{vkey}/layer"][()]
-            layers[i] = (layer_raw.decode() if isinstance(layer_raw, bytes)
-                         else str(layer_raw))
-
-        # Map valid voxel keys to matrix columns
-        target_columns = [
-            c.decode() if isinstance(c, bytes) else str(c)
-            for c in f["target_columns"][:]
-        ]
-        target_col_to_idx = {c: i for i, c in enumerate(target_columns)}
-        valid_col_indices_arr = np.array(
-            [target_col_to_idx[k] for k in valid_keys]
-        )
-
-        # Build ratio vector for valid voxels only
-        ratio_vec = np.array(
-            [area_ratios.get(layers[c], 1.0) for c in range(num_voxels)],
-            dtype=np.float64,
-        )
-
-        num_ncs = f["target_matrix"].shape[0]
-        num_primaries = int(f["primaries"][()])
-
-        if verbose:
-            print(f"Loading data: {num_ncs} NCs, {num_voxels} valid voxels, "
-                  f"{num_primaries} primaries")
-            print(f"Binarization threshold m = {m}")
-            print(f"Area ratios: {area_ratios}")
-            print(f"Stochastic rounding seed: {seed}")
-
-        # Row-block reading — aligned to chunk layout (1000, 9583)
-        BATCH_SIZE = 1000
-        rows_list: list[np.ndarray] = []
-        cols_list: list[np.ndarray] = []
-
-        target_dset = f["target_matrix"]
-        total_batches = (num_ncs - 1) // BATCH_SIZE + 1
-        t_load_start = time.time()
-        t_last_report = t_load_start
-
-        for batch_idx, row_start in enumerate(range(0, num_ncs, BATCH_SIZE)):
-            row_end = min(row_start + BATCH_SIZE, num_ncs)
-
-            # Read full chunk row slice, then extract valid columns
-            block = target_dset[row_start:row_end, :]
-            block_valid = block[:, valid_col_indices_arr]
-
-            # Stochastic rounding + binarization
-            rounded = stochastic_round_block(block_valid, ratio_vec, rng)
-            mask = rounded >= m
-
-            nc_idx, col_idx = np.nonzero(mask)
-            if len(nc_idx) > 0:
-                rows_list.append(nc_idx.astype(np.int64) + row_start)
-                cols_list.append(col_idx.astype(np.int32))
-
-            # Progress report every ~5 seconds
-            t_now = time.time()
-            if verbose and (t_now - t_last_report >= 5.0
-                            or batch_idx == total_batches - 1):
-                elapsed = t_now - t_load_start
-                frac = (batch_idx + 1) / total_batches
-                eta = (elapsed / frac - elapsed) if frac > 0.01 else 0.0
-                rows_per_sec = row_end / elapsed if elapsed > 0 else 0.0
-                print(f"  Batch {batch_idx+1}/{total_batches} "
-                      f"({frac:.1%}) | "
-                      f"{rows_per_sec:,.0f} rows/s | "
-                      f"elapsed {elapsed:.1f}s | "
-                      f"ETA {eta:.1f}s", end="\r")
-                t_last_report = t_now
-
-        t_load_elapsed = time.time() - t_load_start
-        if verbose:
-            print(f"\n  Target matrix loaded and binarized in "
-                  f"{t_load_elapsed:.1f}s "
-                  f"({num_ncs / t_load_elapsed:,.0f} rows/s)")
-
-        if len(rows_list) > 0:
-            all_rows = np.concatenate(rows_list)
-            all_cols = np.concatenate(cols_list)
-        else:
-            all_rows = np.array([], dtype=np.int64)
-            all_cols = np.array([], dtype=np.int32)
-        all_data = np.ones(len(all_rows), dtype=np.int8)
-
-        B = sparse.coo_matrix(
-            (all_data, (all_rows, all_cols)),
-            shape=(num_ncs, num_voxels),
-            dtype=np.int8,
-        ).tocsc()
-
-        nnz = B.nnz
-        density = nnz / (num_ncs * num_voxels) * 100 if num_ncs * num_voxels > 0 else 0
-        mem_mb = (B.data.nbytes + B.indices.nbytes + B.indptr.nbytes) / 1e6
-
-        if verbose:
-            print(f"Sparse matrix: {num_ncs} x {num_voxels}, "
-                  f"nnz = {nnz:,} ({density:.3f}%), "
-                  f"memory = {mem_mb:.1f} MB")
-
-        voxel_ids = np.array(valid_keys)
-
-    return B, voxel_ids, centers, layers, num_primaries
-
-
 def load_muon_data(
     filepath: str,
     num_ncs: int,
@@ -250,6 +85,11 @@ def load_muon_data(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Load muon-related fields from the phi group in the HDF5 file.
+
+    ``nC_time_in_ns`` and ``nC_flag_Ge77`` come from ``phi_matrix``; the
+    muon identity comes from ``event_ids`` (``run_id``, ``muon_id``),
+    because ``muon_id`` restarts in every run and is only unique together
+    with ``run_id``.
 
     Parameters
     ----------
@@ -263,8 +103,11 @@ def load_muon_data(
     Returns
     -------
     global_muon_id : np.ndarray, shape (num_ncs,), dtype int64
+        Dense muon index 0..n_muons-1 built from unique (run_id, muon_id).
     nc_time_ns : np.ndarray, shape (num_ncs,), dtype float64
+        Capture time relative to the muon (ns).
     nc_flag_ge77 : np.ndarray, shape (num_ncs,), dtype bool
+        True for the capture that produced Ge77.
     """
     with h5py.File(filepath, "r") as f:
         phi_columns = [c.decode() if isinstance(c, bytes) else str(c)
@@ -326,20 +169,35 @@ def build_muon_index(
     """
     Build data structures for muon-level optimization.
 
+    A muon is a Ge77 muon if any of its NCs carries the Ge77 flag (no time
+    restriction). An NC is eligible, i.e. counts towards the muon
+    multiplicity W, if it belongs to a Ge77 muon and its capture time lies
+    in the muon window [MUON_TIME_WINDOW_MIN_NS, MUON_TIME_WINDOW_MAX_NS]
+    = [1 µs, 200 µs]. Ge77-flagged NCs inside the window count as well.
+
     Parameters
     ----------
     global_muon_id : np.ndarray, shape (num_ncs,)
+        Muon index per NC (from ``load_muon_data``).
     nc_time_ns : np.ndarray, shape (num_ncs,)
+        Capture time per NC (ns).
     nc_flag_ge77 : np.ndarray, shape (num_ncs,)
+        Ge77 flag per NC.
     verbose : bool
+        Print a summary.
 
     Returns
     -------
     nc_to_muon_local : np.ndarray, shape (num_ncs,), dtype int32
+        Index into the Ge77-muon arrays for eligible NCs, -1 otherwise.
     muon_nc_counts : np.ndarray, shape (num_ge77_muons,), dtype int32
+        Number of eligible NCs per Ge77 muon (upper bound for its W count).
     ge77_muon_global_ids : np.ndarray, shape (num_ge77_muons,), dtype int64
+        Sorted ``global_muon_id`` values of the Ge77 muons.
     eligible_nc_mask : np.ndarray, shape (num_ncs,), dtype bool
+        True for eligible NCs.
     num_ge77_muons : int
+        Number of Ge77 muons.
     """
     from .geometry import MUON_TIME_WINDOW_MIN_NS, MUON_TIME_WINDOW_MAX_NS
 
@@ -354,7 +212,11 @@ def build_muon_index(
     )
 
     belongs_to_ge77_muon = np.isin(global_muon_id, ge77_muon_global_ids)
-    eligible_nc_mask = belongs_to_ge77_muon & in_time_window & (~nc_flag_ge77)
+    # Every NC inside the muon window counts towards W, including the
+    # Ge77-flagged capture itself: the tagger cannot tell which capture
+    # produced Ge77, and the PMT-side evaluation
+    # (ratio_analysis.coverage_analysis.evaluate_muon) counts it as well.
+    eligible_nc_mask = belongs_to_ge77_muon & in_time_window
 
     nc_to_muon_local = np.full(num_ncs, -1, dtype=np.int32)
     eligible_indices = np.where(eligible_nc_mask)[0]
@@ -370,7 +232,7 @@ def build_muon_index(
         n_muons_with_any = int((muon_nc_counts >= 1).sum())
         print(f"\nMuon index built:")
         print(f"  Ge77 muons: {num_ge77_muons:,}")
-        print(f"  Eligible NCs (non-Ge77, in time window): {n_eligible:,}")
+        print(f"  Eligible NCs (in time window): {n_eligible:,}")
         print(f"  Ge77 muons with ≥1 eligible NC: {n_muons_with_any:,}")
         print(f"  Time window: [{MUON_TIME_WINDOW_MIN_NS/1e3:.0f} µs, "
               f"{MUON_TIME_WINDOW_MAX_NS/1e3:.0f} µs]")
@@ -444,12 +306,19 @@ def load_raw_sparse(
     By default only valid voxels (PMT-placeable) are kept; pass
     ``skip_validity=True`` to include all voxels.
 
+    Keeping the raw counts (instead of a binarized matrix) lets callers
+    re-binarize with other ratios or seeds (sensitivity analysis,
+    evaluation) without reading the HDF5 file again.
+
     Parameters
     ----------
     filepath : str
         Path to HDF5 file.
     verbose : bool
         Print progress.
+    skip_validity : bool
+        If True, keep all voxels instead of only those where a PMT fits
+        (``geometry.is_valid_pmt_position``).
 
     Returns
     -------
@@ -637,6 +506,13 @@ def binarize_from_raw(
 ) -> sparse.csc_matrix:
     """
     Apply stochastic rounding to raw hits and binarize.
+
+    Each SSD hit count n is multiplied by the PMT/SSD ratio r of its area
+    and rounded stochastically: floor(n·r) plus 1 with probability equal to
+    the fractional part. The expected value is exactly n·r, while the result
+    stays an integer photon count that can be compared with the per-voxel
+    threshold m. ``B[i, j] = 1`` iff the rounded count of NC i on voxel j
+    is >= m. The fixed seed makes B reproducible.
 
     Parameters
     ----------
