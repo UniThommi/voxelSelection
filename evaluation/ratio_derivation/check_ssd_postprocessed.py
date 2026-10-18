@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import psutil
 
+from pmtopt.local_paths import local_path
 from ratio_analysis.geometry import GeometryConfig
 from ratio_analysis.photon_filters import get_chunk_size
 
@@ -33,10 +34,10 @@ from ratio_analysis.photon_filters import get_chunk_size
 # ---------------------------------------------------------------------------
 # Default paths
 # ---------------------------------------------------------------------------
-_BASE = ("/pscratch/sd/t/tbuerger/data/proofeDetectionEfficiencies/"
-         "experimentEfficiencyRatio/PMTs_div_SSD_1/")
-_DEFAULT_RAW_DIR = _BASE + "ratio_0.588_SSD/run_20260209_211629"
-_DEFAULT_PP_DIR  = _BASE + "ratio_0.588_SSD_postprocessed"
+# Root directory from local_paths.json (git-ignored); None if not configured.
+_BASE = "proofeDetectionEfficiencies/experimentEfficiencyRatio/PMTs_div_SSD_1/"
+_DEFAULT_RAW_DIR = local_path("scratch", _BASE + "ratio_0.588_SSD/run_20260209_211629")
+_DEFAULT_PP_DIR  = local_path("scratch", _BASE + "ratio_0.588_SSD_postprocessed")
 
 # Module-level output dir (set from args in main)
 OUTPUT_DIR: Path = Path.cwd() / "ssd_raw_vs_postprocessed_plots"
@@ -482,8 +483,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="SSD raw vs. postprocessed efficiency comparison.")
     p.add_argument('--raw-dir', type=str, default=_DEFAULT_RAW_DIR,
+                   required=_DEFAULT_RAW_DIR is None,
                    help="SSD raw run directory (default: %(default)s)")
     p.add_argument('--pp-dir',  type=str, default=_DEFAULT_PP_DIR,
+                   required=_DEFAULT_PP_DIR is None,
                    help="SSD postprocessed directory (default: %(default)s)")
     p.add_argument('--output-dir', type=Path,
                    default=Path.cwd() / "ssd_raw_vs_postprocessed_plots",

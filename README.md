@@ -95,6 +95,7 @@ voxelSelection/
 ├── data_structure/         HDF5 layouts of the raw simulations and of the post-processed input
 ├── docs/                   figures used in this README
 ├── tests/                  unit tests (rotation, W2 metric)
+├── local_paths.example.json  format of the git-ignored local_paths.json (data root directories)
 └── pyproject.toml          package `pmtopt`
 ```
 
@@ -280,12 +281,15 @@ pip install -e .
 ```
 
 This installs `pmtopt` with numpy, scipy, matplotlib, h5py and POT. The scripts in `evaluation/` and
-`musun_nc_analysis/` additionally need pandas and psutil.
+`musun_nc_analysis/` import `pmtopt` as well (hence the editable install) and additionally need
+pandas and psutil.
 
 ## Usage
 
-The default paths of the evaluation scripts point to the author's cluster installation, so pass all
-paths explicitly. Every command prints its options with `--help`.
+Some evaluation scripts have default paths below machine-specific root directories, which are read
+from a git-ignored `local_paths.json` in the repository root (format: `local_paths.example.json`).
+Without this file, these scripts require all paths as arguments. Every command prints its options
+with `--help`.
 
 ```bash
 # greedy selection of 300 PMTs, NC mode and muon-Ge77 mode

@@ -63,6 +63,7 @@ import psutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
+from pmtopt.local_paths import local_path
 from ratio_analysis.geometry import GeometryConfig
 from ratio_analysis.pmt_data import (
     load_pmt_data, get_pmts_by_layer, build_uid_to_pmt_map, crosscheck_uids,
@@ -92,29 +93,39 @@ from ratio_analysis.io import scan_optimal_zones, save_results_txt, save_results
 
 
 # ---------------------------------------------------------------------------
-# Default paths (mode-specific; overridden by CLI args)
+# Default paths (mode-specific; overridden by CLI args). The root directory is
+# read from local_paths.json (git-ignored); all values are None if it is not
+# configured, and the paths must then be passed as arguments.
 # ---------------------------------------------------------------------------
-_MUSUN_BASE = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface")
+_MUSUN_BASE = "optPhotonSensitiveSurface"
 _MUSUN_DEFAULTS = {
-    'ssd_dir':    _MUSUN_BASE / "rawOpticalSSDFromMusunNCS",
-    'pmt_dir':    _MUSUN_BASE / "rawOpticalHomogeneousPMTsFromMusunNCs",
-    'output_dir': _MUSUN_BASE / "zone_analysis_results",
-    'compare':    Path("/pscratch/sd/t/tbuerger/data/proofeDetectionEfficiencies/"
-                       "experimentEfficiencyRatio/PMTs_div_SSD_1/zone_analysis/"
-                       "zone_ratio_results.json"),
+    'ssd_dir':    local_path("scratch", _MUSUN_BASE + "/rawOpticalSSDFromMusunNCS"),
+    'pmt_dir':    local_path("scratch", _MUSUN_BASE + "/rawOpticalHomogeneousPMTsFromMusunNCs"),
+    'output_dir': local_path("scratch", _MUSUN_BASE + "/zone_analysis_results"),
+    'compare':    local_path("scratch", "proofeDetectionEfficiencies/"
+                                        "experimentEfficiencyRatio/PMTs_div_SSD_1/zone_analysis/"
+                                        "zone_ratio_results.json"),
 }
 
-_HOMO_BASE = Path("/pscratch/sd/t/tbuerger/data/proofeDetectionEfficiencies/"
-                  "experimentEfficiencyRatio/PMTs_div_SSD_1")
+_HOMO_BASE = "proofeDetectionEfficiencies/experimentEfficiencyRatio/PMTs_div_SSD_1"
 _HOMO_DEFAULTS = {
-    'ssd_dir':    _HOMO_BASE / "ratio_1_SSD",
-    'pmt_dir':    _HOMO_BASE / "ratio_1_PMTs",
-    'output_dir': _HOMO_BASE / "zone_analysis",
+    'ssd_dir':    local_path("scratch", _HOMO_BASE + "/ratio_1_SSD"),
+    'pmt_dir':    local_path("scratch", _HOMO_BASE + "/ratio_1_PMTs"),
+    'output_dir': local_path("scratch", _HOMO_BASE + "/zone_analysis"),
 }
 
-_PMT_JSON_DEFAULT = Path(
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs/homogeneous300PMTs.json"
+_PMT_JSON_DEFAULT = local_path(
+    "scratch", "optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs/homogeneous300PMTs.json"
 )
+
+
+def _mode_default(mode: str, key: str, flag: str) -> Path:
+    """Mode-specific default path; exits with an error if it is not configured."""
+    value = (_MUSUN_DEFAULTS if mode == 'musun' else _HOMO_DEFAULTS)[key]
+    if value is None:
+        raise SystemExit(f"error: {flag} is required (no default, local_paths.json "
+                         f"is not configured)")
+    return Path(value)
 
 FRACTION_TOLERANCE = 0.01
 ZONE_SCAN_RANGE    = range(2, 30)
@@ -1188,6 +1199,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--pmt-dir', type=Path, default=None,
                    help="PMT run_* base directory (default: mode-specific)")
     p.add_argument('--pmt-json', type=Path, default=_PMT_JSON_DEFAULT,
+                   required=_PMT_JSON_DEFAULT is None,
                    help="PMT positions JSON file")
     p.add_argument('--output-dir', type=Path, default=None,
                    help="Output directory for results/plots (default: mode-specific)")
@@ -1250,14 +1262,11 @@ def main() -> None:
 
     # Fill mode-specific path defaults (ssd_dir is irrelevant in per-pmt-only mode)
     if not per_pmt_only and args.ssd_dir is None:
-        args.ssd_dir = (_MUSUN_DEFAULTS['ssd_dir'] if args.mode == 'musun'
-                        else _HOMO_DEFAULTS['ssd_dir'])
+        args.ssd_dir = _mode_default(args.mode, 'ssd_dir', '--ssd-dir')
     if args.pmt_dir is None:
-        args.pmt_dir = (_MUSUN_DEFAULTS['pmt_dir'] if args.mode == 'musun'
-                        else _HOMO_DEFAULTS['pmt_dir'])
+        args.pmt_dir = _mode_default(args.mode, 'pmt_dir', '--pmt-dir')
     if args.output_dir is None:
-        args.output_dir = (_MUSUN_DEFAULTS['output_dir'] if args.mode == 'musun'
-                           else _HOMO_DEFAULTS['output_dir'])
+        args.output_dir = _mode_default(args.mode, 'output_dir', '--output-dir')
 
     compare_mode    = args.compare is not None
     zone_scan_areas = args.zone_scan if args.zone_scan else []

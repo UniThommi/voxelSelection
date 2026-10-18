@@ -32,25 +32,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from pmtopt.local_paths import local_path
+
 
 # ─────────────────────────────────────────────────────────────
 # Default paths
 # ─────────────────────────────────────────────────────────────
-_DEFAULT_PMT_SIM_DIR = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-    "rawOpticalHomogeneousPMTsFromMusunNCs/run_20260216_195734"
+# Root directory from local_paths.json (git-ignored); None if not configured.
+_DEFAULT_PMT_SIM_DIR = local_path(
+    "scratch",
+    "optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs/run_20260216_195734",
 )
-_DEFAULT_SSD_POSTPROCESSED_FILE = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-    "MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5"
+_DEFAULT_SSD_POSTPROCESSED_FILE = local_path(
+    "scratch", "optPhotonSensitiveSurface/MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5",
 )
-_DEFAULT_MERGED_NCS_CSV_DIR = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-    "gammaGunFormatOpticalSSD"
+_DEFAULT_MERGED_NCS_CSV_DIR = local_path(
+    "scratch", "optPhotonSensitiveSurface/gammaGunFormatOpticalSSD",
 )
-_DEFAULT_RAW_NC_SIM_DIR = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-    "rawMusunNCsSSD"
+_DEFAULT_RAW_NC_SIM_DIR = local_path(
+    "scratch", "optPhotonSensitiveSurface/rawMusunNCsSSD",
 )
 
 MAX_PMTS = 300
@@ -72,20 +72,24 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         '--pmt-sim-dir', type=str, default=_DEFAULT_PMT_SIM_DIR,
+        required=_DEFAULT_PMT_SIM_DIR is None,
         help="Directory with raw optical PMT HDF5 files (output_t*.hdf5) "
              "(default: %(default)s)"
     )
     p.add_argument(
         '--ssd-file', type=str, default=_DEFAULT_SSD_POSTPROCESSED_FILE,
+        required=_DEFAULT_SSD_POSTPROCESSED_FILE is None,
         help="SSD postprocessed HDF5 file (default: %(default)s)"
     )
     p.add_argument( # FIX not needed anymore
         '--merged-ncs-csv-dir', type=str, default=_DEFAULT_MERGED_NCS_CSV_DIR,
+        required=_DEFAULT_MERGED_NCS_CSV_DIR is None,
         help="Directory containing merged_ncs.csv for NC-to-run mapping "
              "(default: %(default)s)"
     )
     p.add_argument(
         '--raw-nc-sim-dir', type=str, default=_DEFAULT_RAW_NC_SIM_DIR,
+        required=_DEFAULT_RAW_NC_SIM_DIR is None,
         help="Directory containing raw NC simulation run subdirectories "
              "(default: %(default)s)"
     )

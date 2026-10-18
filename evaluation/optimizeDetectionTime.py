@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from pmtopt.local_paths import required_local_path
+
 
 # =============================================================================
 # CONFIGURATION — edit here
@@ -40,8 +42,9 @@ from typing import Dict, List, Optional, Set, Tuple
 SOURCE = 'musun'  # 'homogeneous' or 'musun'
 
 # --- Common settings (apply to both sources) ---
-PMT_JSON_PATH = Path("/global/cfs/projectdirs/legend/users/tbuerger/sim/data/"
-                     "optPhotonSensitiveSurface/homogeneous300PMTpositions_currentDist.json")
+# Root directories from local_paths.json (git-ignored), see pmtopt.local_paths.
+PMT_JSON_PATH = Path(required_local_path(
+    "cfs", "sim/data/optPhotonSensitiveSurface/homogeneous300PMTpositions_currentDist.json"))
 
 # Geometry (baseline)
 R_ZYLINDER = 4300.0
@@ -73,25 +76,25 @@ MULTIPLICITY_m = 1          # Minimum photons per PMT to count as "fired"
 # --- Source-specific paths and settings ---
 
 if SOURCE == 'homogeneous':
-    SCAN_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                    "optimalDistance/homogeneousNCs")
-    BASELINE_DIR = Path("/pscratch/sd/t/tbuerger/data/proofeDetectionEfficiencies/"
-                        "experimentEfficiencyRatio/PMTs_div_SSD_1/ratio_1_PMTs")
-    OUTPUT_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                      "optimalDistance/homogeneousNCs/timing_analysis")
+    SCAN_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/optimalDistance/homogeneousNCs"))
+    BASELINE_DIR = Path(required_local_path(
+        "scratch", "proofeDetectionEfficiencies/experimentEfficiencyRatio/PMTs_div_SSD_1/ratio_1_PMTs"))
+    OUTPUT_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/optimalDistance/homogeneousNCs/timing_analysis"))
     GE77_MUON_ONLY = False
 
 elif SOURCE == 'musun':
     # Sim1: NC data
-    NC_DATA_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                       "rawMusunNCs/run_001")
+    NC_DATA_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/rawMusunNCs/run_001"))
     # Sim2: optical photon data
-    SCAN_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                    "optimalDistance/musunNCs")
-    BASELINE_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                        "rawOpticalHomogeneousPMTsFromMusunNCs/run_001")
-    OUTPUT_DIR = Path("/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-                      "optimalDistance/musunNCs/timing_analysis")
+    SCAN_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/optimalDistance/musunNCs"))
+    BASELINE_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs/run_001"))
+    OUTPUT_DIR = Path(required_local_path(
+        "scratch", "optPhotonSensitiveSurface/optimalDistance/musunNCs/timing_analysis"))
     GE77_MUON_ONLY = True
     EXPECTED_PMTS_WARNING = 292  # Known reduced config, warn but don't abort
     # Area-restricted multiplicity: only PMTs on the analysis area count

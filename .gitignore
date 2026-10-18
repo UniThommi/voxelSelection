@@ -12,3 +12,4 @@ settings*
 *.egg-info
 *.txt
 !data_structure/*.txt
+local_paths.json

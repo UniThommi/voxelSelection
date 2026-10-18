@@ -15,16 +15,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
+from pmtopt.local_paths import local_path
 
-_DEFAULT_SSD_FILE = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/"
-    "MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5"
+
+# Root directory from local_paths.json (git-ignored); None if not configured.
+_DEFAULT_SSD_FILE = local_path(
+    "scratch", "optPhotonSensitiveSurface/MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5",
 )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Histogram of SSD voxel hit counts.")
-    p.add_argument('--ssd-file', type=Path, default=Path(_DEFAULT_SSD_FILE),
+    p.add_argument('--ssd-file', type=Path, default=_DEFAULT_SSD_FILE,
+                   required=_DEFAULT_SSD_FILE is None,
                    help="SSD postprocessed HDF5 file (default: %(default)s)")
     p.add_argument('--output-dir', type=Path, default=Path.cwd() / "comparison_plots",
                    help="Output directory for plots (default: %(default)s)")

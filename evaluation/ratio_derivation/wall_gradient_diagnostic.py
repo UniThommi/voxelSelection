@@ -29,6 +29,7 @@ import h5py
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from pmtopt.local_paths import local_path
 from pmtopt.geometry import R_ZYLINDER, Z_CUT_BOT, Z_CUT_TOP
 from ratio_analysis.photon_filters import (
     get_chunk_size, checkRadialMomentumVectorized,
@@ -39,15 +40,14 @@ from ratio_analysis.photon_filters import (
 # ---------------------------------------------------------------------------
 # Default paths
 # ---------------------------------------------------------------------------
-_BASE = Path("/pscratch/sd/t/tbuerger/data/proofeDetectionEfficiencies/"
-             "experimentEfficiencyRatio/PMTs_div_SSD_1")
-_DEFAULT_SSD_DIR    = _BASE / "ratio_1_SSD"
-_DEFAULT_PMT_DIR    = _BASE / "ratio_1_PMTs"
-_DEFAULT_PMT_JSON   = Path(
-    "/global/cfs/projectdirs/legend/users/tbuerger/sim/data/"
-    "optPhotonSensitiveSurface/homogeneous300PMTpositions_currentDist.json"
+# Root directories from local_paths.json (git-ignored); None if not configured.
+_BASE = "proofeDetectionEfficiencies/experimentEfficiencyRatio/PMTs_div_SSD_1"
+_DEFAULT_SSD_DIR    = local_path("scratch", _BASE + "/ratio_1_SSD")
+_DEFAULT_PMT_DIR    = local_path("scratch", _BASE + "/ratio_1_PMTs")
+_DEFAULT_PMT_JSON   = local_path(
+    "cfs", "sim/data/optPhotonSensitiveSurface/homogeneous300PMTpositions_currentDist.json"
 )
-_DEFAULT_OUTPUT_DIR = _BASE / "zone_analysis" / "diagnostics"
+_DEFAULT_OUTPUT_DIR = local_path("scratch", _BASE + "/zone_analysis/diagnostics")
 
 NC_TIME_WINDOW = 200.0  # ns
 
@@ -623,12 +623,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="NC source vs. photon detection diagnostic analysis.")
     p.add_argument('--ssd-dir',    type=Path, default=_DEFAULT_SSD_DIR,
+                   required=_DEFAULT_SSD_DIR is None,
                    help="SSD run_* base directory (default: %(default)s)")
     p.add_argument('--pmt-dir',    type=Path, default=_DEFAULT_PMT_DIR,
+                   required=_DEFAULT_PMT_DIR is None,
                    help="PMT run_* base directory (default: %(default)s)")
     p.add_argument('--pmt-json',   type=Path, default=_DEFAULT_PMT_JSON,
+                   required=_DEFAULT_PMT_JSON is None,
                    help="PMT positions JSON file (default: %(default)s)")
     p.add_argument('--output-dir', type=Path, default=_DEFAULT_OUTPUT_DIR,
+                   required=_DEFAULT_OUTPUT_DIR is None,
                    help="Output directory for plots (default: %(default)s)")
     p.add_argument('--areas', nargs='+', default=['pit', 'top', 'wall', 'bot'],
                    metavar='AREA',

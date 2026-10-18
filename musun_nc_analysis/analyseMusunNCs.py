@@ -35,6 +35,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
+from pmtopt.local_paths import local_path
+
 try:
     import psutil as _psutil
     _HAS_PSUTIL = True
@@ -49,9 +51,8 @@ GAMMA_GROUP = "/hit/CaptureGammas"
 VERTICES_GROUP = "/hit/vertices"
 PARTICLES_GROUP = "/hit/particles"
 
-DEFAULT_DATA_PATH = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
-)
+# Root directory from local_paths.json (git-ignored); None if not configured.
+DEFAULT_DATA_PATH = local_path("scratch", "optPhotonSensitiveSurface/rawMusunNCs")
 NUM_RUNS_DEFAULT = 10
 # Every MUSUN run simulates exactly this many primary muons.  Cross-checked
 # against the unique muon count in /hit/vertices when loading each run.
@@ -3040,11 +3041,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--data-path",
         default=DEFAULT_DATA_PATH,
+        required=DEFAULT_DATA_PATH is None,
         help="Root directory containing run_001/ … run_010/ sub-directories.",
     )
     p.add_argument(
         "--output-path",
         default=DEFAULT_DATA_PATH,
+        required=DEFAULT_DATA_PATH is None,
         help="Base output directory.  A 'musun_nc_analysis/' sub-directory is "
              "created inside it.  Defaults to --data-path.",
     )

@@ -51,18 +51,17 @@ from analyseMusunNCs import (
     _log_resources, _save, plot_ratio, _annotate_ge77_quantiles,
     extend_bins_with_zero_bin, _mark_zero_bin, make_log_bins,
 )
+from pmtopt.local_paths import local_path
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 OPTICAL_GROUP = "/hit/optical"
-DEFAULT_SIM2_PATH = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface"
-    "/rawOpticalHomogeneousPMTsFromMusunNCs"
+# Root directory from local_paths.json (git-ignored); None if not configured.
+DEFAULT_SIM2_PATH = local_path(
+    "scratch", "optPhotonSensitiveSurface/rawOpticalHomogeneousPMTsFromMusunNCs"
 )
-DEFAULT_SIM1_PATH = (
-    "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawMusunNCs"
-)
+DEFAULT_SIM1_PATH = local_path("scratch", "optPhotonSensitiveSurface/rawMusunNCs")
 NUM_RUNS_DEFAULT = 10
 PMT_UID_MIN = 10_000_000
 PMT_UID_MAX = 1_000_000_000
@@ -1249,10 +1248,13 @@ def main() -> None:
         description="Optical photon light analysis for homogeneous PMT simulation."
     )
     parser.add_argument("--data-path", default=DEFAULT_SIM2_PATH,
+                        required=DEFAULT_SIM2_PATH is None,
                         help="Sim 2 root directory (default: %(default)s)")
     parser.add_argument("--sim1-path", default=DEFAULT_SIM1_PATH,
+                        required=DEFAULT_SIM1_PATH is None,
                         help="Sim 1 (MUSUN NC) root directory (default: %(default)s)")
     parser.add_argument("--output-path", default=DEFAULT_SIM2_PATH,
+                        required=DEFAULT_SIM2_PATH is None,
                         help="Base output directory.  A 'light_analysis/' sub-directory "
                              "is created inside it.  Defaults to --data-path.")
     parser.add_argument("--runs", type=int, default=NUM_RUNS_DEFAULT,

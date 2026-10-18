@@ -3,6 +3,8 @@
 Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
 import json
+import zlib
+
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,10 +74,9 @@ def compute_radial_fractions(
     PMT_CATHODE_RADIUS); a PMT that straddles a zone boundary contributes
     to each zone with its area fraction.
     """
-    # Note: hash() of a str is salted per Python process (PYTHONHASHSEED), so
-    # this seed, and hence the sampled fractions, differ between runs unless
-    # PYTHONHASHSEED is fixed.
-    rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
+    # Seed from the PMT index via CRC32: the same in every run (hash() of a
+    # str is salted per Python process and would change the fractions).
+    rng = np.random.default_rng(seed=zlib.crc32(str(pmt.index).encode()))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
     radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
 
@@ -104,8 +105,8 @@ def compute_z_fractions(
     n_samples: int = MC_SAMPLES,
 ) -> Dict[int, float]:
     """Fraction of PMT cathode area in each z-zone via MC sampling (wall PMTs)."""
-    # Seed is per-process salted, see compute_radial_fractions.
-    rng = np.random.default_rng(seed=hash(pmt.index) % (2**31))
+    # Reproducible per-PMT seed, see compute_radial_fractions.
+    rng = np.random.default_rng(seed=zlib.crc32(str(pmt.index).encode()))
     angles = rng.uniform(0, 2 * np.pi, n_samples)
     radii  = PMT_CATHODE_RADIUS * np.sqrt(rng.uniform(0, 1, n_samples))
     sample_z = pmt.z + radii * np.cos(angles)

@@ -184,10 +184,6 @@ def run_single_greedy_from_raw(
         allocation = compute_per_area_N(N, areas=areas, verbose=False)
         all_selected_filtered: list[int] = []
 
-        if optimize == "muon-ge77":
-            shared_nc_detected = np.zeros(B.shape[0], dtype=bool)
-            shared_muon_counts = np.zeros(num_ge77_muons, dtype=np.int32)
-
         for area_name in ["pit", "bot", "top", "wall"]:
             n_area = allocation[area_name]
             if n_area == 0:
@@ -210,7 +206,7 @@ def run_single_greedy_from_raw(
                 )
                 all_selected_filtered.extend(int(area_indices[i]) for i in sel_local)
             elif optimize == "muon-ge77":
-                sel_local, _, nc_det, muon_det, _ = greedy_select_muon(
+                sel_local, _, _, _, _ = greedy_select_muon(
                     B_area, N=n_area, W=W,
                     nc_to_muon_local=nc_to_muon_local,
                     eligible_nc_mask=eligible_nc_mask,
@@ -222,8 +218,6 @@ def run_single_greedy_from_raw(
                     dynamic=dynamic, worst=worst, verbose=False,
                 )
                 all_selected_filtered.extend(int(area_indices[i]) for i in sel_local)
-                shared_nc_detected |= nc_det
-                shared_muon_counts += muon_det
             del B_area
 
         # Map filtered-column indices back to original global column indices
@@ -235,7 +229,17 @@ def run_single_greedy_from_raw(
                 coverage_counts[B.indices[s:e]] += 1
             final_eff = int(np.sum(coverage_counts >= M)) / B.shape[0]
         else:
-            n_det = int(np.sum(shared_muon_counts >= W))
+            # Evaluate the combined layout once: an NC seen in several areas
+            # counts once towards the W count of its muon.
+            nc_cov = np.zeros(B.shape[0], dtype=np.int16)
+            for col in selected_cols_filtered:
+                s, e = B.indptr[col], B.indptr[col + 1]
+                nc_cov[B.indices[s:e]] += 1
+            muon_counts = np.bincount(
+                nc_to_muon_local[(nc_cov >= M) & eligible_nc_mask],
+                minlength=num_ge77_muons,
+            )
+            n_det = int(np.sum(muon_counts >= W))
             final_eff = n_det / num_ge77_muons if num_ge77_muons > 0 else 0.0
         selected_cols = [int(global_idx[i]) for i in selected_cols_filtered]
     else:

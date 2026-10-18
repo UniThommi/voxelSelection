@@ -495,10 +495,6 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         )
         all_selected_cols: list[int] = []
 
-        if args.optimize == "muon-ge77":
-            shared_nc_detected = np.zeros(B.shape[0], dtype=bool)
-            shared_muon_counts = np.zeros(num_ge77_muons, dtype=np.int32)
-
         for area_name in ["pit", "bot", "top", "wall"]:
             n_area = allocation[area_name]
             if n_area == 0:
@@ -536,7 +532,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                 all_selected_cols.extend(sel_global)
 
             elif args.optimize == "muon-ge77":
-                sel_local, _, nc_det_area, muon_det_area, _ = greedy_select_muon(
+                sel_local, _, _, _, _ = greedy_select_muon(
                     B_area, N=n_area, W=args.W,
                     nc_to_muon_local=nc_to_muon_local,
                     eligible_nc_mask=eligible_nc_mask,
@@ -551,8 +547,6 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
                 )
                 sel_global = [int(area_indices[i]) for i in sel_local]
                 all_selected_cols.extend(sel_global)
-                shared_nc_detected |= nc_det_area
-                shared_muon_counts += muon_det_area
 
         selected_cols = all_selected_cols
 
@@ -568,12 +562,22 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             muon_detected_counts = None
             nc_detected = None
         else:
-            num_muons_detected = int(np.sum(shared_muon_counts >= args.W))
+            # Evaluate the combined layout once: an NC seen in several areas
+            # counts once towards the W count of its muon (adding the per-area
+            # counts would count it once per area).
+            nc_cov = np.zeros(B.shape[0], dtype=np.int16)
+            for col in selected_cols:
+                s, e = B.indptr[col], B.indptr[col + 1]
+                nc_cov[B.indices[s:e]] += 1
+            nc_detected = nc_cov >= args.M
+            muon_detected_counts = np.bincount(
+                nc_to_muon_local[nc_detected & eligible_nc_mask],
+                minlength=num_ge77_muons,
+            ).astype(np.int32)
+            num_muons_detected = int(np.sum(muon_detected_counts >= args.W))
             final_eff = (num_muons_detected / num_ge77_muons
                          if num_ge77_muons > 0 else 0.0)
             efficiencies = [final_eff]
-            muon_detected_counts = shared_muon_counts
-            nc_detected = shared_nc_detected
             coverage_counts = None
 
     else:
@@ -829,7 +833,11 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             output_dir=sens_output_dir,
             dynamic=args.dynamic,
             worst=args.worst,
-            baseline_selected=selected_cols,
+            # Same column space as the perturbed runs (full voxel list).
+            baseline_selected=(
+                [int(_area_indices[c]) for c in selected_cols]
+                if selected_areas is not None else selected_cols
+            ),
             baseline_eff=final_eff,
             raw_rows=raw_rows,
             raw_cols=raw_cols,
