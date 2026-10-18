@@ -100,7 +100,7 @@ def stochastic_greedy_nc_m1(
     rng : np.random.Generator
         Random number generator.
     centers : np.ndarray, shape (num_voxels, 3)
-        Voxel center coordinates for spacing constraint.
+        Voxel centre coordinates for spacing constraint.
     layers : np.ndarray of str
         Layer label per voxel.
     min_spacing : float

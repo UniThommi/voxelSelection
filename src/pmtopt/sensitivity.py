@@ -1,7 +1,7 @@
 """
 Sensitivity analysis for area-ratio perturbation.
 
-Runs the greedy optimization for multiple perturbed ratios and compares
+Runs the greedy optimisation for multiple perturbed ratios and compares
 voxel selections via Jaccard similarity and coverage metrics.
 
 Why: the per-area PMT/SSD ratios are derived from simulation and carry an
@@ -109,7 +109,7 @@ def run_single_greedy_from_raw(
     verbose: bool = False,
 ) -> tuple[list[int], float]:
     """
-    Run greedy optimization from pre-loaded raw sparse data.
+    Run greedy optimisation from pre-loaded raw sparse data.
     No HDF5 I/O — only in-memory rounding and greedy (muon data is read
     from ``filepath`` only if ``muon_cache`` is None).
 
@@ -334,7 +334,7 @@ def run_sensitivity(
     min_spacing : float
         Minimum voxel spacing (mm).
     per_area : bool
-        Optimize each area independently.
+        Optimise each area independently.
     muon_weight_k : float or None
         Muon weighting parameter.
     seed : int

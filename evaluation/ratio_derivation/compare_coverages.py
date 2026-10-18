@@ -27,7 +27,7 @@ Usage
     python compare_coverages.py \\
         --muon-dir  /path/to/muon_sim \\
         --sim-dirs  /path/sim_hom /path/sim_opt1 /path/sim_opt2 \\
-        --labels    Homogeneous Optimized1 Optimized2 \\
+        --labels    Homogeneous Optimised1 Optimised2 \\
         [--configs  hom.json opt1.json opt2.json]  # optional, for W2 \\
         [--m 1] [--M-max 15] [--W-max 30] \\
         [--M-default 1] [--W-default 1] \\
@@ -1298,7 +1298,7 @@ def _cc_signal_survival(r: SetupResult, M: int, W: int, total_primaries: int) ->
     tn = total_primaries - tp - fp - fn
     return 1.0 - calc_veto_fraction(tp, fp, tn, fn)
 
-# ── Plot D — Coverage profile colored by W2 ────────────────────────────
+# ── Plot D — Coverage profile coloured by W2 ────────────────────────────
 
 def plot_w2_coverage_profile(
     results: list[SetupResult],
@@ -1306,10 +1306,10 @@ def plot_w2_coverage_profile(
     output_dir: str,
 ) -> None:
     """
-    Plot D — NC detection fraction vs M, one line per setup colored by W2.
+    Plot D — NC detection fraction vs M, one line per setup coloured by W2.
 
     Blue = low W2 (uniform); red = high W2 (clustered).
-    Setups without W2 are drawn in gray dashed.
+    Setups without W2 are drawn in grey dashed.
     """
     w2_res   = [r for r in results if r.w2_global is not None]
     gray_res = [r for r in results if r.w2_global is None]
@@ -3088,7 +3088,7 @@ def _draw_advisor_plot(
         )
     shared_sl_filt = _collect_stat_limit(_shared_sl_rows_raw) if _shared_sl_rows_raw else []
 
-    # Baseline color for the shared stat limit
+    # Baseline colour for the shared stat limit
     _bl_result = next(
         (r for r in results_to_show if "baseline" in r.label.lower()),
         results_to_show[0] if results_to_show else None,
@@ -3387,7 +3387,7 @@ def plot_ge_surv_setups_only(
         if _shared_sl_raw else []
     )
 
-    # Baseline color for the stat limit line
+    # Baseline colour for the stat limit line
     _bl_r = next(
         (r for r in results if "baseline" in r.label.lower()),
         results[0] if results else None,
@@ -4447,7 +4447,8 @@ def parse_args() -> argparse.Namespace:
         "--advisor-csv", default=None, metavar="CSV",
         help=(
             "Path to advisor's fom_data.csv for plot 25b overlay "
-            "(key=value format: threshold, signal_surv, ge_surv, FOM)."
+            "(format per line: 'x cut <W>, ge_77_surv: <val> +-<unc>, "
+            "sig_surv: <val> +-<unc>'; the '+-<unc>' parts are optional)."
         ),
     )
     parser.add_argument(
@@ -4458,7 +4459,7 @@ def parse_args() -> argparse.Namespace:
         "--statistical-limit-csv", default=None, metavar="CSV",
         help=(
             "Path to statistical-limit CSV for plot 25b overlay "
-            "(format per line: 'x cut <val>, ge_77_surv: <val>, sig_surv: <val>')."
+            "(same format as --advisor-csv)."
         ),
     )
     parser.add_argument(
@@ -4653,7 +4654,7 @@ def main() -> None:
     # ── 6. Generate plots ─────────────────────────────────────────────
     print("Generating plots ...")
 
-    # Build a global color map keyed by label so every setup uses the same
+    # Build a global colour map keyed by label so every setup uses the same
     # colour in all plots regardless of which subsets each function receives.
     _pal_global = _colors(len(results))
     color_map   = {r.label: _pal_global[i] for i, r in enumerate(results)}

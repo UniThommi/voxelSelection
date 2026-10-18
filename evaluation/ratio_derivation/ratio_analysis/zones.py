@@ -1,4 +1,4 @@
-"""Zone data structures, boundary optimization, and compare-mode helpers.
+"""Zone data structures, boundary optimisation, and compare-mode helpers.
 
 Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
@@ -126,7 +126,7 @@ def compute_z_fractions(
 
 
 # =============================================================================
-# ZONE BUILDERS (iterative density-equalization optimization)
+# ZONE BUILDERS (iterative density-equalisation optimisation)
 # =============================================================================
 
 def build_radial_zones(

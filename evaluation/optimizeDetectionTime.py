@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimize photon detection time by comparing different pit/wall distance configurations.
+Optimise photon detection time by comparing different pit/wall distance configurations.
 
 Two source modes, selected via the SOURCE constant below:
 
@@ -60,7 +60,7 @@ EXPECTED_PMTS = 300
 # Timing metric: 'mean', 'median', 'p90', 'p95', 'p99'
 TIMING_METRIC = 'mean'
 
-# Areas to analyze
+# Areas to analyse
 ANALYSIS_AREAS = ['pit', 'wall']
 
 # NC detection efficiency analysis
@@ -354,7 +354,7 @@ def process_scan_homogeneous(
                         nc_data_eff = nc_data
                         total_ncs += len(nc_data)
 
-                    # Initialize hit counters for NCs in this file
+                    # Initialise hit counters for NCs in this file
                     for key in nc_data_eff:
                         if key not in nc_pmt_hits:
                             nc_pmt_hits[key] = {}

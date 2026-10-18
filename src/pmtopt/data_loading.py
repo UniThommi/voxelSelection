@@ -2,7 +2,7 @@
 Data loading and sparse matrix construction.
 
 Reads HDF5 simulation data, applies stochastic rounding with area ratios,
-and constructs sparse binary matrices for greedy optimization.
+and constructs sparse binary matrices for greedy optimisation.
 
 Input is the ML-format HDF5 written by simPostProcessing (``target_matrix``
 with photon hits per NC and SSD voxel, ``target_columns``, ``voxels/``,
@@ -29,7 +29,7 @@ def get_valid_voxel_mask(
     verbose: bool = True,
 ) -> np.ndarray:
     """
-    Read voxel center and layer from HDF5 and determine which voxels
+    Read voxel centre and layer from HDF5 and determine which voxels
     can physically host a PMT.
 
     Parameters
@@ -167,7 +167,7 @@ def build_muon_index(
     verbose: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """
-    Build data structures for muon-level optimization.
+    Build data structures for muon-level optimisation.
 
     A muon is a Ge77 muon if any of its NCs carries the Ge77 flag (no time
     restriction). An NC is eligible, i.e. counts towards the muon
@@ -306,8 +306,8 @@ def load_raw_sparse(
     By default only valid voxels (PMT-placeable) are kept; pass
     ``skip_validity=True`` to include all voxels.
 
-    Keeping the raw counts (instead of a binarized matrix) lets callers
-    re-binarize with other ratios or seeds (sensitivity analysis,
+    Keeping the raw counts (instead of a binarised matrix) lets callers
+    re-binarise with other ratios or seeds (sensitivity analysis,
     evaluation) without reading the HDF5 file again.
 
     Parameters
@@ -331,7 +331,7 @@ def load_raw_sparse(
     voxel_ids : np.ndarray of str
         Voxel ID strings for valid voxels.
     centers : np.ndarray, shape (num_valid, 3)
-        Voxel centers.
+        Voxel centres.
     layers : np.ndarray of str
         Layer labels per valid voxel.
     num_ncs : int
@@ -505,7 +505,7 @@ def binarize_from_raw(
     seed: int = 42,
 ) -> sparse.csc_matrix:
     """
-    Apply stochastic rounding to raw hits and binarize.
+    Apply stochastic rounding to raw hits and binarise.
 
     Each SSD hit count n is multiplied by the PMT/SSD ratio r of its area
     and rounded stochastically: floor(n·r) plus 1 with probability equal to
@@ -527,7 +527,7 @@ def binarize_from_raw(
     area_ratios : dict[str, float]
         PMT/SSD ratios per area (SSD hits are multiplied by these).
     m : int
-        Hit threshold for binarization.
+        Hit threshold for binarisation.
     seed : int
         Random seed for stochastic rounding.
 
@@ -553,7 +553,7 @@ def binarize_from_raw(
     coin = rng.random(len(fractional)) < fractional
     rounded = floor_vals + coin.astype(np.int32)
 
-    # Binarize: keep only entries where rounded >= m
+    # Binarise: keep only entries where rounded >= m
     keep = rounded >= m
     b_rows = raw_rows[keep]
     b_cols = raw_cols[keep]

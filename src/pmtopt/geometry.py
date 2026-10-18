@@ -162,12 +162,12 @@ def is_valid_pmt_position(
 ) -> bool:
     """
     Check whether a PMT of given radius can be physically placed at
-    the voxel center without protruding beyond the detector boundaries.
+    the voxel centre without protruding beyond the detector boundaries.
 
     Parameters
     ----------
     center : np.ndarray, shape (3,)
-        Voxel center coordinates (x, y, z) in mm.
+        Voxel centre coordinates (x, y, z) in mm.
     layer : str
         Detector layer: "pit", "bot", "top", or "wall".
     pmt_r : float

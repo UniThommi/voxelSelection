@@ -9,7 +9,7 @@ on the cylindrical SSD detector.
   proportion to their surface, ideal positions are generated with
   Fibonacci spirals (disk or cylinder wall), and each ideal position is
   matched to the nearest unused valid voxel. The result is the homogeneous
-  reference layout against which optimized layouts are compared.
+  reference layout against which optimised layouts are compared.
 
 The module also provides the spatial-homogeneity metric W2 used throughout
 the repository: the exact 2-Wasserstein distance (``ot.emd2``) between the
@@ -738,7 +738,7 @@ def plot_all_voxels_2d(voxels_by_area: dict, output_path: str) -> None:
 
 
 def plot_all_voxels_3d(voxels_by_area: dict, output_path: str) -> None:
-    """3D scatter of all voxel centers, colored by area."""
+    """3D scatter of all voxel centres, coloured by area."""
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
 
@@ -765,7 +765,7 @@ def plot_all_voxels_3d(voxels_by_area: dict, output_path: str) -> None:
 
 
 def plot_selected_3d(selected_by_area: dict, all_by_area: dict, output_path: str) -> None:
-    """3D: all voxel centers in light gray + selected voxels colored by area."""
+    """3D: all voxel centres in light grey + selected voxels coloured by area."""
     fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection="3d")
 
@@ -903,7 +903,7 @@ def plot_homogeneity_from_selection(
     Parameters
     ----------
     centers : np.ndarray, shape (N, 3)
-        PMT center coordinates in mm.
+        PMT centre coordinates in mm.
     layers : np.ndarray, shape (N,)
         Area label per PMT ("pit" / "bot" / "top" / "wall").
     output_path : str

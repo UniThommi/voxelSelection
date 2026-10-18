@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PMT Position Optimization — unified entry point
+PMT Position Optimisation — unified entry point
 ================================================
 
 Command-line front end of the ``pmtopt`` package. The ``greedy`` subcommand
@@ -16,7 +16,7 @@ Subcommands:
   plot             Generate 3D plots for existing JSON voxel selection files
   plot-hits        Heatmap of the total photon hits per voxel (raw target_matrix)
   plot-homogeneity Per-area 2D position plot with per-area CV + global W2 from JSON
-  plot-w2          W2 explanation visualizations (plots A–F) from JSON config files
+  plot-w2          W2 explanation visualisations (plots A–F) from JSON config files
   sample-w2-range  Generate configurations spanning the W2 homogeneity range
 
 The examples assume the package is installed (``pip install -e .``).
@@ -93,7 +93,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
        holds the ratio-scaled (PMT-equivalent) hits
        (``ratio_scaling.write_ratio_hdf5``).
     2. ``--optimize nc|muon-ge77``: load the raw SSD hits, multiply them by
-       the per-area PMT/SSD ratios with stochastic rounding, binarize at the
+       the per-area PMT/SSD ratios with stochastic rounding, binarise at the
        per-voxel threshold ``m`` (``data_loading.binarize_from_raw``) and run
        ``greedy_select_nc`` or ``greedy_select_muon``. Writes ``.npz``,
        ``.json`` and ``.png`` files with a common, parameter-encoding base
@@ -113,7 +113,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("hdf5_file", type=str,
                         help="Path to the HDF5 data file.")
 
-    # --- Optimization parameters ---
+    # --- Optimisation parameters ---
     parser.add_argument("-N", type=int, default=None,
                         help="Number of voxels to select. "
                              "Required when --optimize is set.")
@@ -375,7 +375,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
         skip_validity=args.no_spacing,
     )
 
-    # ---- Load invalid voxel data for visualization ----
+    # ---- Load invalid voxel data for visualisation ----
     # Only needed when the validity filter is active (i.e. --no-spacing not set).
     if not args.no_spacing:
         _inv_centers, _inv_layers, _inv_hits = load_invalid_voxel_data(
@@ -577,7 +577,7 @@ def run_greedy(argv: Optional[list[str]] = None) -> None:
             coverage_counts = None
 
     else:
-        # Global optimization
+        # Global optimisation
         if args.optimize == "nc":
             mw_kwargs = {}
             if nc_muon_weight_data is not None:
@@ -1160,7 +1160,7 @@ def run_plot_homogeneity(argv: Optional[list[str]] = None) -> None:
 
 
 def run_plot_w2(argv: Optional[list[str]] = None) -> None:
-    """Generate W2 explanation visualizations (plots A–F) from JSON config files."""
+    """Generate W2 explanation visualisations (plots A–F) from JSON config files."""
     parser = argparse.ArgumentParser(
         description=(
             "Generate W2 homogeneity explanation plots (A–F) from PMT JSON config files.\n"

@@ -2,7 +2,7 @@
 Greedy voxel selection algorithms.
 
 Implements Maximum k-Coverage and Partial Set Multi-Cover for
-NC-level and Ge77-muon-level optimization targets. Exact optimisation
+NC-level and Ge77-muon-level optimisation targets. Exact optimisation
 is NP-hard; the greedy choice (largest marginal gain per step) is the
 standard approximation for coverage problems.
 
@@ -13,9 +13,9 @@ mode a Ge77 muon is detected when at least W of its NCs in the muon
 window are detected.
 
 Two modes for M>1 / W>1:
-  - Priority mode (default): Always optimize for M=1 (W=1 in muon mode),
-    but if a voxel can promote NCs from M-1 → M, prioritize it.
-    In muon-ge77 mode, further prioritize voxels that simultaneously
+  - Priority mode (default): Always optimise for M=1 (W=1 in muon mode),
+    but if a voxel can promote NCs from M-1 → M, prioritise it.
+    In muon-ge77 mode, further prioritise voxels that simultaneously
     cause a muon to reach W detected NCs at multiplicity M.
     Priority: W-trigger > M-trigger > M=1 baseline.
 
@@ -68,7 +68,7 @@ def _apply_spacing(
 ) -> None:
     """Apply minimum spacing constraint after selecting a voxel.
 
-    Marks every still-available voxel on the same layer whose center lies
+    Marks every still-available voxel on the same layer whose centre lies
     closer than ``sqrt(min_spacing_sq)`` to the selected voxel as unavailable
     (in place), so that two PMTs cannot overlap. Voxels on other layers are
     not affected.
@@ -104,10 +104,10 @@ def greedy_select_nc(
     snapshot_step: int | None = None,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray | None]:
     """
-    Greedy voxel selection maximizing NC-level threshold coverage.
+    Greedy voxel selection maximising NC-level threshold coverage.
 
     For M>1 (non-dynamic): Always computes gain at M=1. If any voxel
-    can promote NCs from M-1 → M, that voxel is prioritized (the one
+    can promote NCs from M-1 → M, that voxel is prioritised (the one
     promoting the most NCs wins). Otherwise the best M=1 voxel is taken.
 
     For M>1 (dynamic): Falls back through threshold levels when no
@@ -125,7 +125,7 @@ def greedy_select_nc(
     M : int
         Multiplicity threshold for detection.
     centers : np.ndarray or None
-        Voxel centers for spacing constraint.
+        Voxel centres for spacing constraint.
     layers : np.ndarray or None
         Layer labels for spacing constraint.
     min_spacing : float
@@ -278,7 +278,7 @@ def greedy_select_nc(
                 phase_tag = " [M=1]"
 
         elif use_dynamic_M:
-            # --- Dynamic mode (original behavior) ---
+            # --- Dynamic mode (original behaviour) ---
             if np.any(coverage_counts == (M - 1)):
                 effective_M = M
             else:
@@ -378,7 +378,7 @@ def greedy_select_muon(
     verbose: bool = True,
 ) -> tuple[list[int], list[float], np.ndarray, np.ndarray, np.ndarray]:
     """
-    Greedy voxel selection maximizing Ge77 muon detection.
+    Greedy voxel selection maximising Ge77 muon detection.
 
     A NC is "detected" iff it is seen by >= M selected voxels
     (coverage_counts[nc] >= M).
@@ -539,7 +539,7 @@ def greedy_select_muon(
                         w_weight[eligible_und_idx[at_w]] = 1
                 w_promotes = B.T.dot(w_weight)
 
-            # Selection logic: minimize, with exclusion tiers
+            # Selection logic: minimise, with exclusion tiers
             # Tier 1: Exclude voxels that promote W (if alternatives exist)
             # Tier 2: Among remaining, exclude voxels that promote M
             # Tier 3: Among remaining, take minimal gain
@@ -725,7 +725,7 @@ def greedy_select_muon(
 
                 for W_eff in range(W, 0, -1):
                     if W_eff == 1:
-                        # Pure M-level gain: maximize NCs crossing M_eff
+                        # Pure M-level gain: maximise NCs crossing M_eff
                         gains = B.T.dot(at_m_thresh.astype(np.int32))
                         gains[~available] = -1
                         best_v = int(np.argmax(gains))

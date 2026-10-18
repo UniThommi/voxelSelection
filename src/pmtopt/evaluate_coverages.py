@@ -6,7 +6,7 @@ PMT Configuration Evaluator
 Evaluates multiple PMT configurations (given as JSON voxel lists)
 against a common SSD dataset (simPostProcessing ML-format HDF5). The SSD
 hits are converted to PMT-equivalent hits with the per-area PMT/SSD ratios
-(stochastic rounding, one fixed seed for all configs) and binarized at m.
+(stochastic rounding, one fixed seed for all configs) and binarised at m.
 For each config and each (M, W):
 
   * NC level: an NC is detected if at least M selected voxels see it.
@@ -118,7 +118,7 @@ class ConfigResult:
 
         # NC statistics
         self.num_ncs: int = 0
-        self.num_visible: int = 0       # >= 1 hit in B (after binarization)
+        self.num_visible: int = 0       # >= 1 hit in B (after binarisation)
         self.num_detected: dict[int, int] = {}  # M -> count(coverage >= M)
 
         # Muon confusion: (M, W) -> {"TP", "FP", "TN", "FN"}
@@ -233,7 +233,7 @@ def load_shared_data(
             f"First 5: {list(missing)[:5]}"
         )
 
-    # Binarize ALL voxels once (consistent stochastic rounding seed)
+    # Binarise ALL voxels once (consistent stochastic rounding seed)
     if verbose:
         print(f"\nBinarizing all {num_all_voxels} voxels for reference ...")
     B_all = binarize_from_raw(
@@ -436,7 +436,7 @@ def evaluate_muon(
 
 
 # ===================================================================
-# Color helper
+# Colour helper
 # ===================================================================
 
 _SETUP_PALETTE: list[str] = [
@@ -466,7 +466,7 @@ _SETUP_PALETTE: list[str] = [
 
 
 def _get_colors(n: int) -> list[str]:
-    """Return n visually distinguishable colors, cycling _SETUP_PALETTE if n > 20."""
+    """Return n visually distinguishable colours, cycling _SETUP_PALETTE if n > 20."""
     return [_SETUP_PALETTE[i % len(_SETUP_PALETTE)] for i in range(n)]
 
 
@@ -1590,7 +1590,7 @@ def plot_w2_scatter(
     """Three-panel W2 scatter figure at fixed (M_fixed, W_fixed).
 
     Panel 1 — W2 vs NC coverage fraction for multiple M thresholds
-               (colored by M value; individual setups annotated).
+               (coloured by M value; individual setups annotated).
     Panel 2 — W2 vs Recall at (M_fixed, W_fixed), per-setup colours.
     Panel 3 — W2 vs Precision at (M_fixed, W_fixed), per-setup colours.
 
@@ -2124,7 +2124,7 @@ def plot_w2_correlation_matrix(
 
 
 # ===================================================================
-# Plot D — Coverage profile colored by W2
+# Plot D — Coverage profile coloured by W2
 # ===================================================================
 
 def plot_w2_coverage_profile(
@@ -2134,11 +2134,11 @@ def plot_w2_coverage_profile(
     verbose: bool = True,
 ) -> None:
     """
-    Plot D — NC detection fraction vs M, one line per config colored by W2.
+    Plot D — NC detection fraction vs M, one line per config coloured by W2.
 
-    Lines are colored on a continuous blue→red colormap (blue = low W2 =
+    Lines are coloured on a continuous blue→red colormap (blue = low W2 =
     uniform; red = high W2 = clustered).  Configs without W2 are drawn
-    in gray with a dashed line.  A colorbar on the right shows the W2
+    in grey with a dashed line.  A colorbar on the right shows the W2
     scale.
     """
     # "all_voxels" is drawn as a distinct black reference line — not included
@@ -4326,7 +4326,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("Loading PMT configurations")
         print("=" * 65)
 
-    # Baseline (always labeled "Baseline")
+    # Baseline (always labelled "Baseline")
     bl_voxels, bl_voxel_dicts, bl_data = load_config_json(args.baseline)
 
     # Area ratios — use baseline JSON ratios if present, else CLI/defaults
@@ -4506,9 +4506,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("Generating output")
         print("=" * 65)
 
-    # Canonical color map: sorted by W2 desc (all_voxels last).
+    # Canonical colour map: sorted by W2 desc (all_voxels last).
     # Built once and passed to every plot so the same config always uses
-    # the same color, regardless of which subset each plot displays.
+    # the same colour, regardless of which subset each plot displays.
     _sorted_for_colors = _sorted_by_w2(all_configs)
     _pal = _get_colors(len(_sorted_for_colors))
     color_map = {cfg.name: _pal[i] for i, cfg in enumerate(_sorted_for_colors)}

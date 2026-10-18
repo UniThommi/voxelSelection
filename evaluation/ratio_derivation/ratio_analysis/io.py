@@ -1,4 +1,4 @@
-"""Zone scan optimizer and result serialization.
+"""Zone scan optimiser and result serialisation.
 
 Author: Thomas Bürger, Eberhard Karls Universität Tübingen"""
 
@@ -130,7 +130,7 @@ def scan_optimal_zones(
     return best_n, scan_data
 
 
-# ─── Result serialization ─────────────────────────────────────────────────────
+# ─── Result serialisation ─────────────────────────────────────────────────────
 
 def save_results_txt(
     output_file: Path,

@@ -5,7 +5,7 @@ SSD–PMT Correlation Analysis
 Validates the SSD surrogate: for each of N setups (PMT layouts), the same
 voxel positions are evaluated twice, once with ratio-scaled SSD data
 (``pmtopt`` pipeline: binarize_from_raw, same B construction as the greedy
-optimizer) and once with the full PMT simulation of that layout
+optimiser) and once with the full PMT simulation of that layout
 (ratio_analysis.raw_loading / coverage_analysis). NC coverage per M, Ge77
 muon recall per (M, W) and the FoM are compared setup by setup (Pearson and
 Spearman correlation, relative deviation (SSD − PMT) / PMT, ranking
@@ -62,7 +62,7 @@ Fixed-ratio mode (default, intended) — evaluate at explicitly given per-layer 
         --muon-dir  /path/to/nc_truth/ \\
         --ssd-hdf5  /path/to/data.hdf5 \\
         --setup-dirs /path/A /path/B /path/C \\
-        [--labels  Homogeneous Optimized1 Optimized2] \\
+        [--labels  Homogeneous Optimised1 Optimised2] \\
         --pit 0.500 --bot 0.467 --top 0.467 --wall 0.545 \\
         [--m 1] [--M-max 15] [--W-max 20] [--W-default 1] \\
         [--min-M-fom 6] [--output-dir ./correlation_results] \\
@@ -288,8 +288,6 @@ def align_ssd_to_pmt(hdf5_path: str, nc_truth: pd.DataFrame) -> dict:
     mask (every NC in the muon window). The SSD rows are used in file order
     (``ssd_row_order`` = identity); the comparison with the PMT side is done
     on aggregated per-setup metrics, not NC by NC. ``nc_truth`` is not used.
-    Note: the warning text mentions "nc_time_ns ordering", but no reordering
-    is applied.
     """
     with h5py.File(hdf5_path, "r") as f:
         phi_columns = [c.decode() if isinstance(c, bytes) else str(c) for c in f["phi_columns"][:]]
@@ -309,10 +307,12 @@ def align_ssd_to_pmt(hdf5_path: str, nc_truth: pd.DataFrame) -> dict:
 
     num_ncs = len(global_muon_id)
     if has_alignment_cols:
-        warnings.warn("SSD phi_matrix alignment columns found but key-based alignment not yet "
-                      "implemented — falling back to nc_time_ns ordering (approximate).")
+        warnings.warn("SSD phi_matrix alignment columns found but NC-level alignment with the PMT "
+                      "simulation is not implemented — SSD rows are used in file order "
+                      "(the comparison uses per-setup aggregates).")
     else:
-        warnings.warn("SSD phi_matrix missing alignment columns — using nc_time_ns ordering (approximate).")
+        warnings.warn("SSD phi_matrix has no alignment columns — SSD rows are used in file order "
+                      "(the comparison uses per-setup aggregates, not NC-level alignment).")
 
     ssd_row_order = np.arange(num_ncs, dtype=np.int64)
     (_, _, ge77_muon_global_ids, _, _) = build_muon_index(

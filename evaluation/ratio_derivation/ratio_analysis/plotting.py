@@ -418,7 +418,7 @@ def plot_area_flux(
     area_name: str,
     output_path: Path,
 ) -> None:
-    """Diagnostic: area-normalized photon flux per zone (SSD vs PMT)."""
+    """Diagnostic: area-normalised photon flux per zone (SSD vs PMT)."""
     if not area_results:
         return
 

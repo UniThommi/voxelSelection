@@ -1,5 +1,5 @@
 """
-Shared W2-correlation plotting helper and Wasserstein explanation visualizations.
+Shared W2-correlation plotting helper and Wasserstein explanation visualisations.
 
 Used by both:
   src/pmtopt/evaluate_coverages.py  (SSD / pmtopt pipeline)
@@ -256,13 +256,13 @@ def plot_w2_3d_scatter(
 
     _draw_3d_wireframe(ax, z_base, z_top)
 
-    # Reference points — small, gray, semi-transparent
+    # Reference points — small, grey, semi-transparent
     ref_areas = _classify_ref_by_area(ref)
     ax.scatter(ref[:, 0], ref[:, 1], ref[:, 2],
                c="lightgray", s=4, alpha=0.25, linewidths=0, zorder=1,
                label=f"Reference (M={len(ref):,})")
 
-    # PMT centers — colored by area
+    # PMT centres — coloured by area
     for area in ["pit", "bot", "top", "wall"]:
         mask = layers == area
         if not mask.any():
@@ -570,7 +570,7 @@ def plot_w2_cost_heatmap(
     T: Optional[np.ndarray] = None,
     cost_sq: Optional[np.ndarray] = None,
 ) -> None:
-    """Plot D — 3D scatter where each PMT is colored by its OT cost contribution."""
+    """Plot D — 3D scatter where each PMT is coloured by its OT cost contribution."""
     if T is None or cost_sq is None:
         T, cost_sq = _compute_ot_plan(centers, ref)
 

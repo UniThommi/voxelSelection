@@ -431,7 +431,7 @@ def _draw_area_patches(
     cmap,
     norm,
 ) -> None:
-    """Draw colored 195×195 mm² voxel rectangles onto ax for one area."""
+    """Draw coloured 195×195 mm² voxel rectangles onto ax for one area."""
     if area == "wall":
         for (cx, cy, cz), h in zip(centers, hits):
             phi = np.arctan2(cy, cx)
@@ -487,7 +487,7 @@ def plot_hit_heatmap(
 
     Layout: wall (large, top row spanning full width);
     pit / bot / top as three equal sub-panels in the bottom row.
-    All panels share the same color scale.
+    All panels share the same colour scale.
     """
     half = voxel_size_mm / 2.0
     phi_half = half / R_ZYLINDER  # arc → radians for the unrolled wall
@@ -548,10 +548,10 @@ def plot_marginal_gain_heatmap(
 ) -> None:
     """Heatmap of marginal gain per voxel after `step` greedy selections.
 
-    Color coding:
+    Colour coding:
       • available voxels  — viridis colormap scaled to [0, max_gain]
       • already selected  — bright red (#FF4444), clearly distinct
-      • spacing-excluded  — medium gray (#AAAAAA)
+      • spacing-excluded  — medium grey (#AAAAAA)
     """
     half = voxel_size_mm / 2.0
     phi_half = half / R_ZYLINDER
@@ -576,7 +576,7 @@ def plot_marginal_gain_heatmap(
     area_lims: dict[str, float] = {}
     layer_to_ax = {a: ax for a, ax in area_axes.items()}
 
-    # Draw invalid voxels first (gray, underneath the main layer)
+    # Draw invalid voxels first (grey, underneath the main layer)
     n_invalid = 0
     if invalid_centers is not None and len(invalid_centers) > 0:
         n_invalid = len(invalid_centers)
@@ -728,7 +728,7 @@ def _draw_area_voxels(
     edgecolor: str = "black",
     alpha: float = 0.65,
 ) -> None:
-    """Draw uniformly-colored voxel rectangles for one sub-surface onto ax."""
+    """Draw uniformly-coloured voxel rectangles for one sub-surface onto ax."""
     if area == "wall":
         for cx, cy, cz in centers:
             phi = np.arctan2(cy, cx)

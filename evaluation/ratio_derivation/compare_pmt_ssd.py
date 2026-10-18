@@ -230,7 +230,7 @@ def load_ssd_voxel_hits(voxel_ids: list) -> dict:
 # Step 3: Load voxel geometry for spatial plots
 # ─────────────────────────────────────────────────────────────
 def load_voxel_centers(voxel_ids: list) -> dict:
-    """Load voxel center coordinates from SSD postprocessed file.
+    """Load voxel centre coordinates from SSD postprocessed file.
 
     Returns {voxel_id: np.array([x, y, z])}.
     """

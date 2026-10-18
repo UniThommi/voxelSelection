@@ -233,23 +233,23 @@ def _gen_disk_points(
         phi = np.concatenate(phi_parts) if phi_parts else phi_fib
 
     elif alg == "clustered_surface":
-        # Many small clusters whose centers are Fibonacci-distributed over the annulus.
+        # Many small clusters whose centres are Fibonacci-distributed over the annulus.
         # The Fibonacci placement guarantees even global coverage regardless of n_clusters.
         # W2 diversity comes from two independent knobs:
         #   - n_clusters (random, drawn in _draw_surface_params): few → large gaps → high W2;
         #     many → surface covered with clusters → lower W2.
         #   - alpha: controls intra-cluster spread; alpha=1 → tight (highest W2 contribution),
         #     alpha=0 → widest-before-merge (lowest W2 contribution).
-        # Hard separation: sigma is capped at half the minimum Fibonacci center distance so
+        # Hard separation: sigma is capped at half the minimum Fibonacci centre distance so
         # that even at alpha=0 clusters remain geometrically distinct.
 
         n_clusters = min(params["n_clusters"], n_half)  # guard against tiny n_half
 
-        # Fibonacci cluster centers on the annulus
+        # Fibonacci cluster centres on the annulus
         c_phi = _fib_angles(n_clusters)
         c_r = _fib_annulus_r(n_clusters, r_min, r_max)
 
-        # Minimum pairwise Euclidean distance between cluster centers (flat disk)
+        # Minimum pairwise Euclidean distance between cluster centres (flat disk)
         if n_clusters >= 2:
             cx = c_r * np.cos(c_phi)
             cy = c_r * np.sin(c_phi)
@@ -273,7 +273,7 @@ def _gen_disk_points(
         for ci, nc in enumerate(pts_per):
             if nc == 0:
                 continue
-            # Uniform draw in a disk of radius sigma around the cluster center.
+            # Uniform draw in a disk of radius sigma around the cluster centre.
             # r_off ∈ [0, sigma] with uniform linear sampling (slightly edge-weighted),
             # matching the style of multi_cluster.
             r_off = rng.uniform(0.0, sigma, nc)
@@ -439,17 +439,17 @@ def _gen_wall_points(
 
     elif alg == "clustered_surface":
         # Analogue of the disk clustered_surface algorithm for the cylindrical wall.
-        # Cluster centers: Fibonacci phi + uniformly-spaced z — covers the cylinder evenly.
+        # Cluster centres: Fibonacci phi + uniformly-spaced z — covers the cylinder evenly.
         # Intra-cluster offsets are drawn in the (arc-length, z) plane so that sigma
         # has consistent physical units (mm) on both axes.
 
         n_clusters = min(params["n_clusters"], n_half)
 
-        # Cluster centers: Fibonacci azimuth + uniform z
+        # Cluster centres: Fibonacci azimuth + uniform z
         c_phi = (2.0 * np.pi * np.arange(n_clusters) / _GOLDEN) % (2.0 * np.pi)
         c_z = z_min + (np.arange(n_clusters) + 0.5) / max(n_clusters, 1) * (z_max - z_min)
 
-        # Minimum pairwise distance between cluster centers in 3D Cartesian space.
+        # Minimum pairwise distance between cluster centres in 3D Cartesian space.
         # Using chord distance (≤ arc-length) is conservative: sigma_max is slightly
         # smaller than it would be under arc-length, so the hard-separation guarantee
         # holds with margin.
@@ -621,7 +621,7 @@ def _draw_surface_params(
         p["pole_pos"] = str(rng.choice(["top", "bottom"]))
 
     elif alg == "clustered_surface":
-        # n_clusters: number of Fibonacci-distributed cluster centers (for one half; mirrored
+        # n_clusters: number of Fibonacci-distributed cluster centres (for one half; mirrored
         # to 2*n_clusters after C2 symmetry).  Range 2..max ensures at least 2 points per
         # cluster on average and keeps max clusters physically sensible.
         n_half = max(1, n_area // 2)
@@ -670,7 +670,7 @@ def _snap_to_voxels(
     # Tracking selected state
     selected: list[int] = []
     selected_set: set[int] = set()
-    # Per-layer list of selected centers for spacing checks (fast path)
+    # Per-layer list of selected centres for spacing checks (fast path)
     sel_by_layer: dict[str, list[np.ndarray]] = {a: [] for a in _AREA_ORDER}
 
     def _spacing_ok(col: int) -> bool:

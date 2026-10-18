@@ -158,7 +158,7 @@ def find_nearest_candidate(
     rotated_center: tuple[float, float, float],
     candidates: list[dict],
 ) -> dict:
-    """Return the candidate whose center is closest to rotated_center."""
+    """Return the candidate whose centre is closest to rotated_center."""
     centers = np.array([v["center"] for v in candidates])   # (N, 3)
     target = np.array(rotated_center)
     idx = int(np.argmin(np.linalg.norm(centers - target, axis=1)))

@@ -2,6 +2,7 @@ selected/
 *.npz
 *.jpg
 *.png
+!docs/*.png
 *.csv
 __pycache__/
 *.pyc
@@ -10,3 +11,4 @@ __pycache__/
 settings*
 *.egg-info
 *.txt
+!data_structure/*.txt
